@@ -13,7 +13,7 @@ def test_collects_entry_contract_and_argument_mapping():
         (source / "api.py").write_text(
             """from fastapi import APIRouter\nrouter = APIRouter()\ndef calculate(value: int) -> int:\n    return value\n@router.get('/value')\nasync def route(value: int):\n    return await calculate(value)\n"""
         )
-        graph = analyze(root, ProjectConfig(source_roots=("src",), test_roots=(), script_roots=()))
+        graph, report = analyze(root, ProjectConfig(source_roots=("src",), test_roots=(), script_roots=()))
         route = graph.symbols["app.api.route"]
         assert route.entry_point == "api_route"
         assert route.async_ is True
@@ -21,6 +21,7 @@ def test_collects_entry_contract_and_argument_mapping():
         assert relation.kind == "AWAIT_CALLS"
         assert relation.target == "app.api.calculate"
         assert relation.arguments == [{"parameter": "value", "expression": "value", "inferred_type": "unknown"}]
+        assert report.is_clean()  # No failures for valid code
 def test_config_driven_risk_rules_and_entry_points():
     from lineagelens.config import AnalysisConfig, RiskRule
 
@@ -42,11 +43,14 @@ def test_config_driven_risk_rules_and_entry_points():
                 entry_points={"api_route": (".run",)},
             ),
         )
-        graph = analyze(root, config)
+        graph, report = analyze(root, config)
         prox = graph.symbols["app.service.prox"]
         fe = graph.symbols["app.service.fe"]
-        assert prox.risks == [{"category": "custom_rule", "severity": "critical", "evidence": "execute at line 2"}]
-        assert fe.risks == [{"category": "custom_rule", "severity": "critical", "evidence": "execute at line 4"}]
+        # resiliency signals now use Evidence; legacy .risks property still works
+        assert len(prox.resiliency) == 1
+        assert prox.resiliency[0].category == "custom_rule"
+        assert prox.resiliency[0].severity == "critical"
+        assert len(fe.resiliency) == 1
 
 
 def test_config_roundtrip_yaml(tmp_path):
