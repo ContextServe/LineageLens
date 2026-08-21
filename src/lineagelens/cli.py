@@ -12,6 +12,7 @@ import yaml
 
 from .analyzer import analyze
 from .config import ProjectConfig
+from .detect_config import detect_config
 
 
 def _plain(value: Any) -> Any:
@@ -23,8 +24,29 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def config_template() -> str:
-    return yaml.safe_dump(_plain(asdict(ProjectConfig())), sort_keys=False)
+def config_template(project: Path | None = None) -> tuple[str, list[str]]:
+    """Generate config template, optionally auto-detecting values.
+
+    Args:
+        project: Project directory for auto-detection (if None, uses defaults)
+
+    Returns:
+        (yaml_content, notes) tuple where notes are human-readable detection messages
+    """
+    if project and project.exists():
+        detection = detect_config(project)
+        config_dict = _plain(asdict(ProjectConfig(
+            source_roots=tuple(detection.source_roots),
+            test_roots=tuple(detection.test_roots),
+            frameworks=tuple(detection.frameworks),
+        )))
+        notes = detection.notes
+    else:
+        config_dict = _plain(asdict(ProjectConfig()))
+        notes = []
+
+    yaml_content = yaml.safe_dump(config_dict, sort_keys=False)
+    return yaml_content, notes
 
 
 def graph_path(project: Path, config: ProjectConfig) -> Path:
@@ -88,8 +110,29 @@ def main() -> None:
         destination = project / "lineagelens.yaml"
         if destination.exists():
             parser.error(f"{destination} already exists")
-        destination.write_text(config_template(), encoding="utf-8")
-        print(f"Created {destination}")
+        yaml_content, notes = config_template(project)
+        destination.write_text(yaml_content, encoding="utf-8")
+
+        # Print summary
+        print(f"✓ Created {destination}\n")
+
+        if notes:
+            print("Auto-detection results:")
+            for note in notes:
+                print(f"  {note}")
+
+        # Parse the YAML to show what was written
+        config = ProjectConfig.load(project, destination)
+        print("\nConfiguration written:")
+        print(f"  source_roots: {list(config.source_roots)}")
+        print(f"  test_roots: {list(config.test_roots)}")
+        print(f"  frameworks: {list(config.frameworks)}")
+
+        print("\nNext steps:")
+        print("  1. Review the configuration in lineagelens.yaml")
+        print("  2. Run: lineagelens analyze .")
+        print("  3. Optionally run: lineagelens serve . (for web UI)")
+
         return
 
     # analyze and serve commands

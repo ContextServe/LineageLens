@@ -37,20 +37,62 @@ pip install lineagelens[mcp]
 pip install lineagelens[web,mcp,llm]
 ```
 
-### 2. Analyze Your Project
+### 2. Initialize Configuration
 
 ```bash
 cd /path/to/your/project
+lineagelens init .
+```
+
+Creates `lineagelens.yaml` with auto-detected configuration:
+- **source_roots**: Where your Python code lives (auto-detects `src/`, `app/`, etc.)
+- **test_roots**: Where tests are located (auto-detects `tests/`, `test/`, etc.)
+- **frameworks**: What frameworks you use (auto-scans imports and dependencies)
+
+The init command prints a summary of what it found:
+```
+✓ Detected source roots: src
+✓ Detected test roots: tests
+✓ Detected frameworks: fastapi
+
+Configuration written:
+  source_roots: ['src']
+  test_roots: ['tests']
+  frameworks: ['fastapi']
+
+Next steps:
+  1. Review the configuration in lineagelens.yaml
+  2. Run: lineagelens analyze .
+  3. Optionally run: lineagelens serve . (for web UI)
+```
+
+You can edit `lineagelens.yaml` to customize risk rules and entry points (see [Configuration](#%EF%B8%8F-configuration) below).
+
+### 3. Analyze Your Project
+
+```bash
 lineagelens analyze .
 ```
 
-Creates `.lineagelens/graph.json` with your code structure and `.lineagelens/report.json` with analysis summary.
+Creates:
+- `.lineagelens/graph.json` — Code structure (symbols, relations, containers)
+- `.lineagelens/report.json` — Analysis summary with any failures or warnings
 
-### 3. Choose How to Use
+### 4. Choose How to Use
 
 ---
 
 ## 🎯 Four Ways to Use LineageLens
+
+**For all options**, start with initialization and analysis:
+```bash
+lineagelens init .       # Auto-detect config, creates lineagelens.yaml
+lineagelens analyze .    # Build graph.json and report.json
+```
+
+Then choose your integration below.
+
+---
 
 ### Option A: Claude Code (Easiest — No Hosting Required)
 
@@ -66,7 +108,7 @@ Add to `.claude/settings.json`:
   "mcpServers": {
     "lineagelens": {
       "command": "lineagelens-mcp",
-      "env": { "LINEAGELENS_PROJECT": "${workspaceFolder}" }
+      "env": { "LINEAGELENS_PROJECT": "/path/to/your/project" }
     }
   }
 }
@@ -164,7 +206,27 @@ lineagelens analyze . --strict
 
 ## 🔧 Configuration
 
-Create `lineagelens.yaml` to customize risk rules and entry points:
+### Auto-Detection with `init`
+
+```bash
+lineagelens init .
+```
+
+The `init` command auto-detects your project structure and creates `lineagelens.yaml` with:
+- **source_roots**: Scans for `src/`, `app/`, `lib/` directories and Python packages
+- **test_roots**: Finds `tests/`, `test/`, `spec/` directories
+- **frameworks**: Parses imports and `pyproject.toml` dependencies to detect frameworks you use
+
+Example output:
+```
+✓ Detected source roots: src
+✓ Detected test roots: tests
+✓ Detected frameworks: fastapi, strawberry
+```
+
+### Customizing Configuration
+
+Edit `lineagelens.yaml` to customize risk rules and entry points:
 
 ```yaml
 source_roots: [src, lib]
@@ -185,6 +247,13 @@ llm:
   model: gpt-4-turbo
   api_key_env: LINEAGELENS_LLM_API_KEY
 ```
+
+**Key fields**:
+- `source_roots` — Directories where your code lives (scanned for symbols)
+- `test_roots` — Directories to mark as test code (affects entry point detection)
+- `frameworks` — List of frameworks to detect for entry points (API routes, CLI commands, etc.)
+- `analysis.risk_rules` — Configurable patterns for security/performance risks
+- `llm` — Optional: LLM API config for generating descriptions (separate from deterministic analysis)
 
 ---
 

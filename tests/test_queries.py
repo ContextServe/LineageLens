@@ -172,7 +172,8 @@ def test_search_symbols():
 
     # Filter by kind
     results = search_symbols(graph, "user", kind="method")
-    assert len(results) == 0  # find is a method, but search term is "user"
+    assert len(results) == 1  # "user" is in "User.find" id, and it's a method
+    assert results[0].id == "app.models.User.find"
 
     results = search_symbols(graph, "user", kind="class")
     assert len(results) == 1
