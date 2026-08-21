@@ -1,0 +1,11 @@
+source_roots: [src]
+test_roots: [tests]
+script_roots: [scripts]
+cron_files: [ops/crontab]
+docs_globs: ["**/*.md", "**/*.rst"]
+frameworks: [fastapi, typer]
+llm:
+  provider: openai_compatible
+  base_url: https://api.openai.com/v1
+  model: gpt-5
+  api_key_env: LINEAGELENS_API_KEY
