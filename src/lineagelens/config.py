@@ -9,9 +9,15 @@ from typing import Any
 
 @dataclass(frozen=True)
 class LLMConfig:
+    """Configuration for optional LLM enrichment (Tier 3, probabilistic).
+
+    This config only applies to opt-in LLM-powered features like generating
+    method descriptions. It is NOT used for the deterministic analysis.
+    Users must explicitly enable LLM features and provide a valid API key.
+    """
     provider: str = "openai_compatible"
     base_url: str = "https://api.openai.com/v1"
-    model: str = "gpt-5"
+    model: str = "gpt-4-turbo"  # Fixed from "gpt-5" (which doesn't exist)
     api_key_env: str = "LINEAGELENS_API_KEY"
 
 
