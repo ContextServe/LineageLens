@@ -6,10 +6,9 @@ This module intentionally parses source and never imports the target project.
 from __future__ import annotations
 
 import ast
-import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 from .config import ProjectConfig
 from .model import CodeGraph, Relation, Symbol
@@ -29,7 +28,7 @@ def dotted(node: ast.AST) -> str | None:
 def expression(node: ast.AST) -> str:
     try:
         return ast.unparse(node)
-    except Exception:
+    except (ValueError, TypeError, AttributeError):
         return type(node).__name__
 
 
@@ -119,12 +118,14 @@ class Relationships(ast.NodeVisitor):
         return f"external:{raw}", False
 
     def mark_entry(self, node: ast.FunctionDef | ast.AsyncFunctionDef, symbol: Symbol) -> None:
+        entries = self.config.analysis.entry_points
         decorators = [dotted(item) or "" for item in node.decorator_list]
         for item in decorators:
-            if "fastapi" in self.config.frameworks and re.search(r"\.(get|post|put|patch|delete|websocket)$", item): symbol.entry_point = "api_route"
-            if "typer" in self.config.frameworks and item.endswith((".command", ".callback")): symbol.entry_point = "cli_command"
-            if item.endswith((".middleware", ".exception_handler", ".on_event")): symbol.entry_point = "framework_callback"
-            if item.endswith(("validator", "field_validator", "model_validator")): symbol.entry_point = "framework_callback"
+            if not item:
+                continue
+            if "fastapi" in self.config.frameworks and any(item.endswith(suffix) for suffix in entries.get("api_route", ())): symbol.entry_point = "api_route"
+            if "typer" in self.config.frameworks and any(item.endswith(suffix) for suffix in entries.get("cli_command", ())): symbol.entry_point = "cli_command"
+            if any(item.endswith(suffix) for suffix in entries.get("framework_callback", ())): symbol.entry_point = "framework_callback"
         if any(self.module.path.is_relative_to(self.root / part) for part in self.config.test_roots) and node.name.startswith("test_"): symbol.entry_point = "test"
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -152,10 +153,11 @@ class Relationships(ast.NodeVisitor):
             if raw and raw.endswith(("create_task", "ensure_future")): kind = "CREATES_TASK"
             self.graph.add_relation(Relation(self.current, target, kind, str(self.module.path.relative_to(self.root)), node.lineno,
                                              resolution="resolved" if resolved else "external_or_dynamic", arguments=arguments))
-            if raw and any(word in raw.lower() for word in ("execute", "insert", "update", "delete", "write", "save", "commit")):
-                self.graph.symbols[self.current].risks.append({"category": "data_write", "severity": "review", "evidence": f"{raw} at line {node.lineno}"})
-            if self.graph.symbols[self.current].async_ and raw and any(word in raw.lower() for word in ("requests.", "time.sleep", "subprocess.")):
-                self.graph.symbols[self.current].risks.append({"category": "blocking_in_async", "severity": "high", "evidence": f"{raw} at line {node.lineno}"})
+            for rule in self.config.analysis.risk_rules:
+                if rule.only_in_async and not self.graph.symbols[self.current].async_:
+                    continue
+                if raw and any(word.lower() in raw.lower() for word in rule.match_words):
+                    self.graph.symbols[self.current].risks.append({"category": rule.category, "severity": rule.severity, "evidence": f"{raw} at line {node.lineno}"})
         self.generic_visit(node)
 
     def visit_Return(self, node: ast.Return) -> None:

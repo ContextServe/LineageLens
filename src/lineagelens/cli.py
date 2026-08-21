@@ -4,22 +4,37 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from .analyzer import analyze
 from .config import ProjectConfig
 
 
-CONFIG_TEMPLATE = """source_roots: [src]\ntest_roots: [tests]\nscript_roots: [scripts]\ncron_files: []\ndocs_globs: [\"**/*.md\"]\nframeworks: [fastapi, typer]\nllm:\n  provider: openai_compatible\n  base_url: https://api.openai.com/v1\n  model: gpt-5\n  api_key_env: LINEAGELENS_API_KEY\n"""
+def _plain(value: Any) -> Any:
+    """Recursively convert tuples (from dataclass asdict) into YAML-friendly lists."""
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain(item) for item in value]
+    return value
 
 
-def graph_path(project: Path) -> Path:
-    return project / ".lineagelens" / "graph.json"
+def config_template() -> str:
+    return yaml.safe_dump(_plain(asdict(ProjectConfig())), sort_keys=False)
+
+
+def graph_path(project: Path, config: ProjectConfig) -> Path:
+    return project / config.output.directory / config.output.filename
 
 
 def build(project: Path) -> Path:
-    graph = analyze(project, ProjectConfig.load(project))
-    target = graph_path(project); target.parent.mkdir(exist_ok=True)
+    config = ProjectConfig.load(project)
+    graph = analyze(project, config)
+    target = graph_path(project, config); target.parent.mkdir(exist_ok=True)
     target.write_text(json.dumps(graph.to_dict(), indent=2), encoding="utf-8")
     print(f"Wrote {len(graph.symbols)} symbols and {len(graph.relations)} relations to {target}")
     return target
@@ -35,15 +50,17 @@ def main() -> None:
     if args.command == "init":
         destination = project / "lineagelens.yaml"
         if destination.exists(): parser.error(f"{destination} already exists")
-        destination.write_text(CONFIG_TEMPLATE, encoding="utf-8"); print(f"Created {destination}"); return
+        destination.write_text(config_template(), encoding="utf-8"); print(f"Created {destination}"); return
+    config = ProjectConfig.load(project)
     build(project)
     if args.command == "serve":
         try:
             import uvicorn
+
             from .web import create_app
         except ImportError as exc:
             raise SystemExit("Install LineageLens with `pip install -e '.[web]'` to serve the UI and GraphQL API.") from exc
-        uvicorn.run(create_app(project), host="127.0.0.1", port=8717)
+        uvicorn.run(create_app(project, config), host=config.server.host, port=config.server.port)
 
 
 if __name__ == "__main__":

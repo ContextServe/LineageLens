@@ -5,61 +5,80 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import strawberry
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from strawberry.fastapi import GraphQLRouter
 
-def create_app(project: Path):
-    from fastapi import FastAPI
-    from fastapi.responses import HTMLResponse
-    import strawberry
-    from strawberry.fastapi import GraphQLRouter
+from .config import ProjectConfig
 
-    data = json.loads((project / ".lineagelens" / "graph.json").read_text())
-    symbols = {item["id"]: item for item in data["symbols"]}
-    relations = data["relations"]
 
-    @strawberry.type
-    class Edge:
-        relation: str
-        source: str
-        target: str
-        evidence: str
-        line: int
+@strawberry.type
+class Edge:
+    relation: str
+    source: str
+    target: str
+    evidence: str
+    line: int
 
-    @strawberry.type
-    class CodeSymbol:
-        id: str
-        kind: str
-        file: str
-        line: int
-        entry_point: str | None
-        async_: bool
-        inputs: strawberry.scalars.JSON
-        outputs: strawberry.scalars.JSON
-        risks: strawberry.scalars.JSON
 
-    def adapt(item: dict) -> CodeSymbol:
-        return CodeSymbol(id=item["id"], kind=item["kind"], file=item["file"], line=item["line"], entry_point=item.get("entry_point"), async_=item.get("async_", False), inputs=item.get("inputs", []), outputs=item.get("outputs", []), risks=item.get("risks", []))
+@strawberry.type
+class CodeSymbol:
+    id: str
+    kind: str
+    file: str
+    line: int
+    entry_point: str | None
+    async_: bool
+    inputs: strawberry.scalars.JSON
+    outputs: strawberry.scalars.JSON
+    risks: strawberry.scalars.JSON
 
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def symbol(self, id: str) -> CodeSymbol | None:
-            return adapt(symbols[id]) if id in symbols else None
 
-        @strawberry.field
-        def search(self, text: str, limit: int = 30) -> list[CodeSymbol]:
-            term = text.lower()
-            return [adapt(item) for item in symbols.values() if term in item["id"].lower()][:limit]
+@strawberry.type
+class Query:
+    @strawberry.field
+    def symbol(self, id: str) -> CodeSymbol | None:
+        symbols = _DATA["symbols"]
+        return _adapt(symbols[id]) if id in symbols else None
 
-        @strawberry.field
-        def callers(self, id: str) -> list[Edge]:
-            return [Edge(edge["kind"], edge["source"], edge["target"], edge["evidence"], edge["line"]) for edge in relations if edge["target"] == id]
+    @strawberry.field
+    def search(self, text: str, limit: int = 30) -> list[CodeSymbol]:
+        term = text.lower()
+        return [_adapt(item) for item in _DATA["symbols"].values() if term in item["id"].lower()][:limit]
 
-        @strawberry.field
-        def callees(self, id: str) -> list[Edge]:
-            return [Edge(edge["kind"], edge["source"], edge["target"], edge["evidence"], edge["line"]) for edge in relations if edge["source"] == id]
+    @strawberry.field
+    def callers(self, id: str) -> list[Edge]:
+        return [_edge(item) for item in _DATA["relations"] if item["target"] == id]
+
+    @strawberry.field
+    def callees(self, id: str) -> list[Edge]:
+        return [_edge(item) for item in _DATA["relations"] if item["source"] == id]
+
+
+_schema = strawberry.Schema(query=Query)
+
+
+def _adapt(item: dict) -> CodeSymbol:
+    return CodeSymbol(id=item["id"], kind=item["kind"], file=item["file"], line=item["line"], entry_point=item.get("entry_point"), async_=item.get("async_", False), inputs=item.get("inputs", []), outputs=item.get("outputs", []), risks=item.get("risks", []))
+
+
+def _edge(item: dict) -> Edge:
+    return Edge(relation=item["kind"], source=item["source"], target=item["target"], evidence=item["evidence"], line=item["line"])
+
+
+_DATA: dict = {}
+
+
+def create_app(project: Path, config: ProjectConfig | None = None):
+    config = config or ProjectConfig.load(project)
+    graph_file = project / config.output.directory / config.output.filename
+    raw = json.loads(graph_file.read_text(encoding="utf-8"))
+    _DATA["symbols"] = {item["id"]: item for item in raw["symbols"]}
+    _DATA["relations"] = raw["relations"]
 
     app = FastAPI(title="LineageLens")
-    app.include_router(GraphQLRouter(strawberry.Schema(query=Query)), prefix="/graphql")
+    app.include_router(GraphQLRouter(_schema), prefix="/graphql")
     app.get("/", response_class=HTMLResponse)(lambda: HTML)
     return app
 
