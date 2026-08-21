@@ -16,6 +16,43 @@ class LLMConfig:
 
 
 @dataclass(frozen=True)
+class ServerConfig:
+    host: str = "127.0.0.1"
+    port: int = 8717
+
+
+@dataclass(frozen=True)
+class OutputConfig:
+    directory: str = ".lineagelens"
+    filename: str = "graph.json"
+
+    @property
+    def relative_path(self) -> str:
+        return f"{self.directory}/{self.filename}"
+
+
+@dataclass(frozen=True)
+class RiskRule:
+    category: str
+    severity: str
+    match_words: tuple[str, ...]
+    only_in_async: bool = False
+
+
+@dataclass(frozen=True)
+class AnalysisConfig:
+    risk_rules: tuple[RiskRule, ...] = (
+        RiskRule("data_write", "review", ("execute", "insert", "update", "delete", "write", "save", "commit")),
+        RiskRule("blocking_in_async", "high", ("requests.", "time.sleep", "subprocess."), only_in_async=True),
+    )
+    entry_points: dict[str, tuple[str, ...]] = field(default_factory=lambda: {
+        "api_route": (".get", ".post", ".put", ".patch", ".delete", ".websocket"),
+        "cli_command": (".command", ".callback"),
+        "framework_callback": (".middleware", ".exception_handler", ".on_event", "validator", "field_validator", "model_validator"),
+    })
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     source_roots: tuple[str, ...] = ("src",)
     test_roots: tuple[str, ...] = ("tests",)
@@ -23,21 +60,41 @@ class ProjectConfig:
     cron_files: tuple[str, ...] = ()
     docs_globs: tuple[str, ...] = ("**/*.md",)
     frameworks: tuple[str, ...] = ("fastapi", "typer")
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
+    server: ServerConfig = field(default_factory=ServerConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
 
     @classmethod
-    def load(cls, root: Path, config_path: Path | None = None) -> "ProjectConfig":
+    def load(cls, root: Path, config_path: Path | None = None) -> ProjectConfig:
+        import yaml
+
         path = config_path or root / "lineagelens.yaml"
         if not path.exists():
             return cls()
-        try:
-            import yaml
-        except ImportError as exc:  # pragma: no cover - packaging guard
-            raise RuntimeError("Install PyYAML to load lineagelens.yaml") from exc
-        raw: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
-        llm = LLMConfig(**raw.pop("llm", {}))
-        keys = {name for name in cls.__dataclass_fields__ if name != "llm"}
-        return cls(**{key: tuple(value) if isinstance(value, list) else value for key, value in raw.items() if key in keys}, llm=llm)
+        raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        llm = LLMConfig(**raw.pop("llm", {}) or {})
+        server = ServerConfig(**raw.pop("server", {}) or {})
+        output = OutputConfig(**raw.pop("output", {}) or {})
+        analysis = cls._load_analysis(raw.pop("analysis", {}) or {})
+        keys = {name for name in cls.__dataclass_fields__ if name not in {"analysis", "output", "server", "llm"}}
+        rest = {key: tuple(value) if isinstance(value, list) else value for key, value in raw.items() if key in keys}
+        return cls(**rest, analysis=analysis, output=output, server=server, llm=llm)
+
+    @staticmethod
+    def _load_analysis(raw: dict[str, Any]) -> AnalysisConfig:
+        rules = []
+        for item in raw.get("risk_rules", []) or []:
+            rules.append(RiskRule(
+                category=item["category"],
+                severity=item["severity"],
+                match_words=tuple(item["match_words"]),
+                only_in_async=bool(item.get("only_in_async", False)),
+            ))
+        entry_points = {key: tuple(values) for key, values in (raw.get("entry_points", {}) or {}).items()}
+        defaults = AnalysisConfig()
+        return AnalysisConfig(risk_rules=tuple(rules) or defaults.risk_rules,
+                              entry_points=entry_points or defaults.entry_points)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
