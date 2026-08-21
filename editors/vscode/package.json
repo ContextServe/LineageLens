@@ -1,0 +1,55 @@
+{
+  "name": "lineagelens-vscode",
+  "displayName": "LineageLens",
+  "description": "Interactive Python code graph visualization and agent-friendly lineage analysis",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other", "Visualization"],
+  "publisher": "lineagelens",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lineagelens/lineagelens"
+  },
+  "main": "./out/extension.js",
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "package": "vsce package --no-dependencies",
+    "publish": "vsce publish"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "lineagelens.analyzeWorkspace",
+        "title": "LineageLens: Analyze Workspace",
+        "description": "Analyze the current workspace and build the code graph"
+      },
+      {
+        "command": "lineagelens.showLineageAtCursor",
+        "title": "LineageLens: Show Lineage at Cursor",
+        "description": "Show code lineage for the symbol at cursor"
+      },
+      {
+        "command": "lineagelens.showPanel",
+        "title": "LineageLens: Open Visualization",
+        "description": "Open the LineageLens visualization panel"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "lineagelens.showLineageAtCursor",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
