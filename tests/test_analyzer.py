@@ -21,3 +21,63 @@ def test_collects_entry_contract_and_argument_mapping():
         assert relation.kind == "AWAIT_CALLS"
         assert relation.target == "app.api.calculate"
         assert relation.arguments == [{"parameter": "value", "expression": "value", "inferred_type": "unknown"}]
+def test_config_driven_risk_rules_and_entry_points():
+    from lineagelens.config import AnalysisConfig, RiskRule
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "src" / "app"
+        source.mkdir(parents=True)
+        (source / "service.py").write_text(
+            "def prox(cmd: str):\n    return execute(cmd)\n"
+            "async def fe():\n    return await execute('x')\n"
+        )
+        config = ProjectConfig(
+            source_roots=("src",),
+            test_roots=(),
+            script_roots=(),
+            frameworks=("fake_fw",),
+            analysis=AnalysisConfig(
+                risk_rules=(RiskRule("custom_rule", "critical", ("execute",)),),
+                entry_points={"api_route": (".run",)},
+            ),
+        )
+        graph = analyze(root, config)
+        prox = graph.symbols["app.service.prox"]
+        fe = graph.symbols["app.service.fe"]
+        assert prox.risks == [{"category": "custom_rule", "severity": "critical", "evidence": "execute at line 2"}]
+        assert fe.risks == [{"category": "custom_rule", "severity": "critical", "evidence": "execute at line 4"}]
+
+
+def test_config_roundtrip_yaml(tmp_path):
+    from lineagelens.config import ProjectConfig
+
+    (tmp_path / "lineagelens.yaml").write_text(
+        "source_roots: [lib]\n"
+        "test_roots: []\n"
+        "script_roots: []\n"
+        "frameworks: [django]\n"
+        "analysis:\n"
+        "  entry_points:\n"
+        "    api_route: ['.do']\n"
+        "  risk_rules:\n"
+        "    - category: pii\n"
+        "      severity: high\n"
+        "      match_words: [social_security]\n"
+        "output:\n"
+        "  directory: .artifacts\n"
+        "  filename: graph.json\n"
+        "server:\n"
+        "  host: 0.0.0.0\n"
+        "  port: 9000\n",
+        encoding="utf-8",
+    )
+    config = ProjectConfig.load(tmp_path)
+    assert config.source_roots == ("lib",)
+    assert config.frameworks == ("django",)
+    assert config.analysis.entry_points["api_route"] == (".do",)
+    assert config.analysis.risk_rules[0].category == "pii"
+    assert config.analysis.risk_rules[0].severity == "high"
+    assert config.output.directory == ".artifacts"
+    assert config.output.filename == "graph.json"
+    assert config.server.port == 9000
