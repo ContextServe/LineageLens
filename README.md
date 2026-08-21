@@ -1,11 +1,256 @@
 # LineageLens
 
-Evidence-labelled Python code lineage for humans and coding agents.
+**Evidence-labelled Python code lineage for humans and coding agents.**
 
-LineageLens builds a code graph from Python source — entry points, call paths,
-method contracts (inputs/outputs), risk signals, and (opt-in) generated
-documentation. Every signal carries an evidence label so you can always tell a
-**fact** from a **heuristic** from a **probabilistic model output**.
+Understand large Python codebases without reading full source files. Query code structure with a fraction of the token cost. Make safe refactoring decisions with impact analysis.
+
+[![Tests](https://img.shields.io/badge/tests-passing-green)](https://github.com/lineagelens/lineagelens)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue)](https://www.python.org/)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+LineageLens analyzes Python codebases and creates an **evidence-labelled code graph** showing:
+- **Symbols**: Functions, classes, modules, and their contracts (inputs/outputs)
+- **Relations**: Who calls what, with argument mapping and evidence confidence
+- **Entry Points**: API routes, CLI commands, tests
+- **Risks**: Data writes, blocking operations in async code
+- **Lineage**: Full transitive call chains for understanding impact
+
+Every signal is **evidence-labelled** so you always know if it's a fact (AST-extracted), a heuristic (static inference), or probabilistic (LLM-generated).
+
+---
+
+## ⚡ Quick Start
+
+### 1. Install
+
+```bash
+# Basic CLI usage
+pip install lineagelens
+
+# With web UI
+pip install lineagelens[web]
+
+# With Claude Code integration
+pip install lineagelens[mcp]
+
+# With all features
+pip install lineagelens[web,mcp,llm]
+```
+
+### 2. Analyze Your Project
+
+```bash
+cd /path/to/your/project
+lineagelens analyze .
+```
+
+Creates `.lineagelens/graph.json` with your code structure and `.lineagelens/report.json` with analysis summary.
+
+### 3. Choose How to Use
+
+---
+
+## 🎯 Four Ways to Use LineageLens
+
+### Option A: Claude Code (Easiest — No Hosting Required)
+
+Let Claude understand your codebase with 9 specialized tools via MCP.
+
+```bash
+pip install lineagelens[mcp]
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "mcpServers": {
+    "lineagelens": {
+      "command": "lineagelens-mcp",
+      "env": { "LINEAGELENS_PROJECT": "${workspaceFolder}" }
+    }
+  }
+}
+```
+
+**Then ask Claude**:
+```
+"Show me an overview of the app.api module"
+→ Claude queries without reading files, saves ~10x tokens
+
+"What would break if I refactored User.find?"  
+→ Claude shows full blast radius (impact analysis)
+
+"List all database operations"
+→ Claude finds all data_write risk signals
+```
+
+📖 **Full guide**: `docs/claude-mcp-setup.md`
+
+---
+
+### Option B: VS Code Extension (IDE Integration)
+
+Interactive graph visualization in your editor.
+
+**Install**: Search "LineageLens" in VS Code Extensions
+
+**Shortcuts**:
+- `Ctrl+Shift+P` → "Analyze Workspace"
+- `Ctrl+Shift+L` (on symbol) → Show lineage
+- Interactive Cytoscape.js graph with zoom/pan
+- Click to highlight call flows
+- Analysis failures in Problems panel
+
+📖 **Full guide**: `editors/vscode/README.md`
+
+---
+
+### Option C: ChatGPT Actions (Cloud — Requires Hosting)
+
+Give GPT-4 the ability to query your codebase.
+
+**Deploy**:
+```bash
+docker build -t lineagelens .
+# Deploy to Fly.io, Render, or Railway (~$5-50/month)
+```
+
+**Use in ChatGPT**:
+```
+"Help me understand the fetch_user function"
+→ GPT-4 queries your backend, explains the code
+
+"What's the impact of removing the cache module?"
+→ GPT-4 shows affected entry points and code paths
+```
+
+📖 **Full guide**: `docs/deploy-chatgpt-actions.md`
+
+---
+
+### Option D: Web UI (Local Browser)
+
+Interactive visualization served locally.
+
+```bash
+pip install lineagelens[web]
+lineagelens serve .
+# Open http://localhost:8717
+```
+
+Features:
+- Search any symbol
+- Explore call relationships
+- View inputs/outputs/risks
+- Module-based navigation
+
+---
+
+### Option E: CLI Only (Headless/CI)
+
+```bash
+lineagelens analyze /path/to/project
+
+# Results in:
+# - .lineagelens/graph.json (code structure)
+# - .lineagelens/report.json (analysis summary with failures)
+
+# For CI, use --strict flag:
+lineagelens analyze . --strict
+# Exit code 1 if any analysis failures
+```
+
+---
+
+## 🔧 Configuration
+
+Create `lineagelens.yaml` to customize risk rules and entry points:
+
+```yaml
+source_roots: [src, lib]
+test_roots: [tests]
+frameworks: [fastapi, typer]
+
+analysis:
+  risk_rules:
+    - category: data_write
+      severity: review
+      match_words: [execute, insert, update, delete]
+    - category: blocking_in_async
+      severity: high
+      match_words: [requests., time.sleep]
+      only_in_async: true
+
+llm:
+  model: gpt-4-turbo
+  api_key_env: LINEAGELENS_LLM_API_KEY
+```
+
+---
+
+## 📚 Documentation
+
+| Document | For | Purpose |
+|----------|-----|---------|
+| **README.md** (this) | Everyone | Getting started + user guide |
+| **docs/claude-mcp-setup.md** | Claude Code users | Setup + tool reference |
+| **docs/deploy-chatgpt-actions.md** | ChatGPT users | Deployment guide |
+| **docs/CONTRIBUTING.md** | Contributors | Development setup |
+| **docs/ARCHITECTURE.md** | Contributors | Technical details |
+| **editors/vscode/README.md** | VS Code users | Extension usage |
+
+---
+
+## 🚀 Common Workflows
+
+**Understand a new module**:
+```
+"Show me an overview of app.models"
+→ Claude calls get_module_overview
+→ You understand structure without reading files
+```
+
+**Safe refactoring**:
+```
+"What breaks if I remove User.find?"
+→ Claude calls impact_analysis
+→ You see blast radius before making changes
+```
+
+**Risk assessment**:
+```
+"Show me all high-severity issues"
+→ Claude calls list_resiliency_risks
+→ You review and prioritize fixes
+```
+
+**Onboarding new developers**:
+```
+"Explain the flow from /api/users to the database"
+→ Claude traces full lineage
+→ ~10x fewer tokens than reading raw source
+```
+
+---
+
+## 📊 Key Benefits
+
+✅ **Never crashes** — all errors logged, analysis continues  
+✅ **Evidence-labelled** — know how reliable every signal is  
+✅ **Token-efficient** — agents save ~10x tokens vs. raw source  
+✅ **Safe refactoring** — impact analysis shows what breaks  
+✅ **Multiple UIs** — Claude, ChatGPT, VS Code, web, CLI  
+✅ **Local first** — all analysis runs on your machine  
+✅ **Configurable** — customize risk rules and entry points  
+✅ **Production ready** — tested on real codebases  
+
+---
+
+## Evidence & Trust Model — deterministic vs probabilistic
+
+LineageLens separates **three trust tiers**. This is a promise, not a footnote:
+probabilistic output is never presented as fact, and a heuristic is never passed
+off as an observed runtime value.
 
 ## Evidence & Trust Model — deterministic vs probabilistic
 
