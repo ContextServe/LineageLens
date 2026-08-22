@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react'
 import CytoscapeLib from 'cytoscape'
 import FCose from 'cytoscape-fcose'
+import { highlightFlow, clearHighlight } from './highlight'
 
 CytoscapeLib.use(FCose)
 
@@ -98,6 +99,26 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol }: Cytosca
             'width': 3,
           },
         },
+        {
+          selector: 'node.faded',
+          style: {
+            'opacity': 0.2,
+          },
+        },
+        {
+          selector: 'edge.faded',
+          style: {
+            'opacity': 0.1,
+          },
+        },
+        {
+          selector: 'node.highlighted',
+          style: {
+            'opacity': 1,
+            'border-width': 2,
+            'border-color': '#3b82f6',
+          },
+        },
       ],
       layout: {
         name: 'fcose',
@@ -109,16 +130,34 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol }: Cytosca
 
     cyRef.current = cy
 
-    // Click to select
-    cy.on('tap', 'node', (evt: any) => {
+    // Click to select and highlight flow
+    cy.on('tap', 'node', async (evt: any) => {
       const nodeId = evt.target.id()
       onSelectSymbol?.(nodeId)
+
+      // Fetch callers and callees to highlight the flow
+      try {
+        const [callersRes, calleesRes] = await Promise.all([
+          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/callers`),
+          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/callees`),
+        ])
+
+        const callers = await callersRes.json()
+        const callees = await calleesRes.json()
+
+        const callerIds = callers.map((rel: any) => rel.source)
+        const calleeIds = callees.map((rel: any) => rel.target)
+
+        highlightFlow(cy, nodeId, callerIds, calleeIds)
+      } catch (err) {
+        console.error('Failed to fetch flow:', err)
+      }
     })
 
-    // Highlight on select
+    // Click on empty area to clear highlighting
     cy.on('tap', (evt: any) => {
       if (evt.target === cy) {
-        cy.$('edge').removeClass('highlighted')
+        clearHighlight(cy)
       }
     })
 

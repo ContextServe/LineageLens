@@ -29,6 +29,12 @@ lineagelens-mcp = "lineagelens.mcp_server:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/lineagelens"]
 
+# Include pre-built frontend in the wheel
+# Frontend must be built before packaging: cd frontend && npm install && npm run build
+# Then commit frontend/dist to git before running python -m build .
+[tool.hatch.build.targets.wheel.force-include]
+"frontend/dist" = "lineagelens/frontend/dist"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

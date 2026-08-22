@@ -35,9 +35,18 @@ pytest tests/ -v
 
 ## Development Workflow
 
+### Frontend Changes
+
+If you modify code in `frontend/src/`:
+1. Build the frontend: `cd frontend && npm install && npm run build`
+2. Commit the updated `frontend/dist/`: `git add frontend/dist && git commit -m "build: update frontend dist"`
+3. When releasing, this `frontend/dist/` is automatically included in the wheel
+
+**Note**: `frontend/dist/` is committed to git (not gitignored) because it's part of the shipping package. The prebuilt assets ensure end users don't need Node.js installed.
+
 ### Making Changes
 
-All changes should follow this pattern:
+All other changes should follow this pattern:
 
 1. **If modifying query logic**: Add function to `src/lineagelens/queries.py`
 2. **If adding API surface**: 
