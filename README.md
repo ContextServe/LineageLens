@@ -255,6 +255,68 @@ llm:
 - `analysis.risk_rules` — Configurable patterns for security/performance risks
 - `llm` — Optional: LLM API config for generating descriptions (separate from deterministic analysis)
 
+### Understanding Framework Configuration
+
+The `frameworks` list controls **entry point detection**, not basic code analysis.
+
+#### What Always Works (regardless of frameworks)
+
+✅ Function/class definitions are found  
+✅ Direct function calls are traced  
+✅ Module structure is mapped  
+✅ Docstrings are captured  
+✅ Manual risk rules fire (e.g., "data_write", "blocking_in_async")  
+✅ Impact analysis shows blast radius  
+✅ Agents can still understand your code  
+
+#### What Changes With Frameworks
+
+**With framework listed in config**:
+```yaml
+frameworks: [fastapi, anthropic, langchain, boto3]
+```
+
+Entry points are detected and marked:
+```json
+{
+  "entry_points": [
+    {"symbol": "app.api.fetch_user", "kind": "api_route"},
+    {"symbol": "app.llm.query", "kind": "llm_call"},
+    {"symbol": "app.tasks.sync_data", "kind": "aws_call"}
+  ]
+}
+```
+
+Claude can answer: "Where does the LLM get called? What's the entry point for AWS operations?"
+
+**Without frameworks** (or incomplete list):
+- Same code analysis
+- Same relationships discovered
+- Entry points not flagged
+- Harder to trace "where does this flow start?"
+
+#### When to Add Frameworks
+
+**Add frameworks if you want to**:
+- Identify all entry points (API routes, CLI commands, scheduled tasks, LLM calls)
+- Understand request flow from user interaction to database
+- Find where external services are called (AWS, LLM, etc.)
+- Trace which functions are "public interfaces" vs internal
+
+**Frameworks are optional if you just need**:
+- Basic code understanding and symbol relationships
+- Refactoring impact analysis
+- Understanding code structure without entry point mapping
+
+#### Common Frameworks to Consider
+
+- **Web**: `fastapi`, `flask`, `django`, `starlette`
+- **CLI**: `typer`, `click`
+- **LLM**: `anthropic`, `langchain`, `openai`
+- **Data**: `pandas`, `sqlalchemy`, `boto3`
+- **Tasks**: `celery`, `APScheduler`, `rq`
+- **Validation**: `pydantic`, `marshmallow`
+
 ---
 
 ## 📚 Documentation

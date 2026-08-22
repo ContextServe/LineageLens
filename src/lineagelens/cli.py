@@ -57,6 +57,29 @@ def report_path(project: Path, config: ProjectConfig) -> Path:
     return project / config.output.directory / "report.json"
 
 
+def check_frontend_available() -> None:
+    """Check if frontend is available. Provide guidance if not."""
+    from .web import locate_frontend_dist
+
+    dist_dir = locate_frontend_dist()
+    if dist_dir:
+        return  # Frontend is ready
+
+    # Frontend not found — provide guidance
+    print("⚠️  Frontend UI not found.")
+    print()
+    print("To build the frontend locally, run:")
+    print("  cd frontend && npm install && npm run build")
+    print()
+    print("Alternatively, install a released version of lineagelens which includes")
+    print("the prebuilt frontend:")
+    print("  pip install lineagelens[web]  # from PyPI")
+    print()
+    print("For now, the REST API and GraphQL are still available at:")
+    print(f"  http://127.0.0.1:8717/api/v1")
+    print(f"  http://127.0.0.1:8717/graphql")
+
+
 def build(project: Path) -> tuple[Path, Path]:
     """Analyze project and write graph.json + report.json.
 
@@ -140,12 +163,18 @@ def main() -> None:
     graph_file, report_file = build(project)
 
     if args.command == "serve":
+        # Check if frontend is available (provide guidance if not, but don't block)
+        check_frontend_available()
+
         try:
             import uvicorn
 
             from .web import create_app
         except ImportError as exc:
             raise SystemExit("Install LineageLens with `pip install -e '.[web]'` to serve the UI and GraphQL API.") from exc
+
+        print(f"\n🚀 Starting LineageLens server at http://{config.server.host}:{config.server.port}")
+        print("   Press Ctrl+C to stop\n")
         uvicorn.run(create_app(project, config), host=config.server.host, port=config.server.port)
 
     # Check for failures if --strict is set

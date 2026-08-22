@@ -8,6 +8,7 @@ from pathlib import Path
 import strawberry
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from strawberry.fastapi import GraphQLRouter
 
 from .config import ProjectConfig
@@ -70,6 +71,30 @@ def _edge(item: dict) -> Edge:
 _DATA: dict = {}
 
 
+def locate_frontend_dist() -> Path | None:
+    """Find the built frontend dist directory.
+
+    Checks in order:
+    1. Installed package (wheel): lineagelens/frontend/dist inside site-packages
+    2. Source tree: frontend/dist in the repo root
+
+    Returns None if not found.
+    """
+    import lineagelens
+    lineagelens_module = Path(lineagelens.__file__).parent
+
+    candidates = [
+        lineagelens_module / "frontend" / "dist",  # Wheel install
+        lineagelens_module.parent.parent / "frontend" / "dist",  # Repo root (from src/lineagelens)
+    ]
+
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "index.html").exists():
+            return candidate
+
+    return None
+
+
 def create_app(project: Path, config: ProjectConfig | None = None):
     config = config or ProjectConfig.load(project)
     graph_file = project / config.output.directory / config.output.filename
@@ -78,8 +103,22 @@ def create_app(project: Path, config: ProjectConfig | None = None):
     _DATA["relations"] = raw["relations"]
 
     app = FastAPI(title="LineageLens")
+
+    # Register REST API (includes all /api/v1/* endpoints)
+    from .rest import create_router
+    app.include_router(create_router(project))
+
+    # Register GraphQL
     app.include_router(GraphQLRouter(_schema), prefix="/graphql")
-    app.get("/", response_class=HTMLResponse)(lambda: HTML)
+
+    # Mount frontend if available, otherwise serve legacy fallback
+    frontend_dist = locate_frontend_dist()
+    if frontend_dist:
+        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+    else:
+        # Fallback: serve the legacy inline HTML
+        app.get("/", response_class=HTMLResponse)(lambda: HTML)
+
     return app
 
 

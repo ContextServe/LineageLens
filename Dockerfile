@@ -1,19 +1,12 @@
-# Multi-stage build: frontend + Python backend
-FROM node:20-alpine AS frontend-builder
-WORKDIR /build
-COPY frontend/ .
-RUN npm install
-RUN npm run build
-
-# Python backend
+# Single-stage build: Python backend with prebuilt frontend
 FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
-# Copy frontend dist from builder
-COPY --from=frontend-builder /build/dist ./frontend/dist
+# Copy prebuilt frontend (committed to git)
+COPY frontend/dist ./frontend/dist
 
 # Copy Python source
 COPY pyproject.toml README.md LICENSE ./
