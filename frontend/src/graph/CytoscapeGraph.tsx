@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react'
 import CytoscapeLib from 'cytoscape'
+// @ts-ignore - cytoscape-fcose doesn't have TS types
 import FCose from 'cytoscape-fcose'
 import { highlightFlow, clearHighlight } from './highlight'
 
@@ -122,10 +123,9 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol }: Cytosca
       ],
       layout: {
         name: 'fcose',
-        quality: 'default',
         randomize: false,
         animationDuration: 500,
-      },
+      } as any,
     })
 
     cyRef.current = cy
