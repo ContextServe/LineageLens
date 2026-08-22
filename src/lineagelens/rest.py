@@ -142,6 +142,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
 
         # Collect nodes
         nodes = []
+        rendered_node_ids = set()  # Track which nodes we're actually rendering
+
         for symbol in graph.symbols.values():
             # Skip if filtering by module and this symbol's parent doesn't match
             if module and symbol.parent != module:
@@ -158,16 +160,16 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
                 has_resiliency_flag=has_risk,
             )
             nodes.append(node)
+            rendered_node_ids.add(symbol.id)
 
         # Collect edges
+        # Only include edges where BOTH source and target exist in the rendered nodes
+        # (Cytoscape requires both endpoints to exist)
         edges = []
         for i, rel in enumerate(graph.relations):
-            # Skip if filtering and endpoints not in scope
-            if module:
-                source_ok = any(s.id == rel.source for s in graph.symbols.values() if s.parent == module)
-                target_ok = any(s.id == rel.target for s in graph.symbols.values() if s.parent == module)
-                if not (source_ok or target_ok):
-                    continue
+            # Skip if either endpoint is not in the rendered nodes
+            if rel.source not in rendered_node_ids or rel.target not in rendered_node_ids:
+                continue
 
             edge = EdgeView(
                 id=f"rel_{i}",
