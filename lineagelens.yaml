@@ -1,22 +1,53 @@
-source_roots: [src]
-test_roots: [tests]
-script_roots: [scripts]
-cron_files: [ops/crontab]
-docs_globs: ["**/*.md", "**/*.rst"]
-frameworks: [fastapi, typer]
+source_roots:
+- src
+test_roots:
+- tests
+script_roots:
+- scripts
+cron_files: []
+docs_globs:
+- '**/*.md'
+frameworks:
+- fastapi
+- strawberry
 analysis:
-  entry_points:
-    api_route: [".get", ".post", ".put", ".patch", ".delete", ".websocket"]
-    cli_command: [".command", ".callback"]
-    framework_callback: [".middleware", ".exception_handler", ".on_event", "validator", "field_validator", "model_validator"]
   risk_rules:
-    - category: data_write
-      severity: review
-      match_words: [execute, insert, update, delete, write, save, commit]
-    - category: blocking_in_async
-      severity: high
-      only_in_async: true
-      match_words: ["requests.", "time.sleep", "subprocess."]
+  - category: data_write
+    severity: review
+    match_words:
+    - execute
+    - insert
+    - update
+    - delete
+    - write
+    - save
+    - commit
+    only_in_async: false
+  - category: blocking_in_async
+    severity: high
+    match_words:
+    - requests.
+    - time.sleep
+    - subprocess.
+    only_in_async: true
+  entry_points:
+    api_route:
+    - .get
+    - .post
+    - .put
+    - .patch
+    - .delete
+    - .websocket
+    cli_command:
+    - .command
+    - .callback
+    framework_callback:
+    - .middleware
+    - .exception_handler
+    - .on_event
+    - validator
+    - field_validator
+    - model_validator
 output:
   directory: .lineagelens
   filename: graph.json
@@ -26,5 +57,5 @@ server:
 llm:
   provider: openai_compatible
   base_url: https://api.openai.com/v1
-  model: gpt-5
+  model: gpt-4-turbo
   api_key_env: LINEAGELENS_API_KEY
