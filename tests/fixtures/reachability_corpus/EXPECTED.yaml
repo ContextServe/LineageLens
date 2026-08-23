@@ -289,6 +289,23 @@ corpus.tested_only.shared_by_test_and_main:
   rescue: static_call
   scope: source
 
+# --- the pragma escape hatch ----------------------------------------------
+corpus.pragma.kept_by_pragma:
+  # `# lineagelens: keep` on the def line. No other reference exists.
+  verdict: alive
+  rescue: pragma_keep
+  scope: source
+corpus.pragma.kept_by_pragma_on_decorator:
+  # CONTROL: identical shape without the pragma, so the pragma is proven to be
+  # what does the work rather than something about the module.
+  verdict: dead
+  rescue: null
+  scope: source
+"corpus.pragma.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+
 # --- the control group: genuinely dead ------------------------------------
 corpus.truly_dead.never_used:
   verdict: dead

@@ -37,7 +37,7 @@ def fixture_graph() -> CodeGraph:
             parent="app.api",
             async_=True,
             description="Fetch user by ID",
-            entry_point="api_route",
+            entry_point_kinds=["api_route"],
         )
     )
 

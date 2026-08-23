@@ -106,7 +106,11 @@ def load_graph(project: Path) -> CodeGraph:
             outputs=s_raw.get("outputs", []),
             decorators=s_raw.get("decorators", []),
             bases=s_raw.get("bases", []),
-            entry_point=s_raw.get("entry_point"),
+            entry_point_kinds=list(
+                s_raw.get("entry_point_kinds")
+                or ([s_raw["entry_point"]] if s_raw.get("entry_point") else [])
+            ),
+            is_abstract=s_raw.get("is_abstract", False),
             resiliency=[
                 ResiliencySignal(
                     category=sig["category"],
