@@ -99,6 +99,20 @@ class AnalysisConfig:
         "USES_FIXTURE",
     )
 
+    # Which module bodies count as reachability roots.
+    #
+    #   "all"          every module body is treated as executing. An
+    #                  over-approximation -- a module body only actually runs if
+    #                  something imports it -- chosen as the default on purpose:
+    #                  it costs recall (some real dead code stays hidden) but it
+    #                  never fabricates a "this is dead, delete it". False
+    #                  confidence is the failure mode that destroys trust.
+    #   "imports_only" seed only modules that contain an entry point and
+    #                  propagate through IMPORTS edges. Stricter, finds more, and
+    #                  will occasionally be wrong about a module imported for a
+    #                  side effect.
+    module_scope_roots: str = "all"
+
     # Type inference via Jedi. Only consulted when cheap static resolution fails,
     # and only when the call's trailing name could possibly match an in-repo symbol,
     # so the cost is a small fraction of the call sites. Disable to trade a little
@@ -163,6 +177,7 @@ class ProjectConfig:
             risk_rules=tuple(rules) or defaults.risk_rules,
             entry_points=entry_points or defaults.entry_points,
             relation_kinds=tuple(kinds) if kinds is not None else defaults.relation_kinds,
+            module_scope_roots=str(raw.get("module_scope_roots", defaults.module_scope_roots)),
             jedi=bool(raw.get("jedi", defaults.jedi)),
             jedi_max_calls=int(max_calls) if max_calls is not None else None,
         )

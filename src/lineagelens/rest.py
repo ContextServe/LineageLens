@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from .analyzer import analyze
 from .config import ProjectConfig
 from .index import invalidate, load_index
+from .reachability import compute_reachability
 from .queries import (
     GraphNotFoundError,
     find_duplicate_names,
@@ -27,7 +28,6 @@ from .queries import (
     is_test_path,
     list_entry_points,
     list_resiliency_risks,
-    list_unreferenced_symbols,
     search_symbols,
 )
 
@@ -69,8 +69,14 @@ class NodeView(BaseModel):
     async_: bool
     has_resiliency_flag: bool
     is_test: bool = False
-    possibly_dead: bool = False  # Backward compat: true if any dead-code confidence
-    dead_code_confidence: str | None = None  # "confirmed" | "unconfirmed_possible_dynamic_dispatch" | None
+    # Reachability verdict: alive | dynamic_only | test_only | public_api |
+    # probably_dead | dead. Containers have none.
+    verdict: str | None = None
+    # The specific mechanism that kept it alive, and that mechanism's trust tier.
+    # A verdict an agent cannot audit is one it should not act on.
+    rescue_mechanism: str | None = None
+    rescue_tier: str | None = None
+    scope: str = "source"
     duplicate_name: bool = False
 
 
@@ -152,8 +158,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         config = index.config
 
         # Precompute unreferenced symbols and duplicate names for efficiency
-        unreferenced = list_unreferenced_symbols(graph)
-        dead_code_confidence = {c.symbol.id: c.confidence for c in unreferenced}
+        reachability = compute_reachability(graph, config)
         duplicate_names = index.duplicate_names
 
         # Collect nodes
@@ -185,8 +190,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
                 async_=False,
                 has_resiliency_flag=has_risk,
                 is_test=is_test,
-                possibly_dead=False,
-                dead_code_confidence=None,
+                verdict=None,
+                scope="test" if is_test else "source",
                 duplicate_name=False,
             )
             nodes.append(node)
@@ -201,8 +206,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
 
             has_risk = len(symbol.resiliency) > 0
             is_test = is_test_path(symbol.file, test_roots=config.test_roots)
-            dead_confidence = dead_code_confidence.get(symbol.id)
-            possibly_dead = dead_confidence is not None
+            candidate = reachability.explain(symbol.id)
             duplicate_name = (symbol.kind, symbol.name) in duplicate_names
 
             # Defensive: null out parent if it won't exist in rendered nodes
@@ -217,8 +221,14 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
                 async_=symbol.async_,
                 has_resiliency_flag=has_risk,
                 is_test=is_test,
-                possibly_dead=possibly_dead,
-                dead_code_confidence=dead_confidence,
+                verdict=candidate.verdict if candidate else None,
+                rescue_mechanism=(
+                    candidate.rescue.name if candidate and candidate.rescue else None
+                ),
+                rescue_tier=(
+                    candidate.rescue.evidence.tier if candidate and candidate.rescue else None
+                ),
+                scope=candidate.scope if candidate else "source",
                 duplicate_name=duplicate_name,
             )
             nodes.append(node)
@@ -463,6 +473,93 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
 
         risks = list_resiliency_risks(graph, min_severity=min_severity)
         return [RiskOut(**r) for r in risks]
+
+    # GET /api/v1/dead-code - the full candidate list with verdicts
+    @router.get("/dead-code")
+    def dead_code(
+        verdict: str | None = None, scope: str | None = None
+    ) -> dict[str, Any]:
+        """Symbols that warrant attention as possible dead code.
+
+        Previously reachable only as node flags on /graph/view or through MCP.
+
+        Verdicts, in descending severity:
+          dead           not reachable from any entry point by any modelled
+                         mechanism, and no same-named dynamic call site exists
+          probably_dead  unreachable, but an unresolved call shares its name
+          test_only      reachable only from tests, so nothing shipped uses it
+        """
+        try:
+            index = load_index(project)
+            graph = index.graph
+        except GraphNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        result = compute_reachability(graph, index.config)
+        candidates = result.candidates()
+        if verdict:
+            candidates = [c for c in candidates if c.verdict == verdict]
+        if scope:
+            candidates = [c for c in candidates if c.scope == scope]
+
+        return {
+            "count": len(candidates),
+            "by_verdict": result.by_verdict(),
+            "candidates": [
+                {
+                    "id": c.symbol.id,
+                    "kind": c.symbol.kind,
+                    "name": c.symbol.name,
+                    "file": c.symbol.file,
+                    "line": c.symbol.line,
+                    "module": c.symbol.module,
+                    "verdict": c.verdict,
+                    "scope": c.scope,
+                    "reason": c.reason,
+                }
+                for c in candidates
+            ],
+        }
+
+    # GET /api/v1/reachability/{symbol_id} - why is this alive?
+    @router.get("/reachability/{symbol_id}")
+    def reachability(symbol_id: str) -> dict[str, Any]:
+        """Explain the verdict for one symbol.
+
+        This is the endpoint that makes the feature auditable, and the one an
+        agent should consult before deleting anything: it names the mechanism
+        that reached the symbol, the symbol it was reached through, and the trust
+        tier of that mechanism.
+        """
+        try:
+            index = load_index(project)
+            graph = index.graph
+        except GraphNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        if symbol_id not in graph.symbols:
+            raise HTTPException(status_code=404, detail=f"Symbol not found: {symbol_id}")
+
+        candidate = compute_reachability(graph, index.config).explain(symbol_id)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail=f"No verdict for {symbol_id}")
+
+        return {
+            "id": symbol_id,
+            "verdict": candidate.verdict,
+            "scope": candidate.scope,
+            "reason": candidate.reason,
+            "rescue": (
+                {
+                    "mechanism": candidate.rescue.name,
+                    "tier": candidate.rescue.evidence.tier,
+                    "detail": candidate.rescue.detail,
+                    "via_symbol": candidate.rescue.via_symbol,
+                }
+                if candidate.rescue
+                else None
+            ),
+        }
 
     # POST /api/v1/analyze - trigger analysis (protected)
     @router.post("/analyze")
