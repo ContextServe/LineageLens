@@ -21,7 +21,14 @@ conda activate lineagelens
 
 ### 3. Install with Dev Dependencies
 
+The install **must be editable**. LineageLens ships a wheel that force-includes
+`frontend/dist`, so it is easy to end up with a non-editable install from
+`dist/*.whl` sitting in `site-packages`. When that happens, `pytest` imports the
+installed copy instead of `src/`, the two trees drift, and a green test run tells
+you nothing about the code you are editing.
+
 ```bash
+pip uninstall -y lineagelens          # clear any prior non-editable install
 pip install -e ".[web,mcp,llm,dev]"
 ```
 
@@ -32,6 +39,15 @@ lineagelens --help
 lineagelens analyze .
 pytest tests/ -v
 ```
+
+`tests/test_import_hygiene.py` runs on every invocation and fails with the exact
+remediation command if `import lineagelens` resolves outside `src/`, or if the
+distribution metadata shows a non-editable (`archive_info`) install. If it fails,
+re-run step 3 before trusting any other result.
+
+`pyproject.toml` sets `pythonpath = ["src"]` under `[tool.pytest.ini_options]`,
+and `tests/conftest.py` inserts `src/` as a fallback, so the suite is runnable
+from a clean checkout even before the editable install.
 
 ## Development Workflow
 
