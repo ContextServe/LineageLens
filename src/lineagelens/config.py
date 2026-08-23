@@ -57,6 +57,17 @@ class AnalysisConfig:
         "framework_callback": (".middleware", ".exception_handler", ".on_event", "validator", "field_validator", "model_validator"),
     })
 
+    # Type inference via Jedi. Only consulted when cheap static resolution fails,
+    # and only when the call's trailing name could possibly match an in-repo symbol,
+    # so the cost is a small fraction of the call sites. Disable to trade a little
+    # resolution for speed, e.g. on PR-time CI runs.
+    jedi: bool = True
+
+    # Hard ceiling on inference calls per analysis. None means unbounded. On exceed,
+    # one warning is recorded and the engine is not consulted again -- a backstop for
+    # pathological repos, not a tuning knob.
+    jedi_max_calls: int | None = None
+
 
 @dataclass(frozen=True)
 class ProjectConfig:
@@ -99,8 +110,13 @@ class ProjectConfig:
             ))
         entry_points = {key: tuple(values) for key, values in (raw.get("entry_points", {}) or {}).items()}
         defaults = AnalysisConfig()
-        return AnalysisConfig(risk_rules=tuple(rules) or defaults.risk_rules,
-                              entry_points=entry_points or defaults.entry_points)
+        max_calls = raw.get("jedi_max_calls", defaults.jedi_max_calls)
+        return AnalysisConfig(
+            risk_rules=tuple(rules) or defaults.risk_rules,
+            entry_points=entry_points or defaults.entry_points,
+            jedi=bool(raw.get("jedi", defaults.jedi)),
+            jedi_max_calls=int(max_calls) if max_calls is not None else None,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

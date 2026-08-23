@@ -113,6 +113,7 @@ class SymbolIndex:
     by_file_name: dict[tuple[str, str], list[str]] = field(default_factory=dict)
     by_suffix: dict[str, list[str]] = field(default_factory=dict)
     names: set[str] = field(default_factory=set)
+    top_level: set[str] = field(default_factory=set)  # first component of every symbol id
 
     @classmethod
     def build(cls, graph: CodeGraph) -> SymbolIndex:
@@ -127,6 +128,7 @@ class SymbolIndex:
             index.by_file_name.setdefault((symbol.file, symbol.name), []).append(symbol.id)
             index.names.add(symbol.name)
             parts = symbol.id.split(".")
+            index.top_level.add(parts[0])
             for start in range(len(parts)):
                 index.by_suffix.setdefault(".".join(parts[start:]), []).append(symbol.id)
         return index
@@ -530,6 +532,34 @@ class Relationships(ast.NodeVisitor):
             return line, max(node_func.end_col_offset - len(node_func.attr), 0)
         return node_func.lineno, node_func.col_offset
 
+    def _jedi_worth_trying(self, raw: str) -> bool:
+        """Whether an inference result could possibly map onto an in-repo symbol.
+
+        We only ever *use* a result that resolves to a ``Symbol``, so when that is
+        provably impossible the engine call is pure cost. A symbol's last dotted
+        component always equals its ``name``, so if the call's trailing name is not a
+        known symbol name the engine cannot produce a usable answer -- unless an
+        import alias renames one, which the second check covers.
+
+        This is what makes the engine affordable: it eliminates ``logger.info``,
+        ``pd.DataFrame``, ``os.path.join``, ``json.dumps``, ``list.append`` and the
+        rest of the third-party and builtin surface, which is the large majority of
+        unresolved call sites.
+
+        Soundness depends on only accepting engine results that are graph symbols.
+        If that ever changes, this gate has to be revisited.
+        """
+        last = raw.rsplit(".", 1)[-1]
+        if last in self.index.names:
+            return True
+        head = raw.split(".", 1)[0]
+        target = self.module.imports.get(head)
+        if target is None:
+            return False
+        # An alias may rename an in-repo symbol; only give up when the import's own
+        # root package is not part of this project.
+        return target.split(".", 1)[0] in self.index.top_level
+
     def _resolve_via_jedi(self, raw: str, node_func: ast.AST) -> tuple[str, str, str] | None:
         """Resolve a call via the inference engine, or return None to fall through."""
         try:
@@ -578,7 +608,7 @@ class Relationships(ast.NodeVisitor):
         if static[1] != "external_or_dynamic":
             return static
 
-        if self.jedi_resolver and node_func:
+        if self.jedi_resolver and node_func and self._jedi_worth_trying(raw):
             inferred = self._resolve_via_jedi(raw, node_func)
             if inferred:
                 return inferred
@@ -936,7 +966,7 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
     # Phase 1.5: Build module registry and hoist self.attr bindings
     module_registry: dict[str, Module] = {m.name: m for m in modules}
     attribute_bindings = hoist_attribute_bindings(modules, graph, module_registry, report, root)
-    jedi_resolver = JediResolver(root)
+    jedi_resolver = JediResolver(root, max_calls=config.analysis.jedi_max_calls) if config.analysis.jedi else None
     index = SymbolIndex.build(graph)
 
     # Phase 2: Analyze relationships (calls, risks, entry points)
@@ -955,6 +985,21 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
                 )
             )
             continue
+
+    if jedi_resolver is not None and jedi_resolver.budget_exhausted:
+        report.warnings.append(
+            SymbolWarning(
+                symbol_id=None,
+                file="",
+                line=0,
+                message=(
+                    f"Type-inference budget of {config.analysis.jedi_max_calls} calls was "
+                    "exhausted; later call sites fell back to static resolution only. "
+                    "Raise analysis.jedi_max_calls or leave it unset to remove the ceiling."
+                ),
+                stage="relationships",
+            )
+        )
 
     report.symbols_found = len(graph.symbols)
     report.relations_found = len(graph.relations)
