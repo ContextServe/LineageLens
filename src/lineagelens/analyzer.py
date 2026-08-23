@@ -10,7 +10,7 @@ import ast
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import ProjectConfig
@@ -55,6 +55,12 @@ def infer(node: ast.AST) -> str:
     return "unknown"
 
 
+# Binding provenances established by a literal annotation in the source, as opposed to
+# inferred from a constructor call or a factory's declared return type.
+_FACT_PROVENANCE = frozenset(
+    {"annotated_attribute", "annotated_parameter", "annotated_assignment", "annotated_parameter_passthrough"}
+)
+
 _RESOLUTION_TIER = {
     "resolved": "deterministic_fact",
     "resolved_via_inference": "deterministic_heuristic",
@@ -75,6 +81,68 @@ class Module:
     name: str
     tree: ast.Module
     imports: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class SymbolIndex:
+    """Lookup tables over ``CodeGraph.symbols`` for mapping inference results back to ids.
+
+    An inference engine reports a ``(file, line)`` pair alongside its dotted name, which
+    is strictly more information than a name suffix. ``by_location`` uses it to
+    disambiguate same-named symbols exactly; the name tables are fallbacks for when the
+    reported line does not match our ``Symbol.line`` (decorated definitions, for
+    instance, where the two disagree about where the symbol starts).
+
+    ``by_suffix`` keys are dot-anchored by construction: for ``a.b.c.d`` the keys are
+    ``d``, ``c.d``, ``b.c.d``, ``a.b.c.d``. A bare ``str.endswith`` test would let
+    ``MyArchetypeEngine`` match ``ArchetypeEngine``; this cannot. Candidate lists are
+    kept whole so an ambiguous name can be reported as ambiguous rather than silently
+    resolved to whichever symbol happened to be inserted first.
+    """
+
+    by_location: dict[tuple[str, int], str] = field(default_factory=dict)
+    by_file_name: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+    by_suffix: dict[str, list[str]] = field(default_factory=dict)
+    names: set[str] = field(default_factory=set)
+
+    @classmethod
+    def build(cls, graph: CodeGraph) -> SymbolIndex:
+        index = cls()
+        for symbol in graph.symbols.values():
+            index.by_location.setdefault((symbol.file, symbol.line), symbol.id)
+            index.by_file_name.setdefault((symbol.file, symbol.name), []).append(symbol.id)
+            index.names.add(symbol.name)
+            parts = symbol.id.split(".")
+            for start in range(len(parts)):
+                index.by_suffix.setdefault(".".join(parts[start:]), []).append(symbol.id)
+        return index
+
+    def resolve_target(
+        self, graph: CodeGraph, relpath: str, line: int, full_name: str
+    ) -> tuple[str | None, bool]:
+        """Map an inferred target to a symbol id.
+
+        Returns ``(symbol_id, ambiguous)``. ``ambiguous`` is True when two or more
+        in-repo symbols match the name equally well, in which case the caller must
+        decline to resolve rather than pick one.
+        """
+        if full_name in graph.symbols:
+            return full_name, False
+
+        located = self.by_location.get((relpath, line))
+        if located:
+            return located, False
+
+        tail = full_name.rsplit(".", 1)[-1]
+        for candidates in (self.by_file_name.get((relpath, tail)), self.by_suffix.get(full_name)):
+            if not candidates:
+                continue
+            unique = set(candidates)
+            if len(unique) == 1:
+                return next(iter(unique)), False
+            return None, True
+
+        return None, False
 
 
 def resolve_module_symbol(name: str | None, module: Module, graph: CodeGraph) -> Symbol | None:
@@ -118,14 +186,31 @@ def infer_bound_class(node: ast.AST, module: Module, graph: CodeGraph, module_re
     return None, "none"
 
 
-def _find_classes(tree: ast.AST, module_name: str, scope: list[str] | None = None) -> Iterable[tuple[str, ast.ClassDef]]:
-    """Recursively yield (class_id, ClassDef) for all classes in tree."""
-    if scope is None:
-        scope = []
-    for node in ast.walk(tree) if not scope else []:
-        if isinstance(node, ast.ClassDef):
-            class_id = ".".join([module_name, *scope, node.name])
-            yield class_id, node
+def _iter_classes(node: ast.AST, prefix: str) -> Iterable[tuple[str, ast.ClassDef]]:
+    """Yield ``(class_id, ClassDef)`` for every class under ``node``, nested ones included.
+
+    Walks the body rather than using ``ast.walk`` so that the dotted id can be built up
+    from the real lexical nesting; ``ast.walk`` flattens the tree and loses it.
+    """
+    for child in getattr(node, "body", []):
+        if isinstance(child, ast.ClassDef):
+            class_id = f"{prefix}.{child.name}"
+            yield class_id, child
+            yield from _iter_classes(child, class_id)
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield from _iter_classes(child, f"{prefix}.{child.name}")
+
+
+def _annotated_parameters(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, module: Module, graph: CodeGraph
+) -> dict[str, str]:
+    """Map parameter name -> class symbol id for every parameter with a class annotation."""
+    params: dict[str, str] = {}
+    for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs:
+        bound = annotation_to_class(arg.annotation, module, graph)
+        if bound:
+            params[arg.arg] = bound
+    return params
 
 
 def _self_attr_assignment(stmt: ast.AST) -> tuple[str | None, ast.AST | None, ast.AST | None]:
@@ -145,39 +230,62 @@ def _self_attr_assignment(stmt: ast.AST) -> tuple[str | None, ast.AST | None, as
 
 def hoist_attribute_bindings(
     modules: list[Module], graph: CodeGraph, module_registry: dict[str, Module], report: AnalysisReport, root: Path
-) -> dict[str, dict[str, str]]:
-    """Phase 1.5: scan class methods for self.attr bindings."""
-    bindings: dict[str, dict[str, str]] = {}
+) -> dict[str, dict[str, tuple[str, str]]]:
+    """Phase 1.5: map ``self.attr`` to a class symbol id for every class in every module.
+
+    Returns ``{class_id: {attr_name: (class_symbol_id, provenance)}}``. The provenance
+    is carried through to the relation's ``resolution_evidence`` so that a binding
+    established by a literal annotation is not reported at the same trust tier as one
+    guessed from a constructor call.
+
+    Four binding forms are recognised, in precedence order:
+
+    1. explicit annotation -- ``self.db: Database = ...``           (fact)
+    2. constructor call -- ``self.db = Database()``                 (heuristic)
+    3. annotated factory -- ``self.db = make_db()  # -> Database``  (heuristic)
+    4. annotated-parameter passthrough --                           (fact)
+       ``def __init__(self, db: Database): self.db = db``
+
+    Form 4 is the most common shape in real code and is the one that lets
+    ``self.db.query()`` resolve with no inference engine involved at all.
+    """
+    bindings: dict[str, dict[str, tuple[str, str]]] = {}
     for module in modules:
         try:
-            class_bodies = {}
-            for node in ast.walk(module.tree):
-                if isinstance(node, ast.ClassDef):
-                    class_id = ".".join([module.name] + [n.name for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef) and node in list(ast.walk(module.tree))])
-                    class_bodies[node] = []
-
-            # Simplified: iterate through top-level and nested classes in module.tree
-            for node in module.tree.body:
-                if isinstance(node, ast.ClassDef):
-                    class_id = ".".join([module.name, node.name])
-                    attr_map = bindings.setdefault(class_id, {})
-                    for stmt in node.body:
-                        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                            for inner_stmt in ast.walk(stmt):
-                                target_name, annotation, rhs = _self_attr_assignment(inner_stmt)
-                                if target_name is None:
-                                    continue
-                                bound = annotation_to_class(annotation, module, graph) if annotation is not None else None
-                                if bound is None and rhs is not None:
-                                    bound, _ = infer_bound_class(rhs, module, graph, module_registry)
-                                if bound:
-                                    attr_map[target_name] = bound
-                                else:
-                                    attr_map.pop(target_name, None)
-                    if not attr_map:
-                        bindings.pop(class_id, None)
+            for class_id, class_node in _iter_classes(module.tree, module.name):
+                attr_map = bindings.setdefault(class_id, {})
+                for stmt in class_node.body:
+                    if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    params = _annotated_parameters(stmt, module, graph)
+                    for inner_stmt in ast.walk(stmt):
+                        target_name, annotation, rhs = _self_attr_assignment(inner_stmt)
+                        if target_name is None:
+                            continue
+                        bound, provenance = None, "none"
+                        if annotation is not None:
+                            bound = annotation_to_class(annotation, module, graph)
+                            provenance = "annotated_attribute"
+                        if bound is None and rhs is not None:
+                            bound, provenance = infer_bound_class(rhs, module, graph, module_registry)
+                        if bound is None and isinstance(rhs, ast.Name):
+                            bound = params.get(rhs.id)
+                            provenance = "annotated_parameter_passthrough"
+                        if bound:
+                            attr_map[target_name] = (bound, provenance)
+                        else:
+                            attr_map.pop(target_name, None)
+                if not attr_map:
+                    bindings.pop(class_id, None)
         except Exception as e:
-            report.failures.append(FileFailure(file=str(module.path.relative_to(root)), stage="attribute_hoisting", error_type=type(e).__name__, message=str(e)))
+            report.failures.append(
+                FileFailure(
+                    file=str(module.path.relative_to(root)),
+                    stage="attribute_hoisting",
+                    error_type=type(e).__name__,
+                    message=str(e),
+                )
+            )
     return bindings
 
 
@@ -189,6 +297,16 @@ class Definitions(ast.NodeVisitor):
 
     def identifier(self, name: str) -> str:
         return ".".join([self.module.name, *self.scope, name])
+
+    def _parent_id(self) -> str:
+        """The id of the lexically enclosing symbol, or the module container at top level."""
+        return ".".join([self.module.name, *self.scope]) if self.scope else self.module.name
+
+    def _register_child(self, symbol: Symbol) -> None:
+        """Record a top-level symbol against its enclosing module container."""
+        container = self.graph.containers.get(symbol.parent or "")
+        if container is not None and symbol.id not in container.children:
+            container.children.append(symbol.id)
 
     def _ensure_module_container(self) -> None:
         """Create a container for the module if not already done."""
@@ -209,6 +327,12 @@ class Definitions(ast.NodeVisitor):
                     file=str(self.module.path.relative_to(self.root)) if is_module else None,
                     parent=parent,
                 ))
+                # `children` was declared and read but never written, so
+                # get_module_overview().submodules was always empty.
+                if parent and parent in self.graph.containers:
+                    siblings = self.graph.containers[parent].children
+                    if container_id not in siblings:
+                        siblings.append(container_id)
 
     def visit_Import(self, node: ast.Import) -> None:
         for item in node.names:
@@ -233,11 +357,7 @@ class Definitions(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self._ensure_module_container()
-        parent_id = self.scope[-1] if self.scope else None
-        if parent_id and len(self.scope) == 1:
-            parent_id = ".".join([self.module.name, parent_id])
-        elif parent_id:
-            parent_id = ".".join([self.module.name, *self.scope])
+        parent_id = self._parent_id()
 
         symbol = Symbol(
             id=self.identifier(node.name),
@@ -253,6 +373,7 @@ class Definitions(ast.NodeVisitor):
             bases=[dotted(item) or expression(item) for item in node.bases],
         )
         self.graph.add_symbol(symbol)
+        self._register_child(symbol)
         self.scope.append(node.name)
         self.generic_visit(node)
         self.scope.pop()
@@ -265,12 +386,7 @@ class Definitions(ast.NodeVisitor):
         for arg, default in zip(args, defaults):
             inputs.append({"name": arg.arg, "type": expression(arg.annotation) if arg.annotation else "unknown", "default": expression(default) if default else None})
 
-        if self.scope and self.scope[-1][:1].isupper():
-            parent_id = ".".join([self.module.name, *self.scope])
-        elif self.scope:
-            parent_id = ".".join([self.module.name, *self.scope])
-        else:
-            parent_id = self.module.name
+        parent_id = self._parent_id()
 
         symbol = Symbol(
             id=self.identifier(node.name),
@@ -288,6 +404,7 @@ class Definitions(ast.NodeVisitor):
             decorators=[dotted(item) or expression(item) for item in node.decorator_list],
         )
         self.graph.add_symbol(symbol)
+        self._register_child(symbol)
         self.scope.append(node.name)
         self.generic_visit(node)
         self.scope.pop()
@@ -297,12 +414,15 @@ class Definitions(ast.NodeVisitor):
 
 class Relationships(ast.NodeVisitor):
     def __init__(self, module: Module, graph: CodeGraph, root: Path, config: ProjectConfig, report: AnalysisReport,
-                 jedi_resolver: JediResolver | None = None, attribute_bindings: dict[str, dict[str, str]] | None = None,
-                 module_registry: dict[str, Module] | None = None) -> None:
+                 jedi_resolver: JediResolver | None = None,
+                 attribute_bindings: dict[str, dict[str, tuple[str, str]]] | None = None,
+                 module_registry: dict[str, Module] | None = None,
+                 index: SymbolIndex | None = None) -> None:
         self.module, self.graph, self.root, self.config, self.report = module, graph, root, config, report
         self.jedi_resolver = jedi_resolver
         self.attribute_bindings = attribute_bindings or {}
         self.module_registry = module_registry or {}
+        self.index = index if index is not None else SymbolIndex.build(graph)
         self.scope: list[str] = []
         self.classes: list[str] = []
         self.class_ids: list[str] = []
@@ -336,60 +456,80 @@ class Relationships(ast.NodeVisitor):
                     return candidate
         return None
 
+    @staticmethod
+    def _jedi_position(node_func: ast.AST) -> tuple[int, int]:
+        """The position to point the inference engine at for a call's ``func`` expression.
+
+        For an ``Attribute`` the name we care about is the trailing ``.attr``, which sits
+        at the *end* of the expression -- so the line must come from ``end_lineno``, not
+        ``lineno``. Pairing the start line with an end-derived column lands on the wrong
+        line for any multi-line attribute chain, e.g.::
+
+            result = (some_object
+                      .apply_migrations())
+        """
+        if isinstance(node_func, ast.Attribute) and node_func.end_col_offset is not None:
+            line = node_func.end_lineno or node_func.lineno
+            return line, max(node_func.end_col_offset - len(node_func.attr), 0)
+        return node_func.lineno, node_func.col_offset
+
+    def _resolve_via_jedi(self, raw: str, node_func: ast.AST) -> tuple[str, str, str] | None:
+        """Resolve a call via the inference engine, or return None to fall through."""
+        try:
+            line, column = self._jedi_position(node_func)
+            for target in self.jedi_resolver.resolve_call(self.module.path, line, column):
+                if target.module_path is None or not target.full_name:
+                    continue
+                try:
+                    relpath = str(target.module_path.relative_to(self.root))
+                except ValueError:
+                    continue  # outside the project: stdlib or a third-party package
+                symbol_id, ambiguous = self.index.resolve_target(
+                    self.graph, relpath, target.line, target.full_name
+                )
+                if symbol_id:
+                    logger.debug("jedi resolved %s -> %s", raw, symbol_id)
+                    return symbol_id, "resolved_via_inference", "jedi_inference"
+                if ambiguous:
+                    # Several in-repo symbols match this name equally well. Guessing by
+                    # dict order would silently attribute the edge to the wrong symbol,
+                    # which is worse than admitting we do not know.
+                    logger.debug("jedi ambiguous for %s (%s)", raw, target.full_name)
+                    return f"external:{raw}", "external_or_dynamic", "jedi_ambiguous"
+        except Exception as e:
+            logger.debug("jedi resolution failed for %s at %s: %s", raw, self.module.path, e)
+        return None
+
     def resolve(self, raw: str | None, node_func: ast.AST | None = None) -> tuple[str, str, str]:
-        """Resolve a call target; return (target_id, resolution, evidence_label).
+        """Resolve a call target; return ``(target_id, resolution, evidence_label)``.
+
+        Cheap static resolution runs first and the inference engine is only consulted
+        when it fails. The ordering is not merely a performance choice: whatever
+        resolves a call also decides the relation's trust tier, and a scope walk over
+        literal AST is a ``deterministic_fact`` where an inference result is only a
+        ``deterministic_heuristic``. Asking the engine first therefore demotes edges we
+        can prove, which would in turn understate reachability confidence downstream.
 
         Args:
-            raw: The dotted name string (e.g., "conn.apply_migrations")
-            node_func: The AST node for the function being called (for Jedi lookup)
+            raw: The dotted name string (e.g. ``"conn.apply_migrations"``)
+            node_func: The AST node being called, needed for an engine lookup
         """
         if not raw:
             return "external:<unresolved>", "external_or_dynamic", "unresolved_dynamic_dispatch"
 
-        # Try Jedi first (if we have the AST node and a resolver)
+        static = self._resolve_static(raw)
+        if static[1] != "external_or_dynamic":
+            return static
+
         if self.jedi_resolver and node_func:
-            try:
-                # For Attribute nodes (e.g., conn.apply_migrations), point Jedi at the attribute name
-                # For other nodes, use the node's own position
-                if isinstance(node_func, ast.Attribute):
-                    jedi_line = node_func.lineno
-                    jedi_col = node_func.end_col_offset - len(node_func.attr) if node_func.end_col_offset else node_func.col_offset
-                else:
-                    jedi_line = node_func.lineno
-                    jedi_col = node_func.col_offset
+            inferred = self._resolve_via_jedi(raw, node_func)
+            if inferred:
+                return inferred
 
-                jedi_results = self.jedi_resolver.resolve_call(self.module.path, jedi_line, jedi_col)
-                for jedi_target in jedi_results:
-                    # Check if this is an in-repo file
-                    try:
-                        if jedi_target.module_path.is_relative_to(self.root):
-                            if not jedi_target.full_name:
-                                continue
+        return static
 
-                            # Try exact match first
-                            if jedi_target.full_name in self.graph.symbols:
-                                logger.debug(f"Jedi resolved {raw} to {jedi_target.full_name}")
-                                return jedi_target.full_name, "resolved_via_inference", "jedi_inference"
-
-                            # Try matching by suffix (account for module path variations)
-                            for sym_id in self.graph.symbols:
-                                if sym_id.endswith("." + jedi_target.full_name) or sym_id.endswith(jedi_target.full_name):
-                                    logger.debug(f"Jedi resolved {raw} to {sym_id} (suffix match on {jedi_target.full_name})")
-                                    return sym_id, "resolved_via_inference", "jedi_inference"
-
-                            # Special case: if Jedi returned a class but we're in a Call context,
-                            # try finding the __init__ method of that class
-                            if jedi_target.type == "class":
-                                init_id = jedi_target.full_name + ".__init__"
-                                for sym_id in self.graph.symbols:
-                                    if sym_id.endswith("." + init_id) or sym_id.endswith(init_id):
-                                        logger.debug(f"Jedi resolved {raw} to {sym_id} (constructor __init__)")
-                                        return sym_id, "resolved_via_inference", "jedi_inference"
-                    except (ValueError, AttributeError):
-                        continue
-            except Exception as e:
-                logger.debug(f"Jedi resolution failed for {raw} at {self.module.path}:{node_func.lineno}: {e}")
-
+    def _resolve_static(self, raw: str) -> tuple[str, str, str]:
+        """Resolve a dotted name using only literal AST evidence in scope."""
         head, *tail = raw.split(".")
 
         if head in {"self", "cls"} and self.classes:
@@ -398,12 +538,14 @@ class Relationships(ast.NodeVisitor):
                 attr_name, *rest = tail
                 bound = self.attribute_bindings.get(current_class_id, {}).get(attr_name)
                 if bound:
-                    direct = ".".join([bound, *rest])
+                    bound_id, provenance = bound
+                    resolution = "resolved" if provenance in _FACT_PROVENANCE else "resolved_via_inference"
+                    direct = ".".join([bound_id, *rest])
                     if direct in self.graph.symbols:
-                        return direct, "resolved_via_inference", "local_type_inference_attribute"
-                    via_base = self._resolve_via_bases(bound, rest)
+                        return direct, resolution, provenance
+                    via_base = self._resolve_via_bases(bound_id, rest)
                     if via_base:
-                        return via_base, "resolved_via_inference", "local_type_inference_attribute"
+                        return via_base, resolution, provenance
             candidate = ".".join([current_class_id, *tail])
             if candidate in self.graph.symbols:
                 return candidate, "resolved", "static_scope_walk"
@@ -422,7 +564,10 @@ class Relationships(ast.NodeVisitor):
             candidate = ".".join([self.module.imports[head], *tail])
             if candidate in self.graph.symbols:
                 return candidate, "resolved", "static_scope_walk"
-            return candidate, "external_or_dynamic", "unresolved_dynamic_dispatch"
+            # Deliberately fall through. An import table entry does not preclude a
+            # richer local binding for the same name -- a module that does both
+            # `from db import session` and `session = Session()` must still resolve
+            # `session.query()` through the local binding below.
 
         for depth in range(len(self.scope), -1, -1):
             candidate = ".".join([self.module.name, *self.scope[:depth], raw])
@@ -537,6 +682,19 @@ class Relationships(ast.NodeVisitor):
             target, resolution, evidence_label = self.resolve(raw, node_func=node.func)
             contract = self.graph.symbols.get(target)
             parameters = contract.inputs if contract else []
+            # `contract.inputs` includes the receiver, so for a bound call like
+            # `obj.method(a)` a naive zip maps `a` onto the parameter named `self`.
+            # Known residual: an explicit unbound call, `Cls.method(inst, a)`, is also
+            # an Attribute and so is still shifted by one. That form is rare enough to
+            # leave; fixing it needs to know whether the attribute head names a class.
+            if (
+                contract
+                and contract.kind == "method"
+                and parameters
+                and parameters[0]["name"] in ("self", "cls")
+                and isinstance(node.func, ast.Attribute)
+            ):
+                parameters = parameters[1:]
             arguments = [
                 {
                     "parameter": parameters[index]["name"] if index < len(parameters) else None,
@@ -626,7 +784,7 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
     graph = CodeGraph(str(root))
     modules: list[Module] = []
 
-    started_at = datetime.utcnow().isoformat()
+    started_at = datetime.now(timezone.utc).isoformat()
     report = AnalysisReport(
         project_root=str(root),
         started_at=started_at,
@@ -698,11 +856,14 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
     module_registry: dict[str, Module] = {m.name: m for m in modules}
     attribute_bindings = hoist_attribute_bindings(modules, graph, module_registry, report, root)
     jedi_resolver = JediResolver(root)
+    index = SymbolIndex.build(graph)
 
     # Phase 2: Analyze relationships (calls, risks, entry points)
     for item in modules:
         try:
-            Relationships(item, graph, root, config, report, jedi_resolver, attribute_bindings, module_registry).visit(item.tree)
+            Relationships(
+                item, graph, root, config, report, jedi_resolver, attribute_bindings, module_registry, index
+            ).visit(item.tree)
         except Exception as e:
             report.failures.append(
                 FileFailure(
@@ -717,6 +878,6 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
     report.symbols_found = len(graph.symbols)
     report.relations_found = len(graph.relations)
     report.containers_found = len(graph.containers)
-    report.finished_at = datetime.utcnow().isoformat()
+    report.finished_at = datetime.now(timezone.utc).isoformat()
 
     return graph, report

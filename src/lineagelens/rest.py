@@ -203,7 +203,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             is_test = is_test_path(symbol.file, test_roots=config.test_roots)
             dead_confidence = dead_code_confidence.get(symbol.id)
             possibly_dead = dead_confidence is not None
-            duplicate_name = symbol.name in duplicate_names
+            duplicate_name = (symbol.kind, symbol.name) in duplicate_names
 
             # Defensive: null out parent if it won't exist in rendered nodes
             parent_id = symbol.parent
@@ -462,10 +462,11 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         config = ProjectConfig.load(project)
         graph, report = analyze(project, config)
 
-        # Write results
-        from .cli import build, graph_path, report_path
+        # Persist the graph we just computed. Calling cli.build() here would run the
+        # whole analysis a second time.
+        from .cli import write_artifacts
 
-        build(project)
+        write_artifacts(project, config, graph, report, quiet=True)
 
         return {
             "status": "success",

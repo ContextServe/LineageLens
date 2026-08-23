@@ -43,7 +43,7 @@ logging.basicConfig(level=logging.INFO)
 PROJECT_PATH = Path(os.environ.get("LINEAGELENS_PROJECT", "."))
 
 # Global mtime cache to avoid re-parsing graph.json on every call
-_graph_cache: dict[str, tuple[float, Any]] = {}
+_graph_cache: dict[Path, tuple[float, Any]] = {}
 
 
 def get_cached_graph(project: Path) -> Any:
@@ -419,20 +419,19 @@ def create_mcp_server() -> MCPServer:
         copy-paste code or naming conflicts.
 
         Returns:
-            List of names that appear multiple times (per kind)
+            One entry per (kind, name) pair that appears more than once. A name
+            duplicated across methods does not flag an unrelated class of the same
+            name -- the kind is part of the grouping key.
         """
         try:
             graph = get_cached_graph(PROJECT_PATH)
-            duplicate_names = query_find_duplicates(graph)
+            duplicate_keys = query_find_duplicates(graph)
 
-            # Collect symbols for each duplicate name
-            duplicates_detail = {}
+            duplicates_detail: dict[tuple[str, str], list[dict[str, Any]]] = {}
             for sym in graph.symbols.values():
                 key = (sym.kind, sym.name)
-                if sym.name in duplicate_names:
-                    if sym.name not in duplicates_detail:
-                        duplicates_detail[sym.name] = []
-                    duplicates_detail[sym.name].append(
+                if key in duplicate_keys:
+                    duplicates_detail.setdefault(key, []).append(
                         {
                             "id": sym.id,
                             "kind": sym.kind,
@@ -443,14 +442,15 @@ def create_mcp_server() -> MCPServer:
                     )
 
             return {
-                "count": len(duplicate_names),
+                "count": len(duplicate_keys),
                 "duplicate_names": [
                     {
+                        "kind": kind,
                         "name": name,
-                        "occurrences": len(duplicates_detail.get(name, [])),
-                        "symbols": duplicates_detail.get(name, []),
+                        "occurrences": len(duplicates_detail.get((kind, name), [])),
+                        "symbols": duplicates_detail.get((kind, name), []),
                     }
-                    for name in sorted(duplicate_names)
+                    for kind, name in sorted(duplicate_keys)
                 ],
             }
         except GraphNotFoundError as e:
@@ -466,10 +466,14 @@ def create_mcp_server() -> MCPServer:
             Analysis report summary
         """
         try:
+            from .cli import write_artifacts
+
             config = ProjectConfig.load(PROJECT_PATH)
             graph, report = analyze(PROJECT_PATH, config)
 
-            # Clear cache
+            # This previously skipped the write entirely, so popping the cache just
+            # made the next read re-cache the *stale* file at an unchanged mtime.
+            write_artifacts(PROJECT_PATH, config, graph, report, quiet=True)
             _graph_cache.pop(PROJECT_PATH, None)
 
             return {

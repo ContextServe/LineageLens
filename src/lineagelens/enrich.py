@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +102,7 @@ async def enrich_symbols(
     # For now, stub: no LLM calls, return empty report
     return EnrichmentReport(
         project_root="<unknown>",
-        generated_at=datetime.utcnow().isoformat(),
+        generated_at=datetime.now(timezone.utc).isoformat(),
         entries=[],
         model_used=config.model,
         api_calls_made=0,

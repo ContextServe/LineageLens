@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .model import CodeGraph, Container, Evidence, Relation, Symbol
-from .report import AnalysisReport
+from .model import CodeGraph, Container, Evidence, Relation, ResiliencySignal, Symbol
+from .report import AnalysisReport, FileFailure, SymbolWarning
 
 
 class GraphNotFoundError(RuntimeError):
@@ -66,6 +66,15 @@ def load_graph(project: Path) -> CodeGraph:
         )
         graph.add_container(container)
 
+    def _load_evidence(ev_raw: dict | None, default: Evidence) -> Evidence:
+        if not ev_raw:
+            return default
+        return Evidence(
+            tier=ev_raw.get("tier", default.tier),
+            label=ev_raw.get("label", default.label),
+            confidence=ev_raw.get("confidence"),
+        )
+
     # Reconstruct symbols
     for s_raw in raw.get("symbols", []):
         symbol = Symbol(
@@ -84,15 +93,21 @@ def load_graph(project: Path) -> CodeGraph:
             decorators=s_raw.get("decorators", []),
             bases=s_raw.get("bases", []),
             entry_point=s_raw.get("entry_point"),
+            resiliency=[
+                ResiliencySignal(
+                    category=sig["category"],
+                    severity=sig["severity"],
+                    evidence=_load_evidence(
+                        sig.get("evidence") if isinstance(sig.get("evidence"), dict) else None,
+                        Evidence.from_legacy(sig["evidence"]) if isinstance(sig.get("evidence"), str)
+                        else Evidence(tier="deterministic_heuristic", label="unknown"),
+                    ),
+                    line=sig.get("line", 0),
+                )
+                for sig in s_raw.get("resiliency", [])
+            ],
         )
-        # Note: resiliency signals would be reconstructed here too
         graph.add_symbol(symbol)
-
-    # Helper for Evidence reconstruction
-    def _load_evidence(raw: dict | None, default: Evidence) -> Evidence:
-        if not raw:
-            return default
-        return Evidence(tier=raw.get("tier", default.tier), label=raw.get("label", default.label), confidence=raw.get("confidence"))
 
     # Reconstruct relations
     for r_raw in raw.get("relations", []):
@@ -134,6 +149,28 @@ def load_report(project: Path) -> AnalysisReport | None:
             symbols_found=raw.get("symbols_found", 0),
             relations_found=raw.get("relations_found", 0),
             containers_found=raw.get("containers_found", 0),
+            # Without these two, a round-tripped report is always is_clean() and
+            # `lineagelens analyze --strict` cannot see the failures it just wrote.
+            failures=[
+                FileFailure(
+                    file=f["file"],
+                    stage=f["stage"],
+                    error_type=f["error_type"],
+                    message=f["message"],
+                    line=f.get("line"),
+                )
+                for f in raw.get("failures", [])
+            ],
+            warnings=[
+                SymbolWarning(
+                    symbol_id=w.get("symbol_id"),
+                    file=w["file"],
+                    line=w["line"],
+                    message=w["message"],
+                    stage=w["stage"],
+                )
+                for w in raw.get("warnings", [])
+            ],
         )
     except (OSError, json.JSONDecodeError):
         return None
@@ -438,26 +475,28 @@ def list_unreferenced_symbols(graph: CodeGraph) -> list[DeadCodeCandidate]:
     return results
 
 
-def find_duplicate_names(graph: CodeGraph) -> set[str]:
-    """Find symbols that share the same name and kind in different modules.
+def find_duplicate_names(graph: CodeGraph) -> set[tuple[str, str]]:
+    """Find symbols that share the same name *and* kind in different modules.
 
-    This is a "same name in multiple places" heuristic, not a body-hash duplicate check.
-    Useful for detecting naming conflicts or accidental duplicates.
+    This is a "same name in multiple places" heuristic, not a body-hash duplicate
+    check. Useful for spotting naming conflicts and accidental copy-paste.
+
+    Returns ``(kind, name)`` pairs rather than bare names. Grouping by kind and then
+    discarding it made a name duplicated across two methods also flag an unrelated
+    class of the same name.
 
     Args:
         graph: CodeGraph
 
     Returns:
-        Set of names that appear more than once for the same kind
+        Set of ``(kind, name)`` pairs that occur more than once
     """
-    # Group by (kind, name) tuple
-    name_counts = {}
+    name_counts: dict[tuple[str, str], int] = {}
     for symbol in graph.symbols.values():
         key = (symbol.kind, symbol.name)
         name_counts[key] = name_counts.get(key, 0) + 1
 
-    # Return names that appear more than once (per kind)
-    return {name for (kind, name), count in name_counts.items() if count > 1}
+    return {key for key, count in name_counts.items() if count > 1}
 
 
 def get_module_dependencies(graph: CodeGraph) -> dict[str, set[str]]:
@@ -558,7 +597,7 @@ def get_codebase_metrics(graph: CodeGraph) -> dict[str, Any]:
         "duplicates": {
             "count": len(duplicates),
             "total_occurrences": sum(
-                len([s for s in graph.symbols.values() if s.name == name]) for name in duplicates
+                len([s for s in graph.symbols.values() if (s.kind, s.name) == key]) for key in duplicates
             ),
         },
         "risks": {

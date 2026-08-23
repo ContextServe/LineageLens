@@ -17,13 +17,15 @@ class Evidence:
     @classmethod
     def from_legacy(cls, raw: str) -> Evidence:
         """Convert a legacy string label to typed Evidence (best-guess mapping)."""
-        # Tier 1: deterministic facts
-        if raw in ("static_ast", "annotation", "static_scope_walk", "annotated_parameter", "annotated_assignment"):
+        # Tier 1: deterministic facts -- read directly off literal AST
+        if raw in ("static_ast", "annotation", "static_scope_walk", "annotated_parameter",
+                   "annotated_assignment", "annotated_attribute", "annotated_parameter_passthrough"):
             return cls(tier="deterministic_fact", label=raw)
-        # Tier 2: deterministic heuristics
+        # Tier 2: deterministic heuristics -- reproducible, but inferred
         if raw in ("return_expression", "inferred_type", "resolved", "external_or_dynamic",
                    "local_type_inference_construction", "local_type_inference_factory",
-                   "local_type_inference_attribute", "unresolved_dynamic_dispatch"):
+                   "local_type_inference_attribute", "unresolved_dynamic_dispatch",
+                   "jedi_inference", "jedi_ambiguous"):
             return cls(tier="deterministic_heuristic", label=raw)
         # Tier 3: probabilistic
         if raw == "llm":

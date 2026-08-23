@@ -13,6 +13,8 @@ import yaml
 from .analyzer import analyze
 from .config import ProjectConfig
 from .detect_config import detect_config
+from .model import CodeGraph
+from .report import AnalysisReport
 
 
 def _plain(value: Any) -> Any:
@@ -80,30 +82,48 @@ def check_frontend_available() -> None:
     print(f"  http://127.0.0.1:8717/graphql")
 
 
-def build(project: Path) -> tuple[Path, Path]:
-    """Analyze project and write graph.json + report.json.
+def write_artifacts(
+    project: Path,
+    config: ProjectConfig,
+    graph: CodeGraph,
+    report: AnalysisReport,
+    quiet: bool = False,
+) -> tuple[Path, Path]:
+    """Persist an already-computed graph and report.
+
+    Split out of :func:`build` so that callers holding a graph in memory (the REST
+    and MCP trigger endpoints) can write it without analysing a second time.
 
     Returns:
-        (graph_path, report_path) tuple
+        ``(graph_path, report_path)``
     """
-    config = ProjectConfig.load(project)
-    graph, report = analyze(project, config)
-
-    # Write graph.json
     graph_file = graph_path(project, config)
     graph_file.parent.mkdir(parents=True, exist_ok=True)
     graph_file.write_text(json.dumps(graph.to_dict(), indent=2), encoding="utf-8")
 
-    # Write report.json
     report_file = report_path(project, config)
     report_file.parent.mkdir(parents=True, exist_ok=True)
     report_file.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
 
-    # Print human-readable summary
-    for line in report.summary_lines():
-        print(line)
+    if not quiet:
+        for line in report.summary_lines():
+            print(line)
 
     return graph_file, report_file
+
+
+def build(project: Path, quiet: bool = False) -> tuple[Path, Path, AnalysisReport]:
+    """Analyze a project and write graph.json + report.json.
+
+    Returns:
+        ``(graph_path, report_path, report)``. The in-memory report is returned so
+        that ``--strict`` can inspect it directly rather than re-reading and
+        re-parsing the file it just wrote.
+    """
+    config = ProjectConfig.load(project)
+    graph, report = analyze(project, config)
+    graph_file, report_file = write_artifacts(project, config, graph, report, quiet=quiet)
+    return graph_file, report_file, report
 
 
 def main() -> None:
@@ -160,7 +180,7 @@ def main() -> None:
 
     # analyze and serve commands
     config = ProjectConfig.load(project)
-    graph_file, report_file = build(project)
+    graph_file, report_file, analysis_report = build(project)
 
     if args.command == "serve":
         # Check if frontend is available (provide guidance if not, but don't block)
@@ -178,10 +198,8 @@ def main() -> None:
         uvicorn.run(create_app(project, config), host=config.server.host, port=config.server.port)
 
     # Check for failures if --strict is set
-    if args.command == "analyze" and args.strict:
-        import json
-        report = json.loads(report_file.read_text())
-        if report.get("failures"):
+    if args.command == "analyze" and args.strict and analysis_report is not None:
+        if analysis_report.has_failures():
             raise SystemExit(1)
 
 
