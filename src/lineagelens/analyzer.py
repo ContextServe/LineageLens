@@ -55,6 +55,15 @@ def infer(node: ast.AST) -> str:
     return "unknown"
 
 
+# Name of the synthetic symbol that owns module-level statements. Not a legal
+# Python identifier, so it can never collide with a real definition.
+MODULE_SCOPE_NAME = "<module>"
+
+
+def module_scope_id(module: str) -> str:
+    return f"{module}.{MODULE_SCOPE_NAME}"
+
+
 # Binding provenances established by a literal annotation in the source, as opposed to
 # inferred from a constructor call or a factory's declared return type.
 _FACT_PROVENANCE = frozenset(
@@ -109,6 +118,11 @@ class SymbolIndex:
     def build(cls, graph: CodeGraph) -> SymbolIndex:
         index = cls()
         for symbol in graph.symbols.values():
+            # Synthetic module-scope nodes are never a valid inference target, and
+            # they sit at line 1 -- which is also where the first real definition in
+            # a file lives, so indexing them would let `<module>` win that location.
+            if symbol.kind == "module_scope":
+                continue
             index.by_location.setdefault((symbol.file, symbol.line), symbol.id)
             index.by_file_name.setdefault((symbol.file, symbol.name), []).append(symbol.id)
             index.names.add(symbol.name)
@@ -334,6 +348,35 @@ class Definitions(ast.NodeVisitor):
                     if container_id not in siblings:
                         siblings.append(container_id)
 
+    def ensure_module_scope(self, tree: ast.Module) -> None:
+        """Create the synthetic node that owns statements at module level.
+
+        Relations need a source symbol. Module-level statements have no enclosing
+        function, so before this existed every module-level call site was discarded
+        outright -- no relation at all, not even an unresolved one. That hid all the
+        wiring: ``app = FastAPI()``, ``router.include_router(...)``, registry
+        population, and ``if __name__ == "__main__": main()``.
+
+        ``<module>`` is not a legal Python identifier, so the id cannot collide with
+        a real symbol, and the dot keeps it inside the normal parent chain.
+        """
+        if not self.module.name:
+            return
+        self._ensure_module_container()
+        symbol = Symbol(
+            id=module_scope_id(self.module.name),
+            kind="module_scope",
+            name=MODULE_SCOPE_NAME,
+            file=str(self.module.path.relative_to(self.root)),
+            line=1,
+            end_line=tree.body[-1].end_lineno if tree.body else 1,
+            module=self.module.name,
+            parent=self.module.name,
+            description=ast.get_docstring(tree),
+        )
+        self.graph.add_symbol(symbol)
+        self._register_child(symbol)
+
     def visit_Import(self, node: ast.Import) -> None:
         for item in node.names:
             self.module.imports[item.asname or item.name.split(".")[0]] = item.name
@@ -432,6 +475,20 @@ class Relationships(ast.NodeVisitor):
 
     def identifier(self, name: str) -> str:
         return ".".join([self.module.name, *self.scope, name])
+
+    def current_source(self) -> str:
+        """The symbol that owns the statement being visited.
+
+        Falls back outward: the innermost function, else the enclosing class (for
+        statements in a class body), else the synthetic module-scope node. Previously
+        this was just ``self.current``, which is only set inside a function, so every
+        statement outside one was silently dropped.
+        """
+        if self.current:
+            return self.current
+        if self.class_ids:
+            return self.class_ids[-1]
+        return module_scope_id(self.module.name)
 
     def _lookup_binding(self, name: str) -> tuple[str, str] | None:
         """Look up a variable name in the scope chain."""
@@ -678,7 +735,8 @@ class Relationships(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         raw = dotted(node.func)
-        if self.current:
+        source = self.current_source()
+        if source in self.graph.symbols:
             target, resolution, evidence_label = self.resolve(raw, node_func=node.func)
             contract = self.graph.symbols.get(target)
             parameters = contract.inputs if contract else []
@@ -716,7 +774,7 @@ class Relationships(ast.NodeVisitor):
             resolution_evidence = Evidence(tier=_RESOLUTION_TIER[resolution], label=evidence_label)
             self.graph.add_relation(
                 Relation(
-                    source=self.current,
+                    source=source,
                     target=target,
                     kind=kind,
                     file=str(self.module.path.relative_to(self.root)),
@@ -728,7 +786,7 @@ class Relationships(ast.NodeVisitor):
                 )
             )
 
-            current_symbol = self.graph.symbols.get(self.current)
+            current_symbol = self.graph.symbols.get(source)
             if current_symbol:
                 for rule in self.config.analysis.risk_rules:
                     if rule.only_in_async and not current_symbol.async_:
@@ -757,6 +815,32 @@ class Relationships(ast.NodeVisitor):
                     {"type": infer(node.value), "expression": expression(node.value), "evidence": "return_expression"}
                 )
         self.generic_visit(node)
+
+
+def module_name(path: Path, root: Path, config: ProjectConfig) -> str:
+    """Dotted module name for a file, as Python itself would import it.
+
+    Only a *leading* source root is stripped, and only when that directory is not
+    itself a package. Dropping every path component equal to ``"src"`` collapsed
+    ``src/pkg/src/mod.py`` to ``pkg.mod``, colliding with a real ``pkg/mod.py`` and
+    disagreeing with the dotted names any inference engine reports.
+
+    ``test_roots`` and ``script_roots`` are deliberately *not* stripped: they are not
+    on ``sys.path`` in a normal layout, and :func:`queries.is_test_path` identifies
+    test containers by looking for a test-root component in the dotted id.
+    """
+    parts = path.relative_to(root).with_suffix("").parts
+    if not parts:
+        return ""
+
+    leading = parts[0]
+    if leading in config.source_roots and not (root / leading / "__init__.py").exists():
+        parts = parts[1:]
+
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+
+    return ".".join(parts)
 
 
 def iter_python(root: Path, paths: Iterable[str]) -> Iterable[Path]:
@@ -827,19 +911,16 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
             report.files_skipped += 1
             continue
 
-        package_path = path.relative_to(root).with_suffix("").parts
-        if package_path and package_path[-1] == "__init__":
-            module = ".".join(part for part in package_path[:-1] if part != "src")
-        else:
-            module = ".".join(part for part in package_path if part != "src")
-
+        module = module_name(path, root, config)
         if not module:
             report.files_skipped += 1
             continue
 
         try:
             item = Module(path, module, tree)
-            Definitions(item, graph, root, report).visit(tree)
+            definitions = Definitions(item, graph, root, report)
+            definitions.ensure_module_scope(tree)
+            definitions.visit(tree)
             modules.append(item)
         except Exception as e:
             report.failures.append(

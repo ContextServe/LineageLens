@@ -6,6 +6,16 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 
+# Bump whenever the on-disk shape or the meaning of symbol ids changes, so a
+# stale graph.json is rejected outright instead of silently producing nonsense.
+#
+#   1  initial release
+#   2  module ids strip only a leading source root (a nested "src" component is
+#      no longer dropped); synthetic "<module>" symbols own module-level
+#      statements; project_root and schema_version are persisted
+SCHEMA_VERSION = 2
+
+
 @dataclass(frozen=True)
 class Evidence:
     """Evidence/trust tier for a signal in the code graph."""
@@ -113,6 +123,8 @@ class CodeGraph:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": SCHEMA_VERSION,
+            "project_root": self.project_root,
             "symbols": [asdict(item) for item in self.symbols.values()],
             "containers": [asdict(item) for item in self.containers.values()],
             "relations": [asdict(item) for item in self.relations],

@@ -310,6 +310,12 @@ scripts.run_batch.build:
   verdict: alive
   rescue: static_call
   scope: source
+scripts.run_batch.wire:
+  # Also module scope, but with an argument, so the argument mapping is
+  # exercised from a non-function source too.
+  verdict: alive
+  rescue: static_call
+  scope: source
 
 # --- test-scope symbols ---------------------------------------------------
 tests.conftest.db:
@@ -329,4 +335,109 @@ tests.helpers.unused_helper:
 tests.test_corpus.test_x:
   verdict: alive
   rescue: entry_point:test
+  scope: test
+
+# --- synthetic module-scope nodes ------------------------------------------
+# One per module, owning statements that sit outside any function. Every one is
+# a reachability root under the default `module_scope_roots: all`, which is an
+# over-approximation: a module body only actually executes if something imports
+# it. The stricter `imports_only` mode seeds only entry-point-bearing modules
+# and propagates through IMPORTS edges. `all` is the default deliberately --
+# over-approximating costs recall, but it never fabricates a "this is dead,
+# delete it", and a 71% false-positive rate is the problem being fixed.
+"corpus.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.annotations.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.api_fastapi.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.console.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.decorators.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.dunders.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.exported.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.inheritance.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.mainguard.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.passthrough.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.polymorphic.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.registry.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.shadow_a.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.shadow_b.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.src.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.src.nested.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.strings.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.tasks.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.tested_only.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"corpus.truly_dead.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"scripts.run_batch.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: source
+"tests.conftest.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: test
+"tests.helpers.<module>":
+  verdict: alive
+  rescue: module_scope
+  scope: test
+"tests.test_corpus.<module>":
+  verdict: alive
+  rescue: module_scope
   scope: test
