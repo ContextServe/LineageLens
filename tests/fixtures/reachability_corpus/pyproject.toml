@@ -1,0 +1,8 @@
+# Not a real installable package. Present so that console-script entry-point
+# detection has something to parse.
+[project]
+name = "reachability-corpus"
+version = "0.0.0"
+
+[project.scripts]
+corpus-cli = "corpus.console:main"

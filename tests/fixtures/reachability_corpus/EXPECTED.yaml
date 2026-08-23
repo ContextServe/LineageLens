@@ -1,0 +1,332 @@
+# Golden reachability table for the corpus.
+#
+# This file is the specification, not a snapshot: it records what each symbol
+# *should* be once reachability is modelled, and phases flip entries into place.
+# Two-way set equality against the analyzed graph is asserted, so a new symbol
+# cannot slip in unclassified.
+#
+# Fields per symbol:
+#   verdict  alive | dynamic_only | test_only | public_api | probably_dead | dead
+#   rescue   the single mechanism that saved it (null when the verdict is dead)
+#   scope    source | test  -- where the symbol lives, from is_test_path
+#
+# The "rescue" is the mechanism expected to *win*. Where several apply, the
+# highest-trust one wins: a fact-tier static_call beats a heuristic-tier
+# polymorphic_override. Fixtures are written so that the mechanism under test is
+# the only one available, otherwise the test would pass for the wrong reason.
+
+# --- annotations: classes referenced only from type annotations -------------
+corpus.annotations.Later:
+  # Reached only through the string forward-ref `-> "Later"`.
+  verdict: alive
+  rescue: type_annotation
+  scope: source
+corpus.annotations.Nested:
+  # Reached only through a subscript annotation: Optional[list[Nested]].
+  verdict: alive
+  rescue: type_annotation
+  scope: source
+corpus.annotations.Payload:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.annotations.Result:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.annotations.returns_later:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.annotations.takes_nested:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.annotations.takes_payload:
+  verdict: alive
+  rescue: static_call
+  scope: source
+
+# --- fastapi-shaped route, DI, and lifespan --------------------------------
+corpus.api_fastapi.Depends:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.api_fastapi._App:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.api_fastapi._App.__init__:
+  verdict: alive
+  rescue: implicit_dunder
+  scope: source
+corpus.api_fastapi._Router:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.api_fastapi._Router.get:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.api_fastapi._Router.get.decorate:
+  # A nested function returned by name; never called at its definition site.
+  verdict: alive
+  rescue: passed_as_value
+  scope: source
+corpus.api_fastapi.dep_fn:
+  # Referenced only inside Depends(...) -- an argument, not a call.
+  verdict: alive
+  rescue: passed_as_value
+  scope: source
+corpus.api_fastapi.lifespan_fn:
+  # Referenced only as a keyword argument at module scope.
+  verdict: alive
+  rescue: passed_as_value
+  scope: source
+corpus.api_fastapi.list_items:
+  verdict: alive
+  rescue: entry_point:api_route
+  scope: source
+
+# --- console script hub ----------------------------------------------------
+corpus.console.main:
+  verdict: alive
+  rescue: entry_point:console_script
+  scope: source
+corpus.console.helper_called_by_main:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.console.make_payload:
+  verdict: alive
+  rescue: static_call
+  scope: source
+
+# --- locally defined decorator ---------------------------------------------
+corpus.decorators.memoize:
+  # Referenced only by the @ syntax.
+  verdict: alive
+  rescue: decorator
+  scope: source
+corpus.decorators.memoize.wrapper:
+  verdict: alive
+  rescue: passed_as_value
+  scope: source
+corpus.decorators.cached_thing:
+  verdict: alive
+  rescue: static_call
+  scope: source
+
+# --- implicit dunders ------------------------------------------------------
+corpus.dunders.Ctx:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.dunders.Ctx.__enter__:
+  verdict: alive
+  rescue: implicit_dunder
+  scope: source
+corpus.dunders.Ctx.__exit__:
+  verdict: alive
+  rescue: implicit_dunder
+  scope: source
+corpus.dunders.Model:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.dunders.Model.__init__:
+  # `Model()` resolves to the class. __init__ is reachable because its class is.
+  verdict: alive
+  rescue: implicit_dunder
+  scope: source
+corpus.dunders.Proxy:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.dunders.Proxy.__getattr__:
+  verdict: alive
+  rescue: implicit_dunder
+  scope: source
+corpus.dunders.use_them:
+  verdict: alive
+  rescue: static_call
+  scope: source
+
+# --- package __all__ re-export ---------------------------------------------
+corpus.exported.exported_only:
+  # Nothing calls this. The package __all__ is its only reference.
+  verdict: alive
+  rescue: dunder_all_export
+  scope: source
+
+# --- inheritance and polymorphic dispatch ----------------------------------
+corpus.inheritance.Base:
+  verdict: alive
+  rescue: type_annotation
+  scope: source
+corpus.inheritance.Base.op:
+  # Called through the annotated base parameter in consume().
+  verdict: alive
+  rescue: annotated_parameter
+  scope: source
+corpus.inheritance.ChildA:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.inheritance.ChildA.op:
+  # No call site names it. Reached because it overrides a reachable base method,
+  # which is a name-match heuristic, hence dynamic_only rather than alive.
+  verdict: dynamic_only
+  rescue: polymorphic_override
+  scope: source
+corpus.inheritance.ChildB:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.inheritance.ChildB.op:
+  verdict: dynamic_only
+  rescue: polymorphic_override
+  scope: source
+
+# --- __main__ guard --------------------------------------------------------
+corpus.mainguard.run_it:
+  # Called at module scope inside `if __name__ == "__main__":`.
+  verdict: alive
+  rescue: static_call
+  scope: source
+
+# --- module id must keep a nested "src" component --------------------------
+corpus.src.nested.nested_fn:
+  verdict: alive
+  rescue: static_call
+  scope: source
+
+# --- annotated-parameter passthrough attribute binding ---------------------
+corpus.passthrough.Service:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.passthrough.Service.__init__:
+  verdict: alive
+  rescue: implicit_dunder
+  scope: source
+corpus.passthrough.Service.go:
+  verdict: alive
+  rescue: static_call
+  scope: source
+
+# --- polymorphic consumer --------------------------------------------------
+corpus.polymorphic.consume:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.polymorphic.make:
+  # CONTROL: nothing calls make(), so it is dead -- and critically, the
+  # references it *makes* (to consume and ChildA) must not rescue anything on
+  # its behalf. A dead function's outgoing edges are not reachability.
+  verdict: dead
+  rescue: null
+  scope: source
+
+# --- functions referenced as values at module scope ------------------------
+corpus.registry.handler_a:
+  verdict: alive
+  rescue: passed_as_value
+  scope: source
+corpus.registry.handler_b:
+  verdict: alive
+  rescue: passed_as_value
+  scope: source
+
+# --- same-name classes in different modules --------------------------------
+corpus.shadow_a.Engine:
+  # CONTROL: only shadow_b.Engine is constructed. An unanchored suffix match
+  # let this one absorb those edges.
+  verdict: dead
+  rescue: null
+  scope: source
+corpus.shadow_a.Engine.run:
+  verdict: dead
+  rescue: null
+  scope: source
+corpus.shadow_b.Engine:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.shadow_b.Engine.run:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.shadow_b.drive:
+  verdict: alive
+  rescue: static_call
+  scope: source
+
+# --- celery-style task registration ---------------------------------------
+corpus.tasks._App:
+  verdict: alive
+  rescue: static_call
+  scope: source
+corpus.tasks._App.task:
+  verdict: alive
+  rescue: decorator
+  scope: source
+corpus.tasks.do_work:
+  # Registered by decorator; nothing in-repo calls it. The dotted string in
+  # strings.py also names it, but REFERENCES_STRING is off by default, so the
+  # task entry point must be what saves it.
+  verdict: alive
+  rescue: entry_point:task
+  scope: source
+
+# --- source code reachable only from tests --------------------------------
+corpus.tested_only.only_tests_call_me:
+  verdict: test_only
+  rescue: static_call
+  scope: source
+corpus.tested_only.shared_by_test_and_main:
+  verdict: alive
+  rescue: static_call
+  scope: source
+
+# --- the control group: genuinely dead ------------------------------------
+corpus.truly_dead.never_used:
+  verdict: dead
+  rescue: null
+  scope: source
+corpus.truly_dead.NeverUsed:
+  verdict: dead
+  rescue: null
+  scope: source
+corpus.truly_dead.NeverUsed.also_never_used:
+  verdict: dead
+  rescue: null
+  scope: source
+
+# --- script with module-scope wiring only ---------------------------------
+scripts.run_batch.build:
+  # Called at module scope. Relations used to require an enclosing function,
+  # so this produced no edge of any kind.
+  verdict: alive
+  rescue: static_call
+  scope: source
+
+# --- test-scope symbols ---------------------------------------------------
+tests.conftest.db:
+  verdict: alive
+  rescue: entry_point:test_fixture
+  scope: test
+tests.helpers.helper:
+  verdict: alive
+  rescue: static_call
+  scope: test
+tests.helpers.unused_helper:
+  # CONTROL: dead, but in a test file. Triage priority differs from source-scope
+  # dead code, which is why scope is a separate field from verdict.
+  verdict: dead
+  rescue: null
+  scope: test
+tests.test_corpus.test_x:
+  verdict: alive
+  rescue: entry_point:test
+  scope: test

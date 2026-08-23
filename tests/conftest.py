@@ -23,6 +23,10 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+# The golden corpus contains its own conftest.py and test_*.py. Those files are
+# *data* -- input to the analyzer -- and must never be collected as real tests.
+collect_ignore_glob = ["fixtures/*"]
+
 
 @pytest.fixture(scope="session")
 def repo_root() -> Path:
