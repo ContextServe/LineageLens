@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -112,7 +112,9 @@ def write_artifacts(
     return graph_file, report_file
 
 
-def build(project: Path, quiet: bool = False) -> tuple[Path, Path, AnalysisReport]:
+def build(
+    project: Path, quiet: bool = False, jedi: bool | None = None
+) -> tuple[Path, Path, AnalysisReport]:
     """Analyze a project and write graph.json + report.json.
 
     Returns:
@@ -121,6 +123,8 @@ def build(project: Path, quiet: bool = False) -> tuple[Path, Path, AnalysisRepor
         re-parsing the file it just wrote.
     """
     config = ProjectConfig.load(project)
+    if jedi is not None and jedi != config.analysis.jedi:
+        config = replace(config, analysis=replace(config.analysis, jedi=jedi))
     graph, report = analyze(project, config)
     graph_file, report_file = write_artifacts(project, config, graph, report, quiet=quiet)
     return graph_file, report_file, report
@@ -136,6 +140,12 @@ def main() -> None:
     analyze_cmd = commands.add_parser("analyze", help="Analyze Python code and build graph")
     analyze_cmd.add_argument("project", type=Path, help="Project directory")
     analyze_cmd.add_argument("--strict", action="store_true", help="Exit with nonzero code if any failures occur")
+    analyze_cmd.add_argument(
+        "--no-jedi",
+        action="store_true",
+        help="Skip type inference. Faster, resolves fewer dynamic calls (useful on PR-time CI runs)",
+    )
+    analyze_cmd.add_argument("--quiet", action="store_true", help="Do not print the analysis summary")
 
     serve_cmd = commands.add_parser("serve", help="Start local web UI and GraphQL server")
     serve_cmd.add_argument("project", type=Path, help="Project directory")
@@ -180,7 +190,11 @@ def main() -> None:
 
     # analyze and serve commands
     config = ProjectConfig.load(project)
-    graph_file, report_file, analysis_report = build(project)
+    graph_file, report_file, analysis_report = build(
+        project,
+        quiet=getattr(args, "quiet", False),
+        jedi=False if getattr(args, "no_jedi", False) else None,
+    )
 
     if args.command == "serve":
         # Check if frontend is available (provide guidance if not, but don't block)

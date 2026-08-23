@@ -234,13 +234,21 @@ def search_symbols(
     return results
 
 
-def get_callers(graph: CodeGraph, symbol_id: str) -> list[Relation]:
-    """Get all relations where this symbol is the target (things that call it)."""
+def get_callers(graph: CodeGraph, symbol_id: str, index: Any = None) -> list[Relation]:
+    """Relations where this symbol is the target (things that reference it).
+
+    Pass a :class:`~lineagelens.index.GraphIndex` to avoid a linear scan; without
+    one this is O(#relations), which is why the metrics pass used to be O(V*E).
+    """
+    if index is not None:
+        return index.callers_of(symbol_id)
     return [rel for rel in graph.relations if rel.target == symbol_id]
 
 
-def get_callees(graph: CodeGraph, symbol_id: str) -> list[Relation]:
-    """Get all relations where this symbol is the source (things it calls)."""
+def get_callees(graph: CodeGraph, symbol_id: str, index: Any = None) -> list[Relation]:
+    """Relations where this symbol is the source (things it references)."""
+    if index is not None:
+        return index.callees_of(symbol_id)
     return [rel for rel in graph.relations if rel.source == symbol_id]
 
 
@@ -548,11 +556,12 @@ def get_module_dependencies(graph: CodeGraph) -> dict[str, set[str]]:
     return dependencies
 
 
-def get_codebase_metrics(graph: CodeGraph) -> dict[str, Any]:
+def get_codebase_metrics(graph: CodeGraph, index: Any = None) -> dict[str, Any]:
     """Get aggregate codebase metrics and statistics.
 
     Args:
         graph: CodeGraph
+        index: Optional GraphIndex; supplying one avoids rebuilding adjacency
 
     Returns:
         Dict with various metrics about the codebase
@@ -562,20 +571,14 @@ def get_codebase_metrics(graph: CodeGraph) -> dict[str, Any]:
     entry_points = list_entry_points(graph)
     risks = list_resiliency_risks(graph)
 
-    # Calculate call depth statistics
-    max_depth = 0
-    avg_depth = 0
-    depth_sum = 0
-    depth_count = 0
+    # Call depth, in one O(V+E) pass. This previously ran a transitive walk per
+    # symbol -- O(V*E) -- and reported len(lineage), i.e. the size of the reachable
+    # set, not a depth at all.
+    from .index import index_for
 
-    for symbol_id in graph.symbols.keys():
-        lineage = get_lineage(graph, symbol_id, direction="forward", max_depth=100)
-        depth = len(lineage)
-        max_depth = max(max_depth, depth)
-        depth_sum += depth
-        depth_count += 1
-
-    avg_depth = depth_sum / depth_count if depth_count > 0 else 0
+    chains = (index or index_for(graph)).max_call_chain
+    max_depth = max(chains.values(), default=0)
+    avg_depth = (sum(chains.values()) / len(chains)) if chains else 0
 
     # Risk distribution by category
     risk_by_category: dict[str, int] = {}
@@ -620,8 +623,10 @@ def get_codebase_metrics(graph: CodeGraph) -> dict[str, Any]:
             "by_severity": risk_by_severity,
         },
         "call_depth": {
-            "max": max_depth,
-            "average": round(avg_depth, 2),
+            # Longest chain of CALLS edges, with cycles cut at the point of
+            # recursion -- so this is a lower bound for mutually recursive code.
+            "max_chain": max_depth,
+            "average_chain": round(avg_depth, 2),
         },
         "modules": len(set(s.module for s in graph.symbols.values())),
     }

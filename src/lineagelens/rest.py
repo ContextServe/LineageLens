@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from .analyzer import analyze
 from .config import ProjectConfig
+from .index import invalidate, load_index
 from .queries import (
     GraphNotFoundError,
     find_duplicate_names,
@@ -27,7 +28,6 @@ from .queries import (
     list_entry_points,
     list_resiliency_risks,
     list_unreferenced_symbols,
-    load_graph,
     search_symbols,
 )
 
@@ -144,17 +144,17 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         Includes both Symbols and Containers for compound (hierarchical) layout.
         """
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
-        # Load config to get test_roots
-        config = ProjectConfig.load(project)
+        config = index.config
 
         # Precompute unreferenced symbols and duplicate names for efficiency
         unreferenced = list_unreferenced_symbols(graph)
         dead_code_confidence = {c.symbol.id: c.confidence for c in unreferenced}
-        duplicate_names = find_duplicate_names(graph)
+        duplicate_names = index.duplicate_names
 
         # Collect nodes
         nodes = []
@@ -254,7 +254,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def get_symbol_detail(symbol_id: str) -> SymbolOut:
         """Get full details for a symbol."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -283,7 +284,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def search(text: str, kind: str | None = None, limit: int = 30) -> list[SymbolOut]:
         """Search symbols by name/id."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -312,11 +314,12 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def callers(symbol_id: str) -> list[RelationOut]:
         """Get all symbols that call this one."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
-        relations = get_callers(graph, symbol_id)
+        relations = get_callers(graph, symbol_id, index)
         return [
             RelationOut(
                 source=r.source,
@@ -334,11 +337,12 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def callees(symbol_id: str) -> list[RelationOut]:
         """Get all symbols this one calls."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
-        relations = get_callees(graph, symbol_id)
+        relations = get_callees(graph, symbol_id, index)
         return [
             RelationOut(
                 source=r.source,
@@ -356,7 +360,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def lineage(symbol_id: str, direction: str = "forward", max_depth: int = 5) -> list[LineageStepOut]:
         """Get transitive call path (forward or backward)."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -376,7 +381,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def impact(symbol_id: str, max_depth: int = 10) -> ImpactReportOut:
         """Backward transitive closure: what would be affected by changes here?"""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -400,7 +406,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def module_overview(module: str) -> ModuleOverviewOut:
         """Get high-level overview of a module (for agents)."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -419,7 +426,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def entry_points(kind: str | None = None) -> list[SymbolOut]:
         """List all entry points (API routes, CLI commands, tests)."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -448,7 +456,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def resiliency(min_severity: str | None = None) -> list[RiskOut]:
         """List all resiliency/risk signals."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -467,6 +476,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         from .cli import write_artifacts
 
         write_artifacts(project, config, graph, report, quiet=True)
+        invalidate(project)
 
         return {
             "status": "success",

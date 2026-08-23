@@ -45,13 +45,19 @@ class JediResolver:
     that raise exceptions are logged but do not abort analysis.
     """
 
-    def __init__(self, root: Path) -> None:
-        """Initialize Jedi resolver for a project root.
+    def __init__(self, root: Path, max_calls: int | None = None) -> None:
+        """Initialize the resolver for a project root.
 
         Args:
             root: Project root directory (passed to jedi.Project)
+            max_calls: Hard ceiling on inference calls. None means unbounded. A
+                backstop for pathological repos, not a tuning knob -- the caller's
+                pre-filter is what keeps the normal cost down.
         """
         self.root = root
+        self.max_calls = max_calls
+        self.calls = 0
+        self.budget_exhausted = False
         self._project: Any = None  # Lazy: jedi.Project(path=root)
         self._scripts: dict[Path, Any] = {}  # Lazy: {file_path: jedi.Script(...)}
 
@@ -108,6 +114,10 @@ class JediResolver:
         Returns:
             List of JediTarget objects (empty if unresolvable or Jedi fails)
         """
+        if self.max_calls is not None and self.calls >= self.max_calls:
+            self.budget_exhausted = True
+            return []
+        self.calls += 1
         try:
             script = self._get_script(file_path)
             if not script:

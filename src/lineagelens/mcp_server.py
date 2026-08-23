@@ -18,6 +18,7 @@ from mcp.server.mcpserver.context import Context
 
 from .analyzer import analyze
 from .config import ProjectConfig
+from .index import invalidate, load_index
 from .queries import (
     GraphNotFoundError,
     find_duplicate_names as query_find_duplicates,
@@ -32,7 +33,6 @@ from .queries import (
     list_entry_points as query_list_entry_points,
     list_resiliency_risks as query_list_resiliency_risks,
     list_unreferenced_symbols as query_list_unreferenced,
-    load_graph,
     search_symbols as query_search_symbols,
 )
 
@@ -42,23 +42,18 @@ logging.basicConfig(level=logging.INFO)
 # Get project path from environment
 PROJECT_PATH = Path(os.environ.get("LINEAGELENS_PROJECT", "."))
 
-# Global mtime cache to avoid re-parsing graph.json on every call
-_graph_cache: dict[Path, tuple[float, Any]] = {}
+def get_cached_index(project: Path) -> Any:
+    """Load the indexed graph, reusing it while graph.json is unchanged."""
+    return load_index(project)
 
 
 def get_cached_graph(project: Path) -> Any:
-    """Load graph with mtime-based caching."""
-    graph_path = project / ".lineagelens" / "graph.json"
-    mtime = graph_path.stat().st_mtime if graph_path.exists() else 0
+    """Load the graph, reusing it while graph.json is unchanged.
 
-    if project in _graph_cache:
-        cached_mtime, cached_graph = _graph_cache[project]
-        if cached_mtime == mtime:
-            return cached_graph
-
-    graph = load_graph(project)
-    _graph_cache[project] = (mtime, graph)
-    return graph
+    Thin wrapper over the shared index cache so the tool bodies below read
+    naturally; use :func:`get_cached_index` where adjacency lookups are needed.
+    """
+    return load_index(project).graph
 
 
 def create_mcp_server() -> MCPServer:
@@ -124,7 +119,7 @@ def create_mcp_server() -> MCPServer:
         """
         try:
             graph = get_cached_graph(PROJECT_PATH)
-            relations = query_get_callers(graph, symbol_id)
+            relations = query_get_callers(graph, symbol_id, get_cached_index(PROJECT_PATH))
             return {"symbol_id": symbol_id, "callers": [asdict(r) for r in relations]}
         except GraphNotFoundError as e:
             return {"error": str(e)}
@@ -141,7 +136,7 @@ def create_mcp_server() -> MCPServer:
         """
         try:
             graph = get_cached_graph(PROJECT_PATH)
-            relations = query_get_callees(graph, symbol_id)
+            relations = query_get_callees(graph, symbol_id, get_cached_index(PROJECT_PATH))
             return {"symbol_id": symbol_id, "callees": [asdict(r) for r in relations]}
         except GraphNotFoundError as e:
             return {"error": str(e)}
@@ -312,7 +307,7 @@ def create_mcp_server() -> MCPServer:
         """
         try:
             graph = get_cached_graph(PROJECT_PATH)
-            metrics = query_get_metrics(graph)
+            metrics = query_get_metrics(graph, get_cached_index(PROJECT_PATH))
             return metrics
         except GraphNotFoundError as e:
             return {"error": str(e)}
@@ -474,7 +469,7 @@ def create_mcp_server() -> MCPServer:
             # This previously skipped the write entirely, so popping the cache just
             # made the next read re-cache the *stale* file at an unchanged mtime.
             write_artifacts(PROJECT_PATH, config, graph, report, quiet=True)
-            _graph_cache.pop(PROJECT_PATH, None)
+            invalidate(PROJECT_PATH)
 
             return {
                 "status": "success",
