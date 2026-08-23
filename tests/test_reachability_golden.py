@@ -48,9 +48,18 @@ PENDING_ID_FIXES: dict[str, str] = {}
 #   entry_point:*               3   console_script / celery task / pytest fixture
 #   dunder_all_export           1   no EXPORTS edge
 #
-# The module-scope source node closed the 6 static_call cases, taking it to 23.
+# Progress so far, all measured against the same table:
+#   29  corpus landed
+#   23  module-scope source node closed the 6 static_call cases
+#   10  the non-call relation kinds closed passed_as_value, type_annotation,
+#       decorator and dunder_all_export
+#
+# The remaining 10 are 6 implicit dunders and 2 polymorphic overrides (both need
+# the reachability walk, which applies them at dequeue time rather than as plain
+# edges) plus 2 entry-point rules (console_script and celery task).
+#
 # Synthetic module-scope nodes are excluded from the count -- see below.
-MAX_FALSE_VERDICTS = 23
+MAX_FALSE_VERDICTS = 10
 
 
 @pytest.fixture(scope="module")

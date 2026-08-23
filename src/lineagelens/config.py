@@ -57,6 +57,28 @@ class AnalysisConfig:
         "framework_callback": (".middleware", ".exception_handler", ".on_event", "validator", "field_validator", "model_validator"),
     })
 
+    # Relation kinds to emit. CALLS is not listed because it is not optional.
+    #
+    # Reachability in Python does not flow through calls alone: a class used only
+    # as a type annotation, a function handed to Depends(), a name listed in
+    # __all__, and a base class are all live code that no call edge describes.
+    # Each kind is individually switchable so a volume or precision regression can
+    # be bisected to one of them.
+    #
+    # REFERENCES_STRING is off by default on purpose. It matches dotted string
+    # literals against symbol names, which is scope-free -- and a false *rescue*
+    # is worse than a false positive, because it hides dead code with no trail.
+    relation_kinds: tuple[str, ...] = (
+        "REFERENCES",
+        "ANNOTATES",
+        "INHERITS",
+        "OVERRIDES",
+        "DECORATES",
+        "EXPORTS",
+        "IMPORTS",
+        "USES_FIXTURE",
+    )
+
     # Type inference via Jedi. Only consulted when cheap static resolution fails,
     # and only when the call's trailing name could possibly match an in-repo symbol,
     # so the cost is a small fraction of the call sites. Disable to trade a little
@@ -111,9 +133,11 @@ class ProjectConfig:
         entry_points = {key: tuple(values) for key, values in (raw.get("entry_points", {}) or {}).items()}
         defaults = AnalysisConfig()
         max_calls = raw.get("jedi_max_calls", defaults.jedi_max_calls)
+        kinds = raw.get("relation_kinds")
         return AnalysisConfig(
             risk_rules=tuple(rules) or defaults.risk_rules,
             entry_points=entry_points or defaults.entry_points,
+            relation_kinds=tuple(kinds) if kinds is not None else defaults.relation_kinds,
             jedi=bool(raw.get("jedi", defaults.jedi)),
             jedi_max_calls=int(max_calls) if max_calls is not None else None,
         )
