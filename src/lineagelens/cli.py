@@ -12,7 +12,11 @@ import yaml
 
 from .analyzer import analyze
 from .config import ProjectConfig
+from . import hooks
 from .detect_config import detect_config
+from .queries import GraphNotFoundError, load_graph
+from .ratchet import SEVERITY, BASELINE_NAME, Baseline, evaluate, severity_at_or_above
+from .reachability import compute_reachability
 from .model import CodeGraph
 from .report import AnalysisReport
 
@@ -130,6 +134,46 @@ def build(
     return graph_file, report_file, report
 
 
+def run_check(project: Path, args: Any) -> int:
+    """Compare current dead-code candidates against the baseline. Returns an exit code."""
+    config = ProjectConfig.load(project)
+
+    if args.analyze:
+        graph, report = analyze(project, config)
+        write_artifacts(project, config, graph, report, quiet=True)
+    else:
+        try:
+            graph = load_graph(project)
+        except GraphNotFoundError as e:
+            print(f"✗ {e}")
+            return 1
+
+    candidates = compute_reachability(graph, config).candidates()
+    baseline_path = args.baseline or (project / config.output.directory / BASELINE_NAME)
+
+    if args.update_baseline:
+        considered = severity_at_or_above(args.fail_on)
+        updated = Baseline(
+            entries={c.symbol.id: c.verdict for c in candidates if c.verdict in considered}
+        )
+        updated.save(baseline_path)
+        print(f"✓ Baseline written to {baseline_path} ({len(updated.entries)} entries)")
+        return 0
+
+    result = evaluate(candidates, Baseline.load(baseline_path), fail_on=args.fail_on)
+    for line in result.summary_lines():
+        print(line)
+
+    if result.failed(args.max_new):
+        print(
+            "\n✗ New dead code introduced. Remove it, or -- if it is reached by "
+            "reflection or config-driven dispatch that static analysis cannot see -- "
+            "mark it `# lineagelens: keep` and re-run with --update-baseline."
+        )
+        return 1
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="lineagelens", description="Evidence-labelled Python code lineage for humans and coding agents")
     commands = parser.add_subparsers(dest="command", required=True, help="Command to run")
@@ -149,6 +193,57 @@ def main() -> None:
 
     serve_cmd = commands.add_parser("serve", help="Start local web UI and GraphQL server")
     serve_cmd.add_argument("project", type=Path, help="Project directory")
+
+    check_cmd = commands.add_parser(
+        "check",
+        help="Fail on newly introduced dead code (CI ratchet)",
+        description=(
+            "Compare dead-code candidates against a committed baseline and exit 1 only "
+            "on ones that are new. A ratchet is adoptable on day one, where an absolute "
+            "gate would fail every existing codebase and get switched off."
+        ),
+    )
+    check_cmd.add_argument("project", type=Path, help="Project directory")
+    check_cmd.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Baseline file (default: <output dir>/dead-code-baseline.json)",
+    )
+    check_cmd.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="Rewrite the baseline from the current state and exit 0",
+    )
+    check_cmd.add_argument(
+        "--fail-on",
+        choices=list(SEVERITY),
+        default="dead",
+        help="Least severe verdict that should fail (default: dead)",
+    )
+    check_cmd.add_argument(
+        "--max-new",
+        type=int,
+        default=0,
+        help="Tolerate this many new candidates before failing (default: 0)",
+    )
+    check_cmd.add_argument(
+        "--analyze",
+        action="store_true",
+        help="Re-run the analysis first instead of using the stored graph",
+    )
+
+    hook_cmd = commands.add_parser("hook", help="Manage the git hook that keeps the graph current")
+    hook_cmd.add_argument("action", choices=["install", "uninstall", "status"])
+    hook_cmd.add_argument("project", type=Path, nargs="?", default=Path("."), help="Project directory")
+    hook_cmd.add_argument(
+        "--pre-commit",
+        action="store_true",
+        help="Use pre-commit instead of post-commit (adds seconds to every commit)",
+    )
+    hook_cmd.add_argument(
+        "--force", action="store_true", help="Append to a hook LineageLens did not create"
+    )
 
     args = parser.parse_args()
     project = args.project.resolve()
@@ -187,6 +282,30 @@ def main() -> None:
         print("  3. Optionally run: lineagelens serve . (for web UI)")
 
         return
+
+    if args.command == "hook":
+        kind = "pre-commit" if args.pre_commit else "post-commit"
+        try:
+            if args.action == "install":
+                path = hooks.install(project, kind=kind, force=args.force)
+                print(f"✓ Installed {kind} hook at {path}")
+                if kind == "pre-commit":
+                    print("  Note: this runs on every commit and will add a few seconds each time.")
+                print("\n  Add .lineagelens/ to .gitignore -- the graph is a build artifact,")
+                print("  not source. Publish it from CI if agents need it centrally.")
+            elif args.action == "uninstall":
+                removed = hooks.uninstall(project, kind=kind)
+                print(f"✓ Removed the managed block from the {kind} hook" if removed
+                      else f"No LineageLens block found in the {kind} hook")
+            else:
+                for name, present in hooks.status(project).items():
+                    print(f"  {name:12s} {'installed' if present else '-'}")
+        except hooks.HookError as e:
+            raise SystemExit(f"✗ {e}") from e
+        return
+
+    if args.command == "check":
+        raise SystemExit(run_check(project, args))
 
     # analyze and serve commands
     config = ProjectConfig.load(project)
