@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
 from typing import Any, Literal
 
 
@@ -12,7 +11,7 @@ class FileFailure:
     """Record of a file that could not be analyzed."""
 
     file: str
-    stage: Literal["read", "parse", "definitions", "relationships"]
+    stage: Literal["read", "parse", "definitions", "relationships", "attribute_hoisting"]
     error_type: str
     message: str
     line: int | None = None

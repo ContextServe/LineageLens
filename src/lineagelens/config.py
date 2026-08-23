@@ -54,8 +54,77 @@ class AnalysisConfig:
     entry_points: dict[str, tuple[str, ...]] = field(default_factory=lambda: {
         "api_route": (".get", ".post", ".put", ".patch", ".delete", ".websocket"),
         "cli_command": (".command", ".callback"),
-        "framework_callback": (".middleware", ".exception_handler", ".on_event", "validator", "field_validator", "model_validator"),
+        "framework_callback": (".middleware", ".exception_handler", ".on_event", "validator", "field_validator", "model_validator",
+                                ".tool", ".resource", ".prompt", ".listener", ".subscribe"),
+        "task": (".task", ".shared_task", "shared_task", ".periodic_task"),
+        "dispatch_registration": (".register",),
     })
+
+    # Individually switchable entry-point rules. Entry points are the roots of the
+    # reachability walk, so a wrong root set poisons everything downstream -- and
+    # broadening trades dead-code recall for precision. Each rule is separable so
+    # an over-broad one shows up as a specific diff rather than as a silently
+    # shrinking candidate list.
+    entry_point_rules: dict[str, bool] = field(default_factory=lambda: {
+        "decorators": True,      # api_route / cli_command / framework_callback suffixes
+        "pytest": True,          # test files, test functions, Test* classes, fixtures
+        "unittest": True,        # setUp / tearDown / setUpClass / setUpModule
+        "celery": True,          # .task / .shared_task decorators
+        "abstract": True,        # @abstractmethod declarations
+        "singledispatch": True,  # .register decorators
+        "django": True,          # management commands, AppConfig.ready
+        "visitor_dispatch": True,# visit_* methods of ast.NodeVisitor subclasses
+        "main_module": True,     # if __name__ == "__main__"
+        "console_scripts": True, # [project.scripts] in pyproject.toml
+        "pragma": True,          # # lineagelens: keep
+    })
+
+    # Relation kinds to emit. CALLS is not listed because it is not optional.
+    #
+    # Reachability in Python does not flow through calls alone: a class used only
+    # as a type annotation, a function handed to Depends(), a name listed in
+    # __all__, and a base class are all live code that no call edge describes.
+    # Each kind is individually switchable so a volume or precision regression can
+    # be bisected to one of them.
+    #
+    # REFERENCES_STRING is off by default on purpose. It matches dotted string
+    # literals against symbol names, which is scope-free -- and a false *rescue*
+    # is worse than a false positive, because it hides dead code with no trail.
+    relation_kinds: tuple[str, ...] = (
+        "REFERENCES",
+        "ANNOTATES",
+        "INHERITS",
+        "OVERRIDES",
+        "DECORATES",
+        "EXPORTS",
+        "IMPORTS",
+        "USES_FIXTURE",
+    )
+
+    # Which module bodies count as reachability roots.
+    #
+    #   "all"          every module body is treated as executing. An
+    #                  over-approximation -- a module body only actually runs if
+    #                  something imports it -- chosen as the default on purpose:
+    #                  it costs recall (some real dead code stays hidden) but it
+    #                  never fabricates a "this is dead, delete it". False
+    #                  confidence is the failure mode that destroys trust.
+    #   "imports_only" seed only modules that contain an entry point and
+    #                  propagate through IMPORTS edges. Stricter, finds more, and
+    #                  will occasionally be wrong about a module imported for a
+    #                  side effect.
+    module_scope_roots: str = "all"
+
+    # Type inference via Jedi. Only consulted when cheap static resolution fails,
+    # and only when the call's trailing name could possibly match an in-repo symbol,
+    # so the cost is a small fraction of the call sites. Disable to trade a little
+    # resolution for speed, e.g. on PR-time CI runs.
+    jedi: bool = True
+
+    # Hard ceiling on inference calls per analysis. None means unbounded. On exceed,
+    # one warning is recorded and the engine is not consulted again -- a backstop for
+    # pathological repos, not a tuning knob.
+    jedi_max_calls: int | None = None
 
 
 @dataclass(frozen=True)
@@ -97,10 +166,29 @@ class ProjectConfig:
                 match_words=tuple(item["match_words"]),
                 only_in_async=bool(item.get("only_in_async", False)),
             ))
-        entry_points = {key: tuple(values) for key, values in (raw.get("entry_points", {}) or {}).items()}
         defaults = AnalysisConfig()
-        return AnalysisConfig(risk_rules=tuple(rules) or defaults.risk_rules,
-                              entry_points=entry_points or defaults.entry_points)
+        # Merge per family rather than replacing the whole mapping. Replacing it
+        # meant that listing one family in lineagelens.yaml silently switched off
+        # every other -- so a project that customised `api_route` stopped detecting
+        # tests, tasks and framework callbacks, and reported them all as dead.
+        entry_points = dict(defaults.entry_points)
+        for family, values in (raw.get("entry_points") or {}).items():
+            entry_points[family] = tuple(values)
+        max_calls = raw.get("jedi_max_calls", defaults.jedi_max_calls)
+        kinds = raw.get("relation_kinds")
+        entry_rules = dict(defaults.entry_point_rules)
+        entry_rules.update(
+            {key: bool(value) for key, value in (raw.get("entry_point_rules", {}) or {}).items()}
+        )
+        return AnalysisConfig(
+            entry_point_rules=entry_rules,
+            risk_rules=tuple(rules) or defaults.risk_rules,
+            entry_points=entry_points,
+            relation_kinds=tuple(kinds) if kinds is not None else defaults.relation_kinds,
+            module_scope_roots=str(raw.get("module_scope_roots", defaults.module_scope_roots)),
+            jedi=bool(raw.get("jedi", defaults.jedi)),
+            jedi_max_calls=int(max_calls) if max_calls is not None else None,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

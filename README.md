@@ -6,7 +6,7 @@ Understand large Python codebases without reading full source files. Query code 
 
 [![Tests](https://img.shields.io/badge/tests-passing-green)](https://github.com/lineagelens/lineagelens)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue)](https://www.python.org/)
-[![MIT License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 LineageLens analyzes Python codebases and creates an **evidence-labelled code graph** showing:
 - **Symbols**: Functions, classes, modules, and their contracts (inputs/outputs)
@@ -96,7 +96,8 @@ Then choose your integration below.
 
 ### Option A: Claude Code (Easiest — No Hosting Required)
 
-Let Claude understand your codebase with 9 specialized tools via MCP.
+Let Claude understand your codebase through MCP, including `list_dead_code`
+and `get_reachability` for auditing why a symbol is considered live.
 
 ```bash
 pip install lineagelens[mcp]
@@ -324,6 +325,7 @@ Claude can answer: "Where does the LLM get called? What's the entry point for AW
 | Document | For | Purpose |
 |----------|-----|---------|
 | **README.md** (this) | Everyone | Getting started + user guide |
+| **docs/DEAD_CODE_WORKFLOW.md** | Everyone | Reachability verdicts, triage, and the CI ratchet |
 | **docs/claude-mcp-setup.md** | Claude Code users | Setup + tool reference |
 | **docs/deploy-chatgpt-actions.md** | ChatGPT users | Deployment guide |
 | **docs/CONTRIBUTING.md** | Contributors | Development setup |
@@ -376,12 +378,6 @@ Claude can answer: "Where does the LLM get called? What's the entry point for AW
 ✅ **Production ready** — tested on real codebases  
 
 ---
-
-## Evidence & Trust Model — deterministic vs probabilistic
-
-LineageLens separates **three trust tiers**. This is a promise, not a footnote:
-probabilistic output is never presented as fact, and a heuristic is never passed
-off as an observed runtime value.
 
 ## Evidence & Trust Model — deterministic vs probabilistic
 
@@ -442,7 +438,13 @@ deterministic graph as fact.
 - `Symbol.inputs[].type`, `Symbol.outputs[].type` → value of author annotation, or `unknown`
 - `Symbol.outputs[].evidence` → `annotation` | `return_expression`
 - `Relation.evidence` → `static_ast`
-- `Relation.resolution` → `resolved` | `external_or_dynamic`
+- `Relation.resolution` → `resolved` | `resolved_via_inference` | `external_or_dynamic`
+- `Relation.resolution_evidence` → *how* the target was identified, e.g.
+  `static_scope_walk` (fact) or `jedi_inference` (heuristic)
+- `DeadCodeCandidate.verdict` → `alive` | `dynamic_only` | `test_only` |
+  `public_api` | `probably_dead` | `dead`
+- `DeadCodeCandidate.rescue` → the mechanism that reached the symbol, with its
+  own tier. See **docs/DEAD_CODE_WORKFLOW.md**.
 - `Relation.arguments[].inferred_type` → `unknown` or an inferred type name
 - `Symbol.risks[].evidence` → `"<raw call> at line <n>"` (rule match)
 - LLM-generated documentation → `llm`
@@ -452,5 +454,10 @@ deterministic graph as fact.
 - Facts, heuristics, and probabilities are labelled at the point of production
   (`evidence`, `resolution`, `inferred_type`, `unknown`, `llm`).
 - Uncertainty is explicit: what cannot be inferred is `unknown`, never guessed.
+- A verdict always carries the mechanism that produced it. "This is dead" with no
+  auditable reason is not a usable answer for an agent, so reachability reports
+  *why* every symbol is live and at what trust tier. `dead` means "no static
+  reference exists", never "unused at runtime" — static analysis cannot see
+  reflection or config-driven dispatch, so there is no automatic deletion mode.
 - Probabilistic content is opt-in (requires an LLM call) and never carries
   API credentials into artifacts.

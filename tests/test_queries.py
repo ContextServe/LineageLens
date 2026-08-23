@@ -1,9 +1,16 @@
 """Tests for queries.py (single source of truth for graph traversal)."""
 
-from lineagelens.model import CodeGraph, Container, Evidence, Relation, ResiliencySignal, Symbol
+from lineagelens.model import (
+    CodeGraph,
+    Container,
+    Evidence,
+    Relation,
+    ResiliencySignal,
+    Symbol,
+)
 from lineagelens.queries import (
-    get_callers,
     get_callees,
+    get_callers,
     get_lineage,
     get_module_overview,
     get_symbol,
@@ -37,7 +44,7 @@ def fixture_graph() -> CodeGraph:
             parent="app.api",
             async_=True,
             description="Fetch user by ID",
-            entry_point="api_route",
+            entry_point_kinds=["api_route"],
         )
     )
 

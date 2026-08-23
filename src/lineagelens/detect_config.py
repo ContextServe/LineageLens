@@ -9,7 +9,6 @@ Scans the project directory to infer sensible defaults for:
 from __future__ import annotations
 
 import ast
-import re
 from collections import Counter
 from pathlib import Path
 from typing import NamedTuple
@@ -62,7 +61,7 @@ def _detect_source_roots(project: Path) -> list[str]:
     root_packages = [
         d.name for d in project.iterdir()
         if d.is_dir() and not d.name.startswith(".")
-        and not d.name in ["tests", "test", "docs", "build", "dist", ".git", "__pycache__", "node_modules"]
+        and d.name not in ["tests", "test", "docs", "build", "dist", ".git", "__pycache__", "node_modules"]
         and (d / "__init__.py").exists()
     ]
     if root_packages:
@@ -237,11 +236,10 @@ def _scan_imports(project: Path) -> set[str]:
                         top_level = alias.name.split(".")[0]
                         if top_level not in STDLIB_MODULES:
                             imports[top_level] += 1
-                elif isinstance(node, ast.ImportFrom):
-                    if node.module:
-                        top_level = node.module.split(".")[0]
-                        if top_level not in STDLIB_MODULES:
-                            imports[top_level] += 1
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    top_level = node.module.split(".")[0]
+                    if top_level not in STDLIB_MODULES:
+                        imports[top_level] += 1
         except SyntaxError:
             pass
 

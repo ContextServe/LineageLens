@@ -5,6 +5,15 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+# Bump whenever the on-disk shape or the meaning of symbol ids changes, so a
+# stale graph.json is rejected outright instead of silently producing nonsense.
+#
+#   1  initial release
+#   2  module ids strip only a leading source root (a nested "src" component is
+#      no longer dropped); synthetic "<module>" symbols own module-level
+#      statements; project_root and schema_version are persisted
+SCHEMA_VERSION = 2
+
 
 @dataclass(frozen=True)
 class Evidence:
@@ -17,11 +26,22 @@ class Evidence:
     @classmethod
     def from_legacy(cls, raw: str) -> Evidence:
         """Convert a legacy string label to typed Evidence (best-guess mapping)."""
-        # Tier 1: deterministic facts
-        if raw in ("static_ast", "annotation"):
+        # Tier 1: deterministic facts -- read directly off literal AST
+        if raw in ("static_ast", "annotation", "static_scope_walk", "annotated_parameter",
+                   "annotated_assignment", "annotated_attribute", "annotated_parameter_passthrough",
+                   "import_substitution",
+                   # syntax observations for the non-call relation kinds
+                   "static_ast_base", "static_ast_decorator", "static_ast_annotation",
+                   "static_ast_dunder_all", "static_ast_import", "static_ast_name_load"):
             return cls(tier="deterministic_fact", label=raw)
-        # Tier 2: deterministic heuristics
-        if raw in ("return_expression", "inferred_type", "resolved", "external_or_dynamic"):
+        # Tier 2: deterministic heuristics -- reproducible, but inferred
+        if raw in ("return_expression", "inferred_type", "resolved", "external_or_dynamic",
+                   "local_type_inference_construction", "local_type_inference_factory",
+                   "local_type_inference_attribute", "unresolved_dynamic_dispatch",
+                   "jedi_inference", "jedi_ambiguous",
+                   # name-based links: no syntax proves these, only a matching name
+                   "mro_name_match", "pytest_fixture_name",
+                   "string_literal_dotted_name", "string_reference"):
             return cls(tier="deterministic_heuristic", label=raw)
         # Tier 3: probabilistic
         if raw == "llm":
@@ -68,8 +88,22 @@ class Symbol:
     inputs: list[dict[str, Any]] = field(default_factory=list)
     outputs: list[dict[str, Any]] = field(default_factory=list)
     decorators: list[str] = field(default_factory=list)
-    entry_point: str | None = None
+    bases: list[str] = field(default_factory=list)  # Base class names (for classes only)
+    # Every reason this symbol is an entry point. A single slot silently lost
+    # information: mark_entry's sequential ifs overwrote each other, so a test_
+    # function that also carried @router.get ended up as whichever rule ran last.
+    entry_point_kinds: list[str] = field(default_factory=list)
+    is_abstract: bool = False
     resiliency: list[ResiliencySignal] = field(default_factory=list)
+
+    @property
+    def entry_point(self) -> str | None:
+        """The primary entry-point kind, or None. Derived from entry_point_kinds."""
+        return self.entry_point_kinds[0] if self.entry_point_kinds else None
+
+    def mark_entry_point(self, kind: str) -> None:
+        if kind not in self.entry_point_kinds:
+            self.entry_point_kinds.append(kind)
 
     @property
     def risks(self) -> list[dict[str, Any]]:
@@ -85,7 +119,8 @@ class Relation:
     file: str
     line: int
     evidence: Evidence = field(default_factory=lambda: Evidence(tier="deterministic_fact", label="static_ast"))
-    resolution: str = "resolved"
+    resolution: str = "resolved"  # One of: "resolved", "resolved_via_inference", "external_or_dynamic"
+    resolution_evidence: Evidence = field(default_factory=lambda: Evidence(tier="deterministic_fact", label="static_scope_walk"))
     arguments: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -106,8 +141,17 @@ class CodeGraph:
         self.relations.append(relation)
 
     def to_dict(self) -> dict[str, Any]:
+        # entry_point is a property, so asdict() does not include it. Emit it
+        # explicitly: it is the field every consumer reads.
+        symbols = []
+        for symbol in self.symbols.values():
+            payload = asdict(symbol)
+            payload["entry_point"] = symbol.entry_point
+            symbols.append(payload)
         return {
-            "symbols": [asdict(item) for item in self.symbols.values()],
+            "schema_version": SCHEMA_VERSION,
+            "project_root": self.project_root,
+            "symbols": symbols,
             "containers": [asdict(item) for item in self.containers.values()],
             "relations": [asdict(item) for item in self.relations],
         }

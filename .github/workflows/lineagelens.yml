@@ -1,0 +1,60 @@
+name: lineagelens
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Editable, deliberately. A non-editable install shadows src/ and the test
+      # suite then reports on the wheel rather than on the code under review.
+      - name: Install
+        run: pip install -e ".[dev,web,mcp]"
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Test
+        run: pytest -q
+
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # --strict fails on parse or read errors, which are analysis bugs rather
+      # than code-quality findings.
+      - name: Analyze
+        run: lineagelens analyze . --strict
+
+      # Ratchet, not a gate: fails only on dead code that is new relative to the
+      # committed baseline, so it can be turned on without a cleanup first.
+      - name: Dead-code ratchet
+        run: lineagelens check . --fail-on dead
+
+      # graph.json is a build artifact, not source: it is large and changes on
+      # every commit. Publish it here so agents and dashboards can fetch a
+      # current copy without every developer committing one.
+      - name: Upload graph
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineagelens-graph
+          path: .lineagelens/
+          retention-days: 14
