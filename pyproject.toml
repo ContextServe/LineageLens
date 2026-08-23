@@ -39,3 +39,10 @@ packages = ["src/lineagelens"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 
+
+[tool.ruff]
+# The reachability corpus is fixture *data*: it is deliberately written to look
+# like real-world code (forward-ref annotations, Optional, a shadowed builtin
+# name) so the analyzer sees realistic input. Linting it would mean rewriting
+# fixtures to satisfy a linter rather than to exercise the analyzer.
+extend-exclude = ["tests/fixtures"]
