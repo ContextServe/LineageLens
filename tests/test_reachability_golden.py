@@ -53,13 +53,14 @@ PENDING_ID_FIXES: dict[str, str] = {}
 #   23  module-scope source node closed the 6 static_call cases
 #   10  the non-call relation kinds closed passed_as_value, type_annotation,
 #       decorator and dunder_all_export
+#    8  broadened entry-point rules closed console_script and celery task
 #
-# The remaining 10 are 6 implicit dunders and 2 polymorphic overrides (both need
-# the reachability walk, which applies them at dequeue time rather than as plain
-# edges) plus 2 entry-point rules (console_script and celery task).
+# The remaining 8 are 6 implicit dunders and 2 polymorphic overrides. Both are
+# applied by the reachability walk at dequeue time rather than as plain edges,
+# so neither can be closed before that exists.
 #
 # Synthetic module-scope nodes are excluded from the count -- see below.
-MAX_FALSE_VERDICTS = 10
+MAX_FALSE_VERDICTS = 8
 
 
 @pytest.fixture(scope="module")

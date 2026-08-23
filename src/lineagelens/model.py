@@ -90,8 +90,21 @@ class Symbol:
     outputs: list[dict[str, Any]] = field(default_factory=list)
     decorators: list[str] = field(default_factory=list)
     bases: list[str] = field(default_factory=list)  # Base class names (for classes only)
-    entry_point: str | None = None
+    # Every reason this symbol is an entry point. A single slot silently lost
+    # information: mark_entry's sequential ifs overwrote each other, so a test_
+    # function that also carried @router.get ended up as whichever rule ran last.
+    entry_point_kinds: list[str] = field(default_factory=list)
+    is_abstract: bool = False
     resiliency: list[ResiliencySignal] = field(default_factory=list)
+
+    @property
+    def entry_point(self) -> str | None:
+        """The primary entry-point kind, or None. Derived from entry_point_kinds."""
+        return self.entry_point_kinds[0] if self.entry_point_kinds else None
+
+    def mark_entry_point(self, kind: str) -> None:
+        if kind not in self.entry_point_kinds:
+            self.entry_point_kinds.append(kind)
 
     @property
     def risks(self) -> list[dict[str, Any]]:
@@ -129,10 +142,17 @@ class CodeGraph:
         self.relations.append(relation)
 
     def to_dict(self) -> dict[str, Any]:
+        # entry_point is a property, so asdict() does not include it. Emit it
+        # explicitly: it is the field every consumer reads.
+        symbols = []
+        for symbol in self.symbols.values():
+            payload = asdict(symbol)
+            payload["entry_point"] = symbol.entry_point
+            symbols.append(payload)
         return {
             "schema_version": SCHEMA_VERSION,
             "project_root": self.project_root,
-            "symbols": [asdict(item) for item in self.symbols.values()],
+            "symbols": symbols,
             "containers": [asdict(item) for item in self.containers.values()],
             "relations": [asdict(item) for item in self.relations],
         }

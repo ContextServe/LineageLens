@@ -55,6 +55,26 @@ class AnalysisConfig:
         "api_route": (".get", ".post", ".put", ".patch", ".delete", ".websocket"),
         "cli_command": (".command", ".callback"),
         "framework_callback": (".middleware", ".exception_handler", ".on_event", "validator", "field_validator", "model_validator"),
+        "task": (".task", ".shared_task", "shared_task", ".periodic_task"),
+        "dispatch_registration": (".register",),
+    })
+
+    # Individually switchable entry-point rules. Entry points are the roots of the
+    # reachability walk, so a wrong root set poisons everything downstream -- and
+    # broadening trades dead-code recall for precision. Each rule is separable so
+    # an over-broad one shows up as a specific diff rather than as a silently
+    # shrinking candidate list.
+    entry_point_rules: dict[str, bool] = field(default_factory=lambda: {
+        "decorators": True,      # api_route / cli_command / framework_callback suffixes
+        "pytest": True,          # test files, test functions, Test* classes, fixtures
+        "unittest": True,        # setUp / tearDown / setUpClass / setUpModule
+        "celery": True,          # .task / .shared_task decorators
+        "abstract": True,        # @abstractmethod declarations
+        "singledispatch": True,  # .register decorators
+        "django": True,          # management commands, AppConfig.ready
+        "main_module": True,     # if __name__ == "__main__"
+        "console_scripts": True, # [project.scripts] in pyproject.toml
+        "pragma": True,          # # lineagelens: keep
     })
 
     # Relation kinds to emit. CALLS is not listed because it is not optional.
@@ -134,7 +154,12 @@ class ProjectConfig:
         defaults = AnalysisConfig()
         max_calls = raw.get("jedi_max_calls", defaults.jedi_max_calls)
         kinds = raw.get("relation_kinds")
+        entry_rules = dict(defaults.entry_point_rules)
+        entry_rules.update(
+            {key: bool(value) for key, value in (raw.get("entry_point_rules", {}) or {}).items()}
+        )
         return AnalysisConfig(
+            entry_point_rules=entry_rules,
             risk_rules=tuple(rules) or defaults.risk_rules,
             entry_points=entry_points or defaults.entry_points,
             relation_kinds=tuple(kinds) if kinds is not None else defaults.relation_kinds,

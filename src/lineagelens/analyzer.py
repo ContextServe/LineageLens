@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import entrypoints
 from .config import ProjectConfig
 from .model import CodeGraph, Container, Evidence, Relation, ResiliencySignal, Symbol
 from .report import AnalysisReport, FileFailure, SymbolWarning
@@ -103,6 +104,9 @@ class Module:
     name: str
     tree: ast.Module
     imports: dict[str, str] = field(default_factory=dict)
+    # Retained for the `# lineagelens: keep` pragma scan; comments are stripped
+    # by the parser, so the raw text is the only place they survive.
+    source_lines: list[str] = field(default_factory=list)
 
     @property
     def is_package(self) -> bool:
@@ -744,19 +748,17 @@ class Relationships(ast.NodeVisitor):
         )
 
     def mark_entry(self, node: ast.FunctionDef | ast.AsyncFunctionDef, symbol: Symbol) -> None:
-        entries = self.config.analysis.entry_points
-        decorators = [dotted(item) or "" for item in node.decorator_list]
-        for item in decorators:
-            if not item:
-                continue
-            if "fastapi" in self.config.frameworks and any(item.endswith(suffix) for suffix in entries.get("api_route", ())):
-                symbol.entry_point = "api_route"
-            if "typer" in self.config.frameworks and any(item.endswith(suffix) for suffix in entries.get("cli_command", ())):
-                symbol.entry_point = "cli_command"
-            if any(item.endswith(suffix) for suffix in entries.get("framework_callback", ())):
-                symbol.entry_point = "framework_callback"
-        if any(self.module.path.is_relative_to(self.root / part) for part in self.config.test_roots) and node.name.startswith("test_"):
-            symbol.entry_point = "test"
+        """Record every entry-point kind that applies, and whether it is abstract."""
+        for kind in entrypoints.detect(
+            node,
+            module_path=self.module.path,
+            class_stack=self.classes,
+            config=self.config,
+            source_lines=self.module.source_lines,
+        ):
+            symbol.mark_entry_point(kind)
+        if self.config.analysis.entry_point_rules.get("abstract", True):
+            symbol.is_abstract = entrypoints.is_abstract(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         class_id = self.identifier(node.name)
@@ -1255,7 +1257,7 @@ def emit_fixture_uses(graph: CodeGraph, config: ProjectConfig) -> None:
         return
 
     for symbol in graph.symbols.values():
-        if symbol.entry_point != "test":
+        if "test" not in symbol.entry_point_kinds:
             continue
         for parameter in symbol.inputs:
             fixture = fixtures.get(parameter["name"])
@@ -1377,7 +1379,7 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
             continue
 
         try:
-            item = Module(path, module, tree)
+            item = Module(path, module, tree, source_lines=text.splitlines())
             definitions = Definitions(item, graph, root, report)
             definitions.ensure_module_scope(tree)
             definitions.visit(tree)
@@ -1417,6 +1419,7 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
             continue
 
     # Phase 3: whole-graph passes that need every symbol and every INHERITS edge.
+    entrypoints.mark_project_roots(graph, root, config)
     emit_overrides(graph, config)
     emit_fixture_uses(graph, config)
 
