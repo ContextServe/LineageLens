@@ -14,6 +14,9 @@ interface GraphViewData {
     entry_point?: string
     async_: boolean
     has_resiliency_flag: boolean
+    is_test: boolean
+    possibly_dead: boolean
+    duplicate_name: boolean
   }>
   edges: Array<{
     id: string
@@ -29,6 +32,7 @@ export function App() {
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [testFilter, setTestFilter] = useState<'all' | 'source' | 'tests'>('all')
 
   // Load graph on mount
   useEffect(() => {
@@ -47,6 +51,44 @@ export function App() {
       setError(err instanceof Error ? err.message : 'Failed to load graph')
     } finally {
       setLoading(false)
+    }
+  }
+
+  function getFilteredGraphData(): GraphViewData | null {
+    if (!graphData) return null
+
+    // Determine which nodes to keep based on test filter
+    const nodesToKeep = new Set<string>()
+    const nodeIsTest = new Map<string, boolean>()
+
+    for (const node of graphData.nodes) {
+      nodeIsTest.set(node.id, node.is_test)
+
+      if (testFilter === 'all') {
+        nodesToKeep.add(node.id)
+      } else if (testFilter === 'source' && !node.is_test) {
+        nodesToKeep.add(node.id)
+      } else if (testFilter === 'tests' && node.is_test) {
+        nodesToKeep.add(node.id)
+      }
+    }
+
+    // Filter nodes and clean up parent refs
+    const filteredNodes = graphData.nodes
+      .filter(node => nodesToKeep.has(node.id))
+      .map(node => ({
+        ...node,
+        parent: node.parent && nodesToKeep.has(node.parent) ? node.parent : undefined,
+      }))
+
+    // Filter edges: only keep edges where both endpoints exist in filtered nodes
+    const filteredEdges = graphData.edges.filter(
+      edge => nodesToKeep.has(edge.source) && nodesToKeep.has(edge.target)
+    )
+
+    return {
+      nodes: filteredNodes,
+      edges: filteredEdges,
     }
   }
 
@@ -77,10 +119,14 @@ export function App() {
         </aside>
 
         <main className="graph-container">
-          <Toolbar onRefresh={fetchGraph} />
+          <Toolbar
+            onRefresh={fetchGraph}
+            testFilter={testFilter}
+            onTestFilterChange={setTestFilter}
+          />
           {graphData && (
             <CytoscapeGraph
-              data={graphData}
+              data={getFilteredGraphData()!}
               selectedSymbol={selectedSymbol}
               onSelectSymbol={setSelectedSymbol}
             />

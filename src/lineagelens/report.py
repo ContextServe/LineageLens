@@ -12,7 +12,7 @@ class FileFailure:
     """Record of a file that could not be analyzed."""
 
     file: str
-    stage: Literal["read", "parse", "definitions", "relationships"]
+    stage: Literal["read", "parse", "definitions", "relationships", "attribute_hoisting"]
     error_type: str
     message: str
     line: int | None = None

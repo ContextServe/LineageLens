@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react'
 import CytoscapeLib from 'cytoscape'
 // @ts-ignore - cytoscape-fcose doesn't have TS types
 import FCose from 'cytoscape-fcose'
-import { highlightFlow, clearHighlight } from './highlight'
+import { highlightLineage, clearHighlight } from './highlight'
 
 CytoscapeLib.use(FCose)
 
@@ -30,6 +30,8 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol }: Cytosca
           entry_point: node.entry_point,
           async_: node.async_,
           has_risk: node.has_resiliency_flag,
+          possibly_dead: node.possibly_dead,
+          duplicate_name: node.duplicate_name,
         },
       })),
       ...data.edges.map((edge: any, idx: number) => ({
@@ -55,9 +57,18 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol }: Cytosca
             'text-valign': 'center',
             'text-halign': 'center',
             'background-color': (ele: any) => {
+              // Priority: entry_point > has_risk > possibly_dead > default
               if (ele.data('entry_point')) return '#3b82f6'
               if (ele.data('has_risk')) return '#f59e0b'
+              if (ele.data('possibly_dead')) return '#ef4444'
               return '#6b7280'
+            },
+            'border-width': (ele: any) => {
+              // Add border for duplicate names
+              return ele.data('duplicate_name') ? 3 : 1
+            },
+            'border-color': (ele: any) => {
+              return ele.data('duplicate_name') ? '#8b5cf6' : '#4b5563'
             },
             'width': '60px',
             'height': '60px',
@@ -70,10 +81,18 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol }: Cytosca
         {
           selector: 'node:parent',
           style: {
+            'content': 'data(label)',
+            'text-valign': 'top',
+            'text-halign': 'left',
+            'text-margin-y': 4,
             'background-color': '#e5e7eb',
             'background-opacity': 0.5,
             'border-width': 2,
             'border-color': '#9ca3af',
+            'font-size': '12px',
+            'color': '#6b7280',
+            'text-opacity': 1,
+            'padding': '6px',
           },
         },
         {
@@ -130,27 +149,29 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol }: Cytosca
 
     cyRef.current = cy
 
-    // Click to select and highlight flow
+    // Click to select and highlight full lineage
     cy.on('tap', 'node', async (evt: any) => {
       const nodeId = evt.target.id()
       onSelectSymbol?.(nodeId)
 
-      // Fetch callers and callees to highlight the flow
+      // Fetch full transitive lineage (backward and forward)
       try {
-        const [callersRes, calleesRes] = await Promise.all([
-          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/callers`),
-          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/callees`),
+        const [backwardRes, forwardRes] = await Promise.all([
+          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/lineage?direction=backward&max_depth=9999`),
+          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/lineage?direction=forward&max_depth=9999`),
         ])
 
-        const callers = await callersRes.json()
-        const callees = await calleesRes.json()
+        const backwardSteps = await backwardRes.json()
+        const forwardSteps = await forwardRes.json()
 
-        const callerIds = callers.map((rel: any) => rel.source)
-        const calleeIds = callees.map((rel: any) => rel.target)
+        // Collect all reachable node IDs
+        const reachableIds = new Set<string>([nodeId])
+        backwardSteps.forEach((step: any) => reachableIds.add(step.symbol_id))
+        forwardSteps.forEach((step: any) => reachableIds.add(step.symbol_id))
 
-        highlightFlow(cy, nodeId, callerIds, calleeIds)
+        highlightLineage(cy, reachableIds)
       } catch (err) {
-        console.error('Failed to fetch flow:', err)
+        console.error('Failed to fetch lineage:', err)
       }
     })
 

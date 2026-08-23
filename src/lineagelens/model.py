@@ -18,10 +18,12 @@ class Evidence:
     def from_legacy(cls, raw: str) -> Evidence:
         """Convert a legacy string label to typed Evidence (best-guess mapping)."""
         # Tier 1: deterministic facts
-        if raw in ("static_ast", "annotation"):
+        if raw in ("static_ast", "annotation", "static_scope_walk", "annotated_parameter", "annotated_assignment"):
             return cls(tier="deterministic_fact", label=raw)
         # Tier 2: deterministic heuristics
-        if raw in ("return_expression", "inferred_type", "resolved", "external_or_dynamic"):
+        if raw in ("return_expression", "inferred_type", "resolved", "external_or_dynamic",
+                   "local_type_inference_construction", "local_type_inference_factory",
+                   "local_type_inference_attribute", "unresolved_dynamic_dispatch"):
             return cls(tier="deterministic_heuristic", label=raw)
         # Tier 3: probabilistic
         if raw == "llm":
@@ -68,6 +70,7 @@ class Symbol:
     inputs: list[dict[str, Any]] = field(default_factory=list)
     outputs: list[dict[str, Any]] = field(default_factory=list)
     decorators: list[str] = field(default_factory=list)
+    bases: list[str] = field(default_factory=list)  # Base class names (for classes only)
     entry_point: str | None = None
     resiliency: list[ResiliencySignal] = field(default_factory=list)
 
@@ -85,7 +88,8 @@ class Relation:
     file: str
     line: int
     evidence: Evidence = field(default_factory=lambda: Evidence(tier="deterministic_fact", label="static_ast"))
-    resolution: str = "resolved"
+    resolution: str = "resolved"  # One of: "resolved", "resolved_via_inference", "external_or_dynamic"
+    resolution_evidence: Evidence = field(default_factory=lambda: Evidence(tier="deterministic_fact", label="static_scope_walk"))
     arguments: list[dict[str, Any]] = field(default_factory=list)
 
 
