@@ -1,6 +1,7 @@
-"""Safe, configurable static Python lineage analysis.
+"""Safe, configurable static Python lineage analysis with Jedi-backed call resolution.
 
 This module intentionally parses source and never imports the target project.
+Uses Jedi for call resolution to correctly handle dynamic instance-method calls.
 """
 
 from __future__ import annotations
@@ -9,12 +10,14 @@ import ast
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
+from . import entrypoints
 from .config import ProjectConfig
 from .model import CodeGraph, Container, Evidence, Relation, ResiliencySignal, Symbol
 from .report import AnalysisReport, FileFailure, SymbolWarning
+from .resolve_jedi import JediResolver
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,19 @@ def dotted(node: ast.AST) -> str | None:
     if isinstance(node, ast.Call):
         return dotted(node.func)
     return None
+
+
+def is_name_chain(node: ast.AST) -> bool:
+    """Whether an expression is pure attribute access bottoming out at a name.
+
+    ``a.b.c`` is; ``f().b.c`` and ``d["k"].b`` are not. The distinction matters when
+    deciding whether it is safe to stop descending: a pure name chain contains no
+    sub-expressions, but a chain rooted in a call does, and skipping it loses that
+    call entirely.
+    """
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return isinstance(node, ast.Name)
 
 
 def expression(node: ast.AST) -> str:
@@ -53,12 +69,271 @@ def infer(node: ast.AST) -> str:
     return "unknown"
 
 
+# Name of the synthetic symbol that owns module-level statements. Not a legal
+# Python identifier, so it can never collide with a real definition.
+MODULE_SCOPE_NAME = "<module>"
+
+
+def module_scope_id(module: str) -> str:
+    return f"{module}.{MODULE_SCOPE_NAME}"
+
+
+# Binding provenances established by a literal annotation in the source, as opposed to
+# inferred from a constructor call or a factory's declared return type.
+_FACT_PROVENANCE = frozenset(
+    {"annotated_attribute", "annotated_parameter", "annotated_assignment", "annotated_parameter_passthrough"}
+)
+
+_RESOLUTION_TIER = {
+    "resolved": "deterministic_fact",
+    "resolved_via_inference": "deterministic_heuristic",
+    "external_or_dynamic": "deterministic_heuristic",
+}
+
+
+def _strip_quotes(text: str) -> str:
+    """Undo ast.unparse's literal quoting of forward-ref string annotations."""
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        return text[1:-1]
+    return text
+
+
 @dataclass
 class Module:
     path: Path
     name: str
     tree: ast.Module
     imports: dict[str, str] = field(default_factory=dict)
+    # Retained for the `# lineagelens: keep` pragma scan; comments are stripped
+    # by the parser, so the raw text is the only place they survive.
+    source_lines: list[str] = field(default_factory=list)
+
+    @property
+    def is_package(self) -> bool:
+        """Whether this module is a package ``__init__``.
+
+        Matters for relative imports: inside ``pkg/__init__.py`` the module name is
+        already ``pkg``, so ``from .x import y`` means ``pkg.x.y``. Treating it like
+        a regular module strips a level and yields ``x.y``, which resolves to
+        nothing -- and re-exports through ``__init__.py`` are precisely where that
+        matters most.
+        """
+        return self.path.name == "__init__.py"
+
+
+@dataclass
+class SymbolIndex:
+    """Lookup tables over ``CodeGraph.symbols`` for mapping inference results back to ids.
+
+    An inference engine reports a ``(file, line)`` pair alongside its dotted name, which
+    is strictly more information than a name suffix. ``by_location`` uses it to
+    disambiguate same-named symbols exactly; the name tables are fallbacks for when the
+    reported line does not match our ``Symbol.line`` (decorated definitions, for
+    instance, where the two disagree about where the symbol starts).
+
+    ``by_suffix`` keys are dot-anchored by construction: for ``a.b.c.d`` the keys are
+    ``d``, ``c.d``, ``b.c.d``, ``a.b.c.d``. A bare ``str.endswith`` test would let
+    ``MyArchetypeEngine`` match ``ArchetypeEngine``; this cannot. Candidate lists are
+    kept whole so an ambiguous name can be reported as ambiguous rather than silently
+    resolved to whichever symbol happened to be inserted first.
+    """
+
+    by_location: dict[tuple[str, int], str] = field(default_factory=dict)
+    by_file_name: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+    by_suffix: dict[str, list[str]] = field(default_factory=dict)
+    names: set[str] = field(default_factory=set)
+    top_level: set[str] = field(default_factory=set)  # first component of every symbol id
+
+    @classmethod
+    def build(cls, graph: CodeGraph) -> SymbolIndex:
+        index = cls()
+        for symbol in graph.symbols.values():
+            # Synthetic module-scope nodes are never a valid inference target, and
+            # they sit at line 1 -- which is also where the first real definition in
+            # a file lives, so indexing them would let `<module>` win that location.
+            if symbol.kind == "module_scope":
+                continue
+            index.by_location.setdefault((symbol.file, symbol.line), symbol.id)
+            index.by_file_name.setdefault((symbol.file, symbol.name), []).append(symbol.id)
+            index.names.add(symbol.name)
+            parts = symbol.id.split(".")
+            index.top_level.add(parts[0])
+            for start in range(len(parts)):
+                index.by_suffix.setdefault(".".join(parts[start:]), []).append(symbol.id)
+        return index
+
+    def resolve_target(
+        self, graph: CodeGraph, relpath: str, line: int, full_name: str
+    ) -> tuple[str | None, bool]:
+        """Map an inferred target to a symbol id.
+
+        Returns ``(symbol_id, ambiguous)``. ``ambiguous`` is True when two or more
+        in-repo symbols match the name equally well, in which case the caller must
+        decline to resolve rather than pick one.
+        """
+        if full_name in graph.symbols:
+            return full_name, False
+
+        located = self.by_location.get((relpath, line))
+        if located:
+            return located, False
+
+        tail = full_name.rsplit(".", 1)[-1]
+        for candidates in (self.by_file_name.get((relpath, tail)), self.by_suffix.get(full_name)):
+            if not candidates:
+                continue
+            unique = set(candidates)
+            if len(unique) == 1:
+                return next(iter(unique)), False
+            return None, True
+
+        return None, False
+
+
+def resolve_module_symbol(name: str | None, module: Module, graph: CodeGraph) -> Symbol | None:
+    """Resolve a dotted name to a symbol using import-substitution or same-module match."""
+    if not name:
+        return None
+    head, *tail = name.split(".")
+    if head in module.imports:
+        candidate = ".".join([module.imports[head], *tail])
+    else:
+        candidate = f"{module.name}.{name}"
+    return graph.symbols.get(candidate)
+
+
+def annotation_to_class(annotation: ast.AST | None, module: Module, graph: CodeGraph) -> str | None:
+    """Resolve a parameter/AnnAssign annotation to a class Symbol id."""
+    if annotation is None:
+        return None
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        name = annotation.value
+    else:
+        name = dotted(annotation)
+    if not name:
+        return None
+    symbol = resolve_module_symbol(name, module, graph)
+    return symbol.id if symbol and symbol.kind == "class" else None
+
+
+def infer_bound_class(node: ast.AST, module: Module, graph: CodeGraph, module_registry: dict[str, Module]) -> tuple[str | None, str]:
+    """Infer the bound class from an assignment RHS."""
+    if not isinstance(node, ast.Call):
+        return None, "none"
+    raw = dotted(node.func)
+    direct = resolve_module_symbol(raw, module, graph)
+    if direct and direct.kind == "class":
+        return direct.id, "local_type_inference_construction"
+    if direct and direct.kind in ("function", "method") and direct.outputs:
+        annotated_type = direct.outputs[0].get("type")
+        if annotated_type and annotated_type != "unknown":
+            defining_module = module_registry.get(direct.module, module)
+            target = resolve_module_symbol(_strip_quotes(annotated_type), defining_module, graph)
+            if target and target.kind == "class":
+                return target.id, "local_type_inference_factory"
+    return None, "none"
+
+
+def _iter_classes(node: ast.AST, prefix: str) -> Iterable[tuple[str, ast.ClassDef]]:
+    """Yield ``(class_id, ClassDef)`` for every class under ``node``, nested ones included.
+
+    Walks the body rather than using ``ast.walk`` so that the dotted id can be built up
+    from the real lexical nesting; ``ast.walk`` flattens the tree and loses it.
+    """
+    for child in getattr(node, "body", []):
+        if isinstance(child, ast.ClassDef):
+            class_id = f"{prefix}.{child.name}"
+            yield class_id, child
+            yield from _iter_classes(child, class_id)
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield from _iter_classes(child, f"{prefix}.{child.name}")
+
+
+def _annotated_parameters(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, module: Module, graph: CodeGraph
+) -> dict[str, str]:
+    """Map parameter name -> class symbol id for every parameter with a class annotation."""
+    params: dict[str, str] = {}
+    for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs:
+        bound = annotation_to_class(arg.annotation, module, graph)
+        if bound:
+            params[arg.arg] = bound
+    return params
+
+
+def _self_attr_assignment(stmt: ast.AST) -> tuple[str | None, ast.AST | None, ast.AST | None]:
+    """Match self.attr assignment; return (attr_name, annotation, rhs) or (None, None, None)."""
+    if isinstance(stmt, ast.Assign):
+        if len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Attribute):
+            target = stmt.targets[0]
+            if isinstance(target.value, ast.Name) and target.value.id == "self":
+                return target.attr, None, stmt.value
+    elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Attribute):
+        target = stmt.target
+        if isinstance(target.value, ast.Name) and target.value.id == "self":
+            return target.attr, stmt.annotation, stmt.value
+    return None, None, None
+
+
+def hoist_attribute_bindings(
+    modules: list[Module], graph: CodeGraph, module_registry: dict[str, Module], report: AnalysisReport, root: Path
+) -> dict[str, dict[str, tuple[str, str]]]:
+    """Phase 1.5: map ``self.attr`` to a class symbol id for every class in every module.
+
+    Returns ``{class_id: {attr_name: (class_symbol_id, provenance)}}``. The provenance
+    is carried through to the relation's ``resolution_evidence`` so that a binding
+    established by a literal annotation is not reported at the same trust tier as one
+    guessed from a constructor call.
+
+    Four binding forms are recognised, in precedence order:
+
+    1. explicit annotation -- ``self.db: Database = ...``           (fact)
+    2. constructor call -- ``self.db = Database()``                 (heuristic)
+    3. annotated factory -- ``self.db = make_db()  # -> Database``  (heuristic)
+    4. annotated-parameter passthrough --                           (fact)
+       ``def __init__(self, db: Database): self.db = db``
+
+    Form 4 is the most common shape in real code and is the one that lets
+    ``self.db.query()`` resolve with no inference engine involved at all.
+    """
+    bindings: dict[str, dict[str, tuple[str, str]]] = {}
+    for module in modules:
+        try:
+            for class_id, class_node in _iter_classes(module.tree, module.name):
+                attr_map = bindings.setdefault(class_id, {})
+                for stmt in class_node.body:
+                    if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    params = _annotated_parameters(stmt, module, graph)
+                    for inner_stmt in ast.walk(stmt):
+                        target_name, annotation, rhs = _self_attr_assignment(inner_stmt)
+                        if target_name is None:
+                            continue
+                        bound, provenance = None, "none"
+                        if annotation is not None:
+                            bound = annotation_to_class(annotation, module, graph)
+                            provenance = "annotated_attribute"
+                        if bound is None and rhs is not None:
+                            bound, provenance = infer_bound_class(rhs, module, graph, module_registry)
+                        if bound is None and isinstance(rhs, ast.Name):
+                            bound = params.get(rhs.id)
+                            provenance = "annotated_parameter_passthrough"
+                        if bound:
+                            attr_map[target_name] = (bound, provenance)
+                        else:
+                            attr_map.pop(target_name, None)
+                if not attr_map:
+                    bindings.pop(class_id, None)
+        except Exception as e:
+            report.failures.append(
+                FileFailure(
+                    file=str(module.path.relative_to(root)),
+                    stage="attribute_hoisting",
+                    error_type=type(e).__name__,
+                    message=str(e),
+                )
+            )
+    return bindings
 
 
 class Definitions(ast.NodeVisitor):
@@ -70,13 +345,21 @@ class Definitions(ast.NodeVisitor):
     def identifier(self, name: str) -> str:
         return ".".join([self.module.name, *self.scope, name])
 
+    def _parent_id(self) -> str:
+        """The id of the lexically enclosing symbol, or the module container at top level."""
+        return ".".join([self.module.name, *self.scope]) if self.scope else self.module.name
+
+    def _register_child(self, symbol: Symbol) -> None:
+        """Record a top-level symbol against its enclosing module container."""
+        container = self.graph.containers.get(symbol.parent or "")
+        if container is not None and symbol.id not in container.children:
+            container.children.append(symbol.id)
+
     def _ensure_module_container(self) -> None:
         """Create a container for the module if not already done."""
         if self._module_container_created or not self.module.name:
             return
         self._module_container_created = True
-
-        # Create containers for all parent packages and the module itself
         parts = self.module.name.split(".")
         for i in range(1, len(parts) + 1):
             container_id = ".".join(parts[:i])
@@ -91,27 +374,61 @@ class Definitions(ast.NodeVisitor):
                     file=str(self.module.path.relative_to(self.root)) if is_module else None,
                     parent=parent,
                 ))
+                # `children` was declared and read but never written, so
+                # get_module_overview().submodules was always empty.
+                if parent and parent in self.graph.containers:
+                    siblings = self.graph.containers[parent].children
+                    if container_id not in siblings:
+                        siblings.append(container_id)
+
+    def ensure_module_scope(self, tree: ast.Module) -> None:
+        """Create the synthetic node that owns statements at module level.
+
+        Relations need a source symbol. Module-level statements have no enclosing
+        function, so before this existed every module-level call site was discarded
+        outright -- no relation at all, not even an unresolved one. That hid all the
+        wiring: ``app = FastAPI()``, ``router.include_router(...)``, registry
+        population, and ``if __name__ == "__main__": main()``.
+
+        ``<module>`` is not a legal Python identifier, so the id cannot collide with
+        a real symbol, and the dot keeps it inside the normal parent chain.
+        """
+        if not self.module.name:
+            return
+        self._ensure_module_container()
+        symbol = Symbol(
+            id=module_scope_id(self.module.name),
+            kind="module_scope",
+            name=MODULE_SCOPE_NAME,
+            file=str(self.module.path.relative_to(self.root)),
+            line=1,
+            end_line=tree.body[-1].end_lineno if tree.body else 1,
+            module=self.module.name,
+            parent=self.module.name,
+            description=ast.get_docstring(tree),
+        )
+        self.graph.add_symbol(symbol)
+        self._register_child(symbol)
 
     def visit_Import(self, node: ast.Import) -> None:
         for item in node.names:
             self.module.imports[item.asname or item.name.split(".")[0]] = item.name
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        # Handle relative imports safely
         if node.level > 0:
             module_parts = self.module.name.split(".")
-            if node.level > len(module_parts):
-                # Relative import goes above package root — skip
+            # One dot means "the current package". For a package __init__ that is the
+            # module itself; for a regular module it is the module's parent.
+            depth = node.level - 1 if self.module.is_package else node.level
+            if depth > len(module_parts):
                 return
-            prefix = module_parts[:-node.level]
+            prefix = module_parts[: len(module_parts) - depth]
         else:
             prefix = []
-
         if node.module:
             base = ".".join([*prefix, *node.module.split(".")]).strip(".")
         else:
             base = ".".join(prefix).strip(".")
-
         for item in node.names:
             if item.name != "*":
                 full_name = f"{base}.{item.name}" if base else item.name
@@ -119,11 +436,7 @@ class Definitions(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self._ensure_module_container()
-        parent_id = self.scope[-1] if self.scope else None
-        if parent_id and len(self.scope) == 1:  # Parent is a class
-            parent_id = ".".join([self.module.name, parent_id])
-        elif parent_id:  # Nested class
-            parent_id = ".".join([self.module.name, *self.scope])
+        parent_id = self._parent_id()
 
         symbol = Symbol(
             id=self.identifier(node.name),
@@ -136,8 +449,10 @@ class Definitions(ast.NodeVisitor):
             parent=parent_id,
             description=ast.get_docstring(node),
             decorators=[dotted(item) or expression(item) for item in node.decorator_list],
+            bases=[dotted(item) or expression(item) for item in node.bases],
         )
         self.graph.add_symbol(symbol)
+        self._register_child(symbol)
         self.scope.append(node.name)
         self.generic_visit(node)
         self.scope.pop()
@@ -147,16 +462,11 @@ class Definitions(ast.NodeVisitor):
         inputs = []
         args = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
         defaults = [None] * (len(args) - len(node.args.defaults)) + list(node.args.defaults)
-        for arg, default in zip(args, defaults):
+        # defaults is padded to len(args) above, so strict= catches a padding bug
+        for arg, default in zip(args, defaults, strict=True):
             inputs.append({"name": arg.arg, "type": expression(arg.annotation) if arg.annotation else "unknown", "default": expression(default) if default else None})
 
-        # Determine parent: if directly in a class, parent is the class id; else parent is module id
-        if self.scope and self.scope[-1][:1].isupper():  # Heuristic: class names start with uppercase
-            parent_id = ".".join([self.module.name, *self.scope])
-        elif self.scope:
-            parent_id = ".".join([self.module.name, *self.scope])
-        else:
-            parent_id = self.module.name  # Parent is the module container
+        parent_id = self._parent_id()
 
         symbol = Symbol(
             id=self.identifier(node.name),
@@ -174,6 +484,7 @@ class Definitions(ast.NodeVisitor):
             decorators=[dotted(item) or expression(item) for item in node.decorator_list],
         )
         self.graph.add_symbol(symbol)
+        self._register_child(symbol)
         self.scope.append(node.name)
         self.generic_visit(node)
         self.scope.pop()
@@ -182,63 +493,355 @@ class Definitions(ast.NodeVisitor):
 
 
 class Relationships(ast.NodeVisitor):
-    def __init__(self, module: Module, graph: CodeGraph, root: Path, config: ProjectConfig, report: AnalysisReport) -> None:
+    def __init__(self, module: Module, graph: CodeGraph, root: Path, config: ProjectConfig, report: AnalysisReport,
+                 jedi_resolver: JediResolver | None = None,
+                 attribute_bindings: dict[str, dict[str, tuple[str, str]]] | None = None,
+                 module_registry: dict[str, Module] | None = None,
+                 index: SymbolIndex | None = None) -> None:
         self.module, self.graph, self.root, self.config, self.report = module, graph, root, config, report
+        self.jedi_resolver = jedi_resolver
+        self.attribute_bindings = attribute_bindings or {}
+        self.module_registry = module_registry or {}
+        self.index = index if index is not None else SymbolIndex.build(graph)
+        self.enabled_kinds = frozenset(config.analysis.relation_kinds)
+        # ids of expression nodes that are a Call's `func`; those are calls, not
+        # value references, and must not produce a second edge.
+        self._called_positions: set[int] = set()
         self.scope: list[str] = []
         self.classes: list[str] = []
+        self.class_ids: list[str] = []
+        self.bindings: list[dict[str, tuple[str, str]]] = [{}]
         self.current: str | None = None
         self.awaited = False
 
     def identifier(self, name: str) -> str:
         return ".".join([self.module.name, *self.scope, name])
 
-    def resolve(self, raw: str | None) -> tuple[str, bool]:
+    def current_source(self) -> str:
+        """The symbol that owns the statement being visited.
+
+        Falls back outward: the innermost function, else the enclosing class (for
+        statements in a class body), else the synthetic module-scope node. Previously
+        this was just ``self.current``, which is only set inside a function, so every
+        statement outside one was silently dropped.
+        """
+        if self.current:
+            return self.current
+        if self.class_ids:
+            return self.class_ids[-1]
+        return module_scope_id(self.module.name)
+
+    def _lookup_binding(self, name: str) -> tuple[str, str] | None:
+        """Look up a variable name in the scope chain."""
+        for scope in reversed(self.bindings):
+            if name in scope:
+                return scope[name]
+        return None
+
+    def _resolve_via_bases(self, class_id: str, tail: list[str]) -> str | None:
+        """Walk direct base classes for a method."""
+        if not tail:
+            return None
+        class_symbol = self.graph.symbols.get(class_id)
+        if not class_symbol:
+            return None
+        defining_module = self.module_registry.get(class_symbol.module, self.module)
+        for base_name in class_symbol.bases:
+            base_symbol = resolve_module_symbol(base_name, defining_module, self.graph)
+            if base_symbol and base_symbol.kind == "class":
+                candidate = ".".join([base_symbol.id, *tail])
+                if candidate in self.graph.symbols:
+                    return candidate
+        return None
+
+    @staticmethod
+    def _jedi_position(node_func: ast.AST) -> tuple[int, int]:
+        """The position to point the inference engine at for a call's ``func`` expression.
+
+        For an ``Attribute`` the name we care about is the trailing ``.attr``, which sits
+        at the *end* of the expression -- so the line must come from ``end_lineno``, not
+        ``lineno``. Pairing the start line with an end-derived column lands on the wrong
+        line for any multi-line attribute chain, e.g.::
+
+            result = (some_object
+                      .apply_migrations())
+        """
+        if isinstance(node_func, ast.Attribute) and node_func.end_col_offset is not None:
+            line = node_func.end_lineno or node_func.lineno
+            return line, max(node_func.end_col_offset - len(node_func.attr), 0)
+        return node_func.lineno, node_func.col_offset
+
+    def _jedi_worth_trying(self, raw: str) -> bool:
+        """Whether an inference result could possibly map onto an in-repo symbol.
+
+        We only ever *use* a result that resolves to a ``Symbol``, so when that is
+        provably impossible the engine call is pure cost. A symbol's last dotted
+        component always equals its ``name``, so if the call's trailing name is not a
+        known symbol name the engine cannot produce a usable answer -- unless an
+        import alias renames one, which the second check covers.
+
+        This is what makes the engine affordable: it eliminates ``logger.info``,
+        ``pd.DataFrame``, ``os.path.join``, ``json.dumps``, ``list.append`` and the
+        rest of the third-party and builtin surface, which is the large majority of
+        unresolved call sites.
+
+        Soundness depends on only accepting engine results that are graph symbols.
+        If that ever changes, this gate has to be revisited.
+        """
+        last = raw.rsplit(".", 1)[-1]
+        if last in self.index.names:
+            return True
+        head = raw.split(".", 1)[0]
+        target = self.module.imports.get(head)
+        if target is None:
+            return False
+        # An alias may rename an in-repo symbol; only give up when the import's own
+        # root package is not part of this project.
+        return target.split(".", 1)[0] in self.index.top_level
+
+    def _resolve_via_jedi(self, raw: str, node_func: ast.AST) -> tuple[str, str, str] | None:
+        """Resolve a call via the inference engine, or return None to fall through."""
+        try:
+            line, column = self._jedi_position(node_func)
+            for target in self.jedi_resolver.resolve_call(self.module.path, line, column):
+                if target.module_path is None or not target.full_name:
+                    continue
+                try:
+                    relpath = str(target.module_path.relative_to(self.root))
+                except ValueError:
+                    continue  # outside the project: stdlib or a third-party package
+                symbol_id, ambiguous = self.index.resolve_target(
+                    self.graph, relpath, target.line, target.full_name
+                )
+                if symbol_id:
+                    logger.debug("jedi resolved %s -> %s", raw, symbol_id)
+                    return symbol_id, "resolved_via_inference", "jedi_inference"
+                if ambiguous:
+                    # Several in-repo symbols match this name equally well. Guessing by
+                    # dict order would silently attribute the edge to the wrong symbol,
+                    # which is worse than admitting we do not know.
+                    logger.debug("jedi ambiguous for %s (%s)", raw, target.full_name)
+                    return f"external:{raw}", "external_or_dynamic", "jedi_ambiguous"
+        except Exception as e:
+            logger.debug("jedi resolution failed for %s at %s: %s", raw, self.module.path, e)
+        return None
+
+    def resolve(self, raw: str | None, node_func: ast.AST | None = None) -> tuple[str, str, str]:
+        """Resolve a call target; return ``(target_id, resolution, evidence_label)``.
+
+        Cheap static resolution runs first and the inference engine is only consulted
+        when it fails. The ordering is not merely a performance choice: whatever
+        resolves a call also decides the relation's trust tier, and a scope walk over
+        literal AST is a ``deterministic_fact`` where an inference result is only a
+        ``deterministic_heuristic``. Asking the engine first therefore demotes edges we
+        can prove, which would in turn understate reachability confidence downstream.
+
+        Args:
+            raw: The dotted name string (e.g. ``"conn.apply_migrations"``)
+            node_func: The AST node being called, needed for an engine lookup
+        """
         if not raw:
-            return "external:<unresolved>", False
+            return "external:<unresolved>", "external_or_dynamic", "unresolved_dynamic_dispatch"
+
+        static = self._resolve_static(raw)
+        if static[1] != "external_or_dynamic":
+            return static
+
+        if self.jedi_resolver and node_func and self._jedi_worth_trying(raw):
+            inferred = self._resolve_via_jedi(raw, node_func)
+            if inferred:
+                return inferred
+
+        return static
+
+    def _resolve_static(self, raw: str) -> tuple[str, str, str]:
+        """Resolve a dotted name using only literal AST evidence in scope."""
         head, *tail = raw.split(".")
+
         if head in {"self", "cls"} and self.classes:
-            candidate = ".".join([self.module.name, self.classes[-1], *tail])
-            return candidate, candidate in self.graph.symbols
+            current_class_id = self.class_ids[-1]
+            if len(tail) >= 2:
+                attr_name, *rest = tail
+                bound = self.attribute_bindings.get(current_class_id, {}).get(attr_name)
+                if bound:
+                    bound_id, provenance = bound
+                    resolution = "resolved" if provenance in _FACT_PROVENANCE else "resolved_via_inference"
+                    direct = ".".join([bound_id, *rest])
+                    if direct in self.graph.symbols:
+                        return direct, resolution, provenance
+                    via_base = self._resolve_via_bases(bound_id, rest)
+                    if via_base:
+                        return via_base, resolution, provenance
+            candidate = ".".join([current_class_id, *tail])
+            if candidate in self.graph.symbols:
+                return candidate, "resolved", "static_scope_walk"
+            via_base = self._resolve_via_bases(current_class_id, tail)
+            if via_base:
+                return via_base, "resolved", "static_scope_walk"
+            return candidate, "external_or_dynamic", "unresolved_dynamic_dispatch"
+
+        if head == "super" and self.classes:
+            via_base = self._resolve_via_bases(self.class_ids[-1], tail)
+            if via_base:
+                return via_base, "resolved", "static_scope_walk"
+            return f"external:{raw}", "external_or_dynamic", "unresolved_dynamic_dispatch"
+
         if head in self.module.imports:
-            return ".".join([self.module.imports[head], *tail]), False
+            candidate = ".".join([self.module.imports[head], *tail])
+            if candidate in self.graph.symbols:
+                return candidate, "resolved", "static_scope_walk"
+            # Deliberately fall through. An import table entry does not preclude a
+            # richer local binding for the same name -- a module that does both
+            # `from db import session` and `session = Session()` must still resolve
+            # `session.query()` through the local binding below.
+
         for depth in range(len(self.scope), -1, -1):
             candidate = ".".join([self.module.name, *self.scope[:depth], raw])
             if candidate in self.graph.symbols:
-                return candidate, True
-        return f"external:{raw}", False
+                return candidate, "resolved", "static_scope_walk"
+
+        binding = self._lookup_binding(head)
+        if binding and tail:
+            bound_class, provenance = binding
+            resolution = "resolved" if provenance in ("annotated_parameter", "annotated_assignment") else "resolved_via_inference"
+            candidate = ".".join([bound_class, *tail])
+            if candidate in self.graph.symbols:
+                return candidate, resolution, provenance
+            via_base = self._resolve_via_bases(bound_class, tail)
+            if via_base:
+                return via_base, resolution, provenance
+
+        return f"external:{raw}", "external_or_dynamic", "unresolved_dynamic_dispatch"
+
+    def emit(
+        self,
+        kind: str,
+        target: str,
+        line: int,
+        *,
+        evidence_label: str,
+        evidence_tier: str = "deterministic_fact",
+        source: str | None = None,
+        resolution: str = "resolved",
+        resolution_label: str = "static_scope_walk",
+        resolution_tier: str = "deterministic_fact",
+    ) -> None:
+        """Record a non-call relation, if that kind is enabled.
+
+        ``evidence`` says how the syntax was observed; ``resolution_evidence`` says
+        how the target was identified. Keeping them apart is what lets a reference
+        seen as literal AST but resolved by inference report honestly.
+        """
+        if kind not in self.enabled_kinds:
+            return
+        origin = source or self.current_source()
+        if origin not in self.graph.symbols or target not in self.graph.symbols:
+            return
+        self.graph.add_relation(
+            Relation(
+                source=origin,
+                target=target,
+                kind=kind,
+                file=str(self.module.path.relative_to(self.root)),
+                line=line,
+                evidence=Evidence(tier=evidence_tier, label=evidence_label),
+                resolution=resolution,
+                resolution_evidence=Evidence(tier=resolution_tier, label=resolution_label),
+            )
+        )
 
     def mark_entry(self, node: ast.FunctionDef | ast.AsyncFunctionDef, symbol: Symbol) -> None:
-        entries = self.config.analysis.entry_points
-        decorators = [dotted(item) or "" for item in node.decorator_list]
-        for item in decorators:
-            if not item:
-                continue
-            if "fastapi" in self.config.frameworks and any(item.endswith(suffix) for suffix in entries.get("api_route", ())):
-                symbol.entry_point = "api_route"
-            if "typer" in self.config.frameworks and any(item.endswith(suffix) for suffix in entries.get("cli_command", ())):
-                symbol.entry_point = "cli_command"
-            if any(item.endswith(suffix) for suffix in entries.get("framework_callback", ())):
-                symbol.entry_point = "framework_callback"
-        if any(self.module.path.is_relative_to(self.root / part) for part in self.config.test_roots) and node.name.startswith("test_"):
-            symbol.entry_point = "test"
+        """Record every entry-point kind that applies, and whether it is abstract."""
+        for kind in entrypoints.detect(
+            node,
+            module_path=self.module.path,
+            class_stack=self.classes,
+            config=self.config,
+            source_lines=self.module.source_lines,
+        ):
+            symbol.mark_entry_point(kind)
+        if self.config.analysis.entry_point_rules.get("abstract", True):
+            symbol.is_abstract = entrypoints.is_abstract(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        class_id = self.identifier(node.name)
+
+        # A base class referenced nowhere else is still live code. `bases` was
+        # already captured as strings by the definitions pass and never turned
+        # into an edge, so a base used only as a parent looked uncalled.
+        for base in node.bases:
+            base_symbol = resolve_module_symbol(dotted(base), self.module, self.graph)
+            if base_symbol and base_symbol.kind == "class":
+                self.emit(
+                    "INHERITS",
+                    base_symbol.id,
+                    base.lineno,
+                    evidence_label="static_ast_base",
+                    source=class_id,
+                )
+
+        self._emit_decorates(node, class_id)
+
         self.scope.append(node.name)
         self.classes.append(node.name)
+        self.class_ids.append(class_id)
         self.generic_visit(node)
+        self.class_ids.pop()
         self.classes.pop()
         self.scope.pop()
+
+    def _emit_annotates(self, annotation: ast.AST | None, symbol_id: str) -> None:
+        """Link a symbol to every in-repo class named anywhere in an annotation.
+
+        Descends into subscripts, so ``Optional[list[Payload]]`` reaches Payload;
+        annotation-only references are a large false-positive bucket precisely
+        because request/response models are never *called*, only annotated.
+        """
+        if annotation is None:
+            return
+        for node in ast.walk(annotation):
+            if isinstance(node, (ast.Name, ast.Attribute)):
+                name = dotted(node)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                name = node.value  # string forward reference
+            else:
+                continue
+            target = resolve_module_symbol(name, self.module, self.graph)
+            if target and target.kind == "class":
+                self.emit(
+                    "ANNOTATES",
+                    target.id,
+                    getattr(node, "lineno", annotation.lineno),
+                    evidence_label="static_ast_annotation",
+                    source=symbol_id,
+                )
+
+    def _emit_decorates(self, node: ast.AST, symbol_id: str) -> None:
+        """Link a decorated symbol to a locally-defined decorator.
+
+        `@memoize def f()` means f references memoize, so a project's own
+        decorators are never dead. Direction is decorated -> decorator.
+        """
+        for item in getattr(node, "decorator_list", ()):
+            # `@app.route(...)` -- the decorator is the called expression.
+            expr = item.func if isinstance(item, ast.Call) else item
+            decorator = resolve_module_symbol(dotted(expr), self.module, self.graph)
+            if decorator and decorator.kind in ("function", "method", "class"):
+                self.emit(
+                    "DECORATES",
+                    decorator.id,
+                    item.lineno,
+                    evidence_label="static_ast_decorator",
+                    source=symbol_id,
+                )
 
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         previous = self.current
         self.current = self.identifier(node.name)
-
-        # GUARD: only access symbol if it was created by Definitions visitor
         symbol = self.graph.symbols.get(self.current)
         if symbol:
             self.mark_entry(node, symbol)
         else:
-            # Symbol not found — likely a visitor divergence, record warning
             self.report.warnings.append(
                 SymbolWarning(
                     symbol_id=self.current,
@@ -249,12 +852,218 @@ class Relationships(ast.NodeVisitor):
                 )
             )
 
+        self._emit_decorates(node, self.current)
+
+        self.bindings.append({})
+        for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs:
+            if arg.annotation is not None:
+                bound = annotation_to_class(arg.annotation, self.module, self.graph)
+                if bound:
+                    self.bindings[-1][arg.arg] = (bound, "annotated_parameter")
+                self._emit_annotates(arg.annotation, self.current)
+        self._emit_annotates(node.returns, self.current)
+
         self.scope.append(node.name)
         self.generic_visit(node)
         self.scope.pop()
+        self.bindings.pop()
         self.current = previous
 
     visit_AsyncFunctionDef = visit_FunctionDef
+
+    def _emit_exports(self, targets: list[ast.expr], value: ast.expr | None, line: int) -> None:
+        """Link the module-scope node to each name listed in ``__all__``.
+
+        A re-exported symbol may have no other reference in the whole project --
+        the package's public surface is the only thing keeping it alive.
+        """
+        if value is None:
+            return
+        if not any(isinstance(item, ast.Name) and item.id == "__all__" for item in targets):
+            return
+        if not isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+            return
+        for element in value.elts:
+            if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
+                continue
+            # __all__ names are relative to the module that declares them, and in a
+            # package __init__ the name is usually a re-export from a submodule, so
+            # the import map is what finds the real definition.
+            target = resolve_module_symbol(element.value, self.module, self.graph)
+            if target:
+                self.emit(
+                    "EXPORTS",
+                    target.id,
+                    line,
+                    evidence_label="static_ast_dunder_all",
+                    source=module_scope_id(self.module.name),
+                )
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.generic_visit(node)
+        self._emit_exports([node.target], node.value, node.lineno)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.generic_visit(node)
+        self._emit_exports(node.targets, node.value, node.lineno)
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and self.bindings:
+            name = node.targets[0].id
+            bound_class, provenance = infer_bound_class(node.value, self.module, self.graph, self.module_registry)
+            if bound_class:
+                self.bindings[-1][name] = (bound_class, provenance)
+            else:
+                self.bindings[-1].pop(name, None)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.generic_visit(node)
+        self._emit_annotates(node.annotation, self.current_source())
+        if isinstance(node.target, ast.Name) and self.bindings:
+            name = node.target.id
+            bound_class = annotation_to_class(node.annotation, self.module, self.graph)
+            if bound_class:
+                self.bindings[-1][name] = (bound_class, "annotated_assignment")
+            elif node.value is not None:
+                inferred_class, provenance = infer_bound_class(node.value, self.module, self.graph, self.module_registry)
+                if inferred_class:
+                    self.bindings[-1][name] = (inferred_class, provenance)
+                else:
+                    self.bindings[-1].pop(name, None)
+            else:
+                self.bindings[-1].pop(name, None)
+
+    def _emit_imports(self, node: ast.Import | ast.ImportFrom) -> None:
+        """Record what this module imports, and reference any symbol imported by name.
+
+        The module-to-module edges are what the strict reachability mode needs in
+        order to decide which module bodies actually execute. The symbol-level
+        reference is how a re-export in a package ``__init__`` stays alive.
+        """
+        source = module_scope_id(self.module.name)
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            local = alias.asname or (
+                alias.name if isinstance(node, ast.ImportFrom) else alias.name.split(".")[0]
+            )
+            qualified = self.module.imports.get(local)
+            if not qualified:
+                continue
+
+            symbol = self.graph.symbols.get(qualified)
+            if symbol is not None:
+                self.emit(
+                    "REFERENCES",
+                    qualified,
+                    node.lineno,
+                    evidence_label="static_ast_import",
+                    source=source,
+                )
+                continue
+
+            scope_id = module_scope_id(qualified)
+            if scope_id in self.graph.symbols:
+                self.emit(
+                    "IMPORTS",
+                    scope_id,
+                    node.lineno,
+                    evidence_label="static_ast_import",
+                    source=source,
+                    resolution_label="import_substitution",
+                )
+
+    def visit_Import(self, node: ast.Import) -> None:
+        self._emit_imports(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        self._emit_imports(node)
+
+    def _emit_reference(self, node: ast.expr) -> None:
+        """Record a name loaded as a *value* rather than called.
+
+        This is the single largest false-positive bucket in real code:
+        ``Depends(get_db)``, ``lifespan=shutdown``, ``HANDLERS = {"a": handler_a}``,
+        ``@app.on_event`` callbacks, and every function put in a registry are live
+        but have no call edge anywhere.
+
+        Two rules keep the volume sane, and they are load-bearing rather than
+        optimisations. On a real project a naive version emits 27,522 edges --
+        more than twice the call count -- which would bloat the graph and make the
+        visualisation unusable:
+
+        1. Emit only when the name resolves to an in-repo ``Symbol``. There is no
+           ``external:`` target for a reference; an unresolvable name is not
+           evidence of anything and would also pollute the dead-code name check.
+        2. For an attribute chain, consider only the outermost node: ``a.b.c``
+           must not also emit for ``a.b``.
+        """
+        name = dotted(node)
+        if not name or name in ("self", "cls"):
+            return
+        target, resolution, label = self._resolve_static(name)
+        if resolution == "external_or_dynamic" or target not in self.graph.symbols:
+            return
+        self.emit(
+            "REFERENCES",
+            target,
+            node.lineno,
+            evidence_label="static_ast_name_load",
+            resolution=resolution,
+            resolution_label=label,
+            resolution_tier=_RESOLUTION_TIER[resolution],
+        )
+
+    def _emit_string_reference(self, node: ast.Constant) -> None:
+        """Match a dotted string literal against a symbol name.
+
+        Covers ``monkeypatch.setattr("mod.fn", ...)``, Celery ``task_routes``, and
+        Django-style ``MIDDLEWARE`` lists.
+
+        Off by default, and that is a deliberate call rather than caution. This is
+        scope-free name matching, and a false *rescue* is worse than a false
+        positive: it hides dead code and leaves no trail explaining why. Requires
+        exactly one candidate, so an ambiguous name resolves to nothing.
+        """
+        value = node.value
+        if not isinstance(value, str) or "." not in value or len(value) > 200:
+            return
+        candidates = self.index.by_suffix.get(value)
+        if not candidates or len(set(candidates)) != 1:
+            return
+        self.emit(
+            "REFERENCES_STRING",
+            candidates[0],
+            node.lineno,
+            evidence_label="string_literal_dotted_name",
+            evidence_tier="deterministic_heuristic",
+            resolution="resolved_via_inference",
+            resolution_label="string_reference",
+            resolution_tier="deterministic_heuristic",
+        )
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if "REFERENCES_STRING" in self.enabled_kinds:
+            self._emit_string_reference(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load) and id(node) not in self._called_positions:
+            self._emit_reference(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        pure = is_name_chain(node)
+        if (
+            isinstance(node.ctx, ast.Load)
+            and id(node) not in self._called_positions
+            and pure
+        ):
+            # The whole chain has been considered at once. Stopping here avoids a
+            # second edge for the `a.b` prefix of `a.b.c`, and is only safe because
+            # a pure name chain has no sub-expressions to miss.
+            self._emit_reference(node)
+            return
+        # Anything else -- a called attribute, or a chain rooted in a call or a
+        # subscript like `f().dt.date` -- must be descended into, or the nested
+        # call is lost.
+        self.generic_visit(node)
 
     def visit_Await(self, node: ast.Await) -> None:
         prior = self.awaited
@@ -263,11 +1072,26 @@ class Relationships(ast.NodeVisitor):
         self.awaited = prior
 
     def visit_Call(self, node: ast.Call) -> None:
+        self._called_positions.add(id(node.func))
         raw = dotted(node.func)
-        if self.current:
-            target, resolved = self.resolve(raw)
+        source = self.current_source()
+        if source in self.graph.symbols:
+            target, resolution, evidence_label = self.resolve(raw, node_func=node.func)
             contract = self.graph.symbols.get(target)
             parameters = contract.inputs if contract else []
+            # `contract.inputs` includes the receiver, so for a bound call like
+            # `obj.method(a)` a naive zip maps `a` onto the parameter named `self`.
+            # Known residual: an explicit unbound call, `Cls.method(inst, a)`, is also
+            # an Attribute and so is still shifted by one. That form is rare enough to
+            # leave; fixing it needs to know whether the attribute head names a class.
+            if (
+                contract
+                and contract.kind == "method"
+                and parameters
+                and parameters[0]["name"] in ("self", "cls")
+                and isinstance(node.func, ast.Attribute)
+            ):
+                parameters = parameters[1:]
             arguments = [
                 {
                     "parameter": parameters[index]["name"] if index < len(parameters) else None,
@@ -285,29 +1109,28 @@ class Relationships(ast.NodeVisitor):
             if raw and raw.endswith(("create_task", "ensure_future")):
                 kind = "CREATES_TASK"
 
-            # Create relation with Evidence object
             evidence = Evidence(tier="deterministic_fact", label="static_ast")
+            resolution_evidence = Evidence(tier=_RESOLUTION_TIER[resolution], label=evidence_label)
             self.graph.add_relation(
                 Relation(
-                    source=self.current,
+                    source=source,
                     target=target,
                     kind=kind,
                     file=str(self.module.path.relative_to(self.root)),
                     line=node.lineno,
                     evidence=evidence,
-                    resolution="resolved" if resolved else "external_or_dynamic",
+                    resolution=resolution,
+                    resolution_evidence=resolution_evidence,
                     arguments=arguments,
                 )
             )
 
-            # Check resiliency rules against current symbol
-            current_symbol = self.graph.symbols.get(self.current)
+            current_symbol = self.graph.symbols.get(source)
             if current_symbol:
                 for rule in self.config.analysis.risk_rules:
                     if rule.only_in_async and not current_symbol.async_:
                         continue
                     if raw and any(word.lower() in raw.lower() for word in rule.match_words):
-                        # Create Evidence for this resiliency signal
                         evidence = Evidence(
                             tier="deterministic_heuristic",
                             label=rule.category,
@@ -331,6 +1154,158 @@ class Relationships(ast.NodeVisitor):
                     {"type": infer(node.value), "expression": expression(node.value), "evidence": "return_expression"}
                 )
         self.generic_visit(node)
+
+
+def emit_overrides(graph: CodeGraph, config: ProjectConfig) -> None:
+    """Link each overriding method to the base method it overrides.
+
+    Needs the whole graph, so it runs after the relationship pass: resolving a
+    transitive base chain requires the INHERITS edges that pass produces.
+
+    Deliberately ``deterministic_heuristic`` rather than fact. Python has no
+    ``override`` keyword, so this is a name match up an inheritance chain, and
+    mixins and Protocols make same-name collisions genuinely ambiguous. Only bases
+    that resolved to an in-repo class are considered, which keeps `BaseModel.dict`
+    and `Enum.value` out of it.
+
+    Reachability consumes this in both directions and they mean different things:
+    an override being reachable implies its base declaration is (this edge), and a
+    reachable base method implies its overrides may be invoked polymorphically
+    (the reverse walk, done in the reachability pass).
+    """
+    if "OVERRIDES" not in config.analysis.relation_kinds:
+        return
+
+    parents: dict[str, list[str]] = {}
+    for relation in graph.relations:
+        if relation.kind == "INHERITS":
+            parents.setdefault(relation.source, []).append(relation.target)
+
+    members: dict[str, dict[str, Symbol]] = {}
+    for symbol in graph.symbols.values():
+        if symbol.kind in ("method", "function") and symbol.parent:
+            members.setdefault(symbol.parent, {})[symbol.name] = symbol
+
+    def ancestors(class_id: str) -> list[str]:
+        """Base classes in breadth-first order, guarding against inheritance cycles."""
+        seen = {class_id}
+        queue = list(parents.get(class_id, ()))
+        ordered = []
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            ordered.append(current)
+            queue.extend(parents.get(current, ()))
+        return ordered
+
+    for class_id in list(parents):
+        own = members.get(class_id, {})
+        for name, method in own.items():
+            for ancestor in ancestors(class_id):
+                base_method = members.get(ancestor, {}).get(name)
+                if base_method is None or base_method.id == method.id:
+                    continue
+                graph.add_relation(
+                    Relation(
+                        source=method.id,
+                        target=base_method.id,
+                        kind="OVERRIDES",
+                        file=method.file,
+                        line=method.line,
+                        evidence=Evidence(tier="deterministic_fact", label="static_ast_base"),
+                        resolution="resolved_via_inference",
+                        resolution_evidence=Evidence(
+                            tier="deterministic_heuristic", label="mro_name_match"
+                        ),
+                        arguments=[
+                            {
+                                "parameter": "arity_match",
+                                "expression": str(len(method.inputs) == len(base_method.inputs)),
+                                "inferred_type": "bool",
+                            }
+                        ],
+                    )
+                )
+                break  # nearest ancestor declaring this name wins
+
+
+def emit_fixture_uses(graph: CodeGraph, config: ProjectConfig) -> None:
+    """Link each test to the pytest fixtures it consumes.
+
+    pytest injects fixtures by *parameter name*, with no reference to the fixture
+    function anywhere in the test's source. Nothing else in the analyzer can see
+    this link, so without it every fixture looks dead.
+
+    A flat name map is an over-approximation: real pytest scopes fixtures by
+    conftest directory, so a test could be linked to a same-named fixture from an
+    unrelated directory. Tier is heuristic accordingly.
+    """
+    if "USES_FIXTURE" not in config.analysis.relation_kinds:
+        return
+
+    fixtures: dict[str, Symbol] = {}
+    for symbol in graph.symbols.values():
+        if symbol.kind not in ("function", "method"):
+            continue
+        if any(
+            decorator.split(".")[-1] in ("fixture", "async_fixture")
+            and ("pytest" in decorator or decorator == "fixture")
+            for decorator in symbol.decorators
+        ):
+            fixtures.setdefault(symbol.name, symbol)
+
+    if not fixtures:
+        return
+
+    for symbol in graph.symbols.values():
+        if "test" not in symbol.entry_point_kinds:
+            continue
+        for parameter in symbol.inputs:
+            fixture = fixtures.get(parameter["name"])
+            if fixture is None or fixture.id == symbol.id:
+                continue
+            graph.add_relation(
+                Relation(
+                    source=symbol.id,
+                    target=fixture.id,
+                    kind="USES_FIXTURE",
+                    file=symbol.file,
+                    line=symbol.line,
+                    evidence=Evidence(tier="deterministic_fact", label="static_ast"),
+                    resolution="resolved_via_inference",
+                    resolution_evidence=Evidence(
+                        tier="deterministic_heuristic", label="pytest_fixture_name"
+                    ),
+                )
+            )
+
+
+def module_name(path: Path, root: Path, config: ProjectConfig) -> str:
+    """Dotted module name for a file, as Python itself would import it.
+
+    Only a *leading* source root is stripped, and only when that directory is not
+    itself a package. Dropping every path component equal to ``"src"`` collapsed
+    ``src/pkg/src/mod.py`` to ``pkg.mod``, colliding with a real ``pkg/mod.py`` and
+    disagreeing with the dotted names any inference engine reports.
+
+    ``test_roots`` and ``script_roots`` are deliberately *not* stripped: they are not
+    on ``sys.path`` in a normal layout, and :func:`queries.is_test_path` identifies
+    test containers by looking for a test-root component in the dotted id.
+    """
+    parts = path.relative_to(root).with_suffix("").parts
+    if not parts:
+        return ""
+
+    leading = parts[0]
+    if leading in config.source_roots and not (root / leading / "__init__.py").exists():
+        parts = parts[1:]
+
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+
+    return ".".join(parts)
 
 
 def iter_python(root: Path, paths: Iterable[str]) -> Iterable[Path]:
@@ -358,8 +1333,7 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
     graph = CodeGraph(str(root))
     modules: list[Module] = []
 
-    # Initialize report
-    started_at = datetime.utcnow().isoformat()
+    started_at = datetime.now(timezone.utc).isoformat()
     report = AnalysisReport(
         project_root=str(root),
         started_at=started_at,
@@ -402,22 +1376,16 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
             report.files_skipped += 1
             continue
 
-        # Compute module name
-        package_path = path.relative_to(root).with_suffix("").parts
-        # Preserve subpackage structure; only strip "src" build-root marker
-        if package_path and package_path[-1] == "__init__":
-            module = ".".join(part for part in package_path[:-1] if part != "src")
-        else:
-            module = ".".join(part for part in package_path if part != "src")
-
-        if not module:  # Skip if module name is empty (edge case)
+        module = module_name(path, root, config)
+        if not module:
             report.files_skipped += 1
             continue
 
-        # Run Definitions visitor
         try:
-            item = Module(path, module, tree)
-            Definitions(item, graph, root, report).visit(tree)
+            item = Module(path, module, tree, source_lines=text.splitlines())
+            definitions = Definitions(item, graph, root, report)
+            definitions.ensure_module_scope(tree)
+            definitions.visit(tree)
             modules.append(item)
         except Exception as e:
             report.failures.append(
@@ -430,10 +1398,18 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
             )
             continue
 
+    # Phase 1.5: Build module registry and hoist self.attr bindings
+    module_registry: dict[str, Module] = {m.name: m for m in modules}
+    attribute_bindings = hoist_attribute_bindings(modules, graph, module_registry, report, root)
+    jedi_resolver = JediResolver(root, max_calls=config.analysis.jedi_max_calls) if config.analysis.jedi else None
+    index = SymbolIndex.build(graph)
+
     # Phase 2: Analyze relationships (calls, risks, entry points)
     for item in modules:
         try:
-            Relationships(item, graph, root, config, report).visit(item.tree)
+            Relationships(
+                item, graph, root, config, report, jedi_resolver, attribute_bindings, module_registry, index
+            ).visit(item.tree)
         except Exception as e:
             report.failures.append(
                 FileFailure(
@@ -445,10 +1421,29 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
             )
             continue
 
-    # Update report with final counts
+    # Phase 3: whole-graph passes that need every symbol and every INHERITS edge.
+    entrypoints.mark_project_roots(graph, root, config)
+    emit_overrides(graph, config)
+    emit_fixture_uses(graph, config)
+
+    if jedi_resolver is not None and jedi_resolver.budget_exhausted:
+        report.warnings.append(
+            SymbolWarning(
+                symbol_id=None,
+                file="",
+                line=0,
+                message=(
+                    f"Type-inference budget of {config.analysis.jedi_max_calls} calls was "
+                    "exhausted; later call sites fell back to static resolution only. "
+                    "Raise analysis.jedi_max_calls or leave it unset to remove the ceiling."
+                ),
+                stage="relationships",
+            )
+        )
+
     report.symbols_found = len(graph.symbols)
     report.relations_found = len(graph.relations)
     report.containers_found = len(graph.containers)
-    report.finished_at = datetime.utcnow().isoformat()
+    report.finished_at = datetime.now(timezone.utc).isoformat()
 
     return graph, report

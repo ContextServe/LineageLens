@@ -9,11 +9,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from .analyzer import analyze
 from .config import ProjectConfig
+from .index import invalidate, load_index
 from .queries import (
     GraphNotFoundError,
     get_callees,
@@ -22,11 +23,12 @@ from .queries import (
     get_module_overview,
     get_symbol,
     impact_analysis,
+    is_test_path,
     list_entry_points,
     list_resiliency_risks,
-    load_graph,
     search_symbols,
 )
+from .reachability import compute_reachability
 
 
 # Pydantic models for responses
@@ -65,6 +67,16 @@ class NodeView(BaseModel):
     entry_point: str | None
     async_: bool
     has_resiliency_flag: bool
+    is_test: bool = False
+    # Reachability verdict: alive | dynamic_only | test_only | public_api |
+    # probably_dead | dead. Containers have none.
+    verdict: str | None = None
+    # The specific mechanism that kept it alive, and that mechanism's trust tier.
+    # A verdict an agent cannot audit is one it should not act on.
+    rescue_mechanism: str | None = None
+    rescue_tier: str | None = None
+    scope: str = "source"
+    duplicate_name: bool = False
 
 
 class EdgeView(BaseModel):
@@ -134,40 +146,106 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         """Get graph data for visualization (with optional module filtering).
 
         For large repos, module scoping allows lazy loading one module at a time.
+        Includes both Symbols and Containers for compound (hierarchical) layout.
         """
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+        config = index.config
+
+        # Precompute unreferenced symbols and duplicate names for efficiency
+        reachability = compute_reachability(graph, config)
+        duplicate_names = index.duplicate_names
 
         # Collect nodes
         nodes = []
+        rendered_node_ids = set()  # Track which nodes we're actually rendering
+
+        # First pass: emit Container nodes (packages and modules)
+        for container in graph.containers.values():
+            # Skip if filtering by module and this container isn't in/under that module
+            # In scope if the id matches the module or sits under it.
+            if module and container.id != module and not container.id.startswith(module + "."):
+                continue
+
+            has_risk = False  # Containers don't have risk flags directly
+            is_test = is_test_path(container.file, test_roots=config.test_roots)
+
+            # Defensive: null out parent if it won't exist in rendered nodes
+            # (This happens after filtering in both module-scoped and test-filtered cases)
+            parent_id = container.parent
+            # We'll validate parent refs after all nodes are collected
+
+            node = NodeView(
+                id=container.id,
+                label=container.name,
+                kind=container.kind,
+                parent=parent_id,
+                entry_point=None,
+                async_=False,
+                has_resiliency_flag=has_risk,
+                is_test=is_test,
+                verdict=None,
+                scope="test" if is_test else "source",
+                duplicate_name=False,
+            )
+            nodes.append(node)
+            rendered_node_ids.add(container.id)
+
+        # Second pass: emit Symbol nodes
         for symbol in graph.symbols.values():
             # Skip if filtering by module and this symbol's parent doesn't match
-            if module and symbol.parent != module:
+            if module and symbol.parent != module and not (
+                symbol.parent and symbol.parent.startswith(module + ".")
+            ):
                 continue
 
             has_risk = len(symbol.resiliency) > 0
+            is_test = is_test_path(symbol.file, test_roots=config.test_roots)
+            candidate = reachability.explain(symbol.id)
+            duplicate_name = (symbol.kind, symbol.name) in duplicate_names
+
+            # Defensive: null out parent if it won't exist in rendered nodes
+            parent_id = symbol.parent
+
             node = NodeView(
                 id=symbol.id,
                 label=symbol.name,
                 kind=symbol.kind,
-                parent=symbol.parent,
+                parent=parent_id,
                 entry_point=symbol.entry_point,
                 async_=symbol.async_,
                 has_resiliency_flag=has_risk,
+                is_test=is_test,
+                verdict=candidate.verdict if candidate else None,
+                rescue_mechanism=(
+                    candidate.rescue.name if candidate and candidate.rescue else None
+                ),
+                rescue_tier=(
+                    candidate.rescue.evidence.tier if candidate and candidate.rescue else None
+                ),
+                scope=candidate.scope if candidate else "source",
+                duplicate_name=duplicate_name,
             )
             nodes.append(node)
+            rendered_node_ids.add(symbol.id)
+
+        # Third pass: defensive cleanup — null out any parent refs that don't resolve
+        for node in nodes:
+            if node.parent and node.parent not in rendered_node_ids:
+                node.parent = None
 
         # Collect edges
+        # Only include edges where BOTH source and target exist in the rendered nodes
+        # (Cytoscape requires both endpoints to exist)
         edges = []
         for i, rel in enumerate(graph.relations):
-            # Skip if filtering and endpoints not in scope
-            if module:
-                source_ok = any(s.id == rel.source for s in graph.symbols.values() if s.parent == module)
-                target_ok = any(s.id == rel.target for s in graph.symbols.values() if s.parent == module)
-                if not (source_ok or target_ok):
-                    continue
+            # Skip if either endpoint is not in the rendered nodes
+            if rel.source not in rendered_node_ids or rel.target not in rendered_node_ids:
+                continue
 
             edge = EdgeView(
                 id=f"rel_{i}",
@@ -185,9 +263,10 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def get_symbol_detail(symbol_id: str) -> SymbolOut:
         """Get full details for a symbol."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         symbol = get_symbol(graph, symbol_id)
         if not symbol:
@@ -214,9 +293,10 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def search(text: str, kind: str | None = None, limit: int = 30) -> list[SymbolOut]:
         """Search symbols by name/id."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         results = search_symbols(graph, text, kind=kind, limit=limit)
         return [
@@ -243,11 +323,12 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def callers(symbol_id: str) -> list[RelationOut]:
         """Get all symbols that call this one."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
-        relations = get_callers(graph, symbol_id)
+        relations = get_callers(graph, symbol_id, index)
         return [
             RelationOut(
                 source=r.source,
@@ -265,11 +346,12 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def callees(symbol_id: str) -> list[RelationOut]:
         """Get all symbols this one calls."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
-        relations = get_callees(graph, symbol_id)
+        relations = get_callees(graph, symbol_id, index)
         return [
             RelationOut(
                 source=r.source,
@@ -287,9 +369,10 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def lineage(symbol_id: str, direction: str = "forward", max_depth: int = 5) -> list[LineageStepOut]:
         """Get transitive call path (forward or backward)."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         steps = get_lineage(graph, symbol_id, direction=direction, max_depth=max_depth)
         return [
@@ -307,9 +390,10 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def impact(symbol_id: str, max_depth: int = 10) -> ImpactReportOut:
         """Backward transitive closure: what would be affected by changes here?"""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         report = impact_analysis(graph, symbol_id, max_depth=max_depth)
         return ImpactReportOut(
@@ -331,9 +415,10 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def module_overview(module: str) -> ModuleOverviewOut:
         """Get high-level overview of a module (for agents)."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         overview = get_module_overview(graph, module)
         if not overview:
@@ -350,9 +435,10 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def entry_points(kind: str | None = None) -> list[SymbolOut]:
         """List all entry points (API routes, CLI commands, tests)."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         entries = list_entry_points(graph, kind=kind)
         return [
@@ -379,12 +465,100 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def resiliency(min_severity: str | None = None) -> list[RiskOut]:
         """List all resiliency/risk signals."""
         try:
-            graph = load_graph(project)
+            index = load_index(project)
+            graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         risks = list_resiliency_risks(graph, min_severity=min_severity)
         return [RiskOut(**r) for r in risks]
+
+    # GET /api/v1/dead-code - the full candidate list with verdicts
+    @router.get("/dead-code")
+    def dead_code(
+        verdict: str | None = None, scope: str | None = None
+    ) -> dict[str, Any]:
+        """Symbols that warrant attention as possible dead code.
+
+        Previously reachable only as node flags on /graph/view or through MCP.
+
+        Verdicts, in descending severity:
+          dead           not reachable from any entry point by any modelled
+                         mechanism, and no same-named dynamic call site exists
+          probably_dead  unreachable, but an unresolved call shares its name
+          test_only      reachable only from tests, so nothing shipped uses it
+        """
+        try:
+            index = load_index(project)
+            graph = index.graph
+        except GraphNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+        result = compute_reachability(graph, index.config)
+        candidates = result.candidates()
+        if verdict:
+            candidates = [c for c in candidates if c.verdict == verdict]
+        if scope:
+            candidates = [c for c in candidates if c.scope == scope]
+
+        return {
+            "count": len(candidates),
+            "by_verdict": result.by_verdict(),
+            "candidates": [
+                {
+                    "id": c.symbol.id,
+                    "kind": c.symbol.kind,
+                    "name": c.symbol.name,
+                    "file": c.symbol.file,
+                    "line": c.symbol.line,
+                    "module": c.symbol.module,
+                    "verdict": c.verdict,
+                    "scope": c.scope,
+                    "reason": c.reason,
+                }
+                for c in candidates
+            ],
+        }
+
+    # GET /api/v1/reachability/{symbol_id} - why is this alive?
+    @router.get("/reachability/{symbol_id}")
+    def reachability(symbol_id: str) -> dict[str, Any]:
+        """Explain the verdict for one symbol.
+
+        This is the endpoint that makes the feature auditable, and the one an
+        agent should consult before deleting anything: it names the mechanism
+        that reached the symbol, the symbol it was reached through, and the trust
+        tier of that mechanism.
+        """
+        try:
+            index = load_index(project)
+            graph = index.graph
+        except GraphNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+        if symbol_id not in graph.symbols:
+            raise HTTPException(status_code=404, detail=f"Symbol not found: {symbol_id}")
+
+        candidate = compute_reachability(graph, index.config).explain(symbol_id)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail=f"No verdict for {symbol_id}")
+
+        return {
+            "id": symbol_id,
+            "verdict": candidate.verdict,
+            "scope": candidate.scope,
+            "reason": candidate.reason,
+            "rescue": (
+                {
+                    "mechanism": candidate.rescue.name,
+                    "tier": candidate.rescue.evidence.tier,
+                    "detail": candidate.rescue.detail,
+                    "via_symbol": candidate.rescue.via_symbol,
+                }
+                if candidate.rescue
+                else None
+            ),
+        }
 
     # POST /api/v1/analyze - trigger analysis (protected)
     @router.post("/analyze")
@@ -393,10 +567,12 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         config = ProjectConfig.load(project)
         graph, report = analyze(project, config)
 
-        # Write results
-        from .cli import build, graph_path, report_path
+        # Persist the graph we just computed. Calling cli.build() here would run the
+        # whole analysis a second time.
+        from .cli import write_artifacts
 
-        build(project)
+        write_artifacts(project, config, graph, report, quiet=True)
+        invalidate(project)
 
         return {
             "status": "success",

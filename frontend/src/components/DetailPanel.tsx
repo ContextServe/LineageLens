@@ -7,6 +7,7 @@ interface DetailPanelProps {
 export function DetailPanel({ symbolId }: DetailPanelProps) {
   const [symbol, setSymbol] = useState<any>(null)
   const [impact, setImpact] = useState<any>(null)
+  const [reachability, setReachability] = useState<any>(null)
 
   useEffect(() => {
     if (!symbolId) return
@@ -22,6 +23,14 @@ export function DetailPanel({ symbolId }: DetailPanelProps) {
       .then((r) => r.json())
       .then(setImpact)
       .catch(console.error)
+
+    // Why is this considered reachable? The mechanism matters more than the
+    // verdict: a verdict you cannot audit is one you should not act on.
+    setReachability(null)
+    fetch(`/api/v1/reachability/${encodeURIComponent(symbolId)}`)
+      .then((r) => r.json())
+      .then(setReachability)
+      .catch(console.error)
   }, [symbolId])
 
   if (!symbol) return <div className="detail-panel loading">Loading...</div>
@@ -34,6 +43,29 @@ export function DetailPanel({ symbolId }: DetailPanelProps) {
         {symbol.entry_point && <span className="entry-point">{symbol.entry_point}</span>}
         {symbol.async_ && <span className="async">async</span>}
       </div>
+
+      {reachability?.verdict && (
+        <div className="section reachability">
+          <h3>Reachability</h3>
+          <p>
+            <span className={`verdict verdict-${reachability.verdict}`}>
+              {reachability.verdict}
+            </span>
+            {reachability.scope === 'test' && <span className="scope">test scope</span>}
+          </p>
+          {reachability.rescue && (
+            <p className="rescue">
+              <strong>{reachability.rescue.mechanism}</strong>
+              {' \u2014 '}
+              {reachability.rescue.detail}
+              {reachability.rescue.tier === 'deterministic_heuristic' && (
+                <em> (inferred, not proven)</em>
+              )}
+            </p>
+          )}
+          <p className="reason">{reachability.reason}</p>
+        </div>
+      )}
 
       {symbol.description && (
         <div className="section">

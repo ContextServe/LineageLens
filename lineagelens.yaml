@@ -48,6 +48,14 @@ analysis:
     - validator
     - field_validator
     - model_validator
+    # This project registers its MCP tools with @server.tool() and its GraphQL
+    # schema with strawberry decorators. Neither is called from Python, so without
+    # these suffixes every tool and resolver reports as dead.
+    - .tool
+    - .resource
+    - .prompt
+    - strawberry.field
+    - strawberry.type
 output:
   directory: .lineagelens
   filename: graph.json

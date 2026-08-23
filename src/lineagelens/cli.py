@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from . import hooks
 from .analyzer import analyze
 from .config import ProjectConfig
 from .detect_config import detect_config
+from .model import CodeGraph
+from .queries import GraphNotFoundError, load_graph
+from .ratchet import BASELINE_NAME, SEVERITY, Baseline, evaluate, severity_at_or_above
+from .reachability import compute_reachability
+from .report import AnalysisReport
 
 
 def _plain(value: Any) -> Any:
@@ -76,34 +82,96 @@ def check_frontend_available() -> None:
     print("  pip install lineagelens[web]  # from PyPI")
     print()
     print("For now, the REST API and GraphQL are still available at:")
-    print(f"  http://127.0.0.1:8717/api/v1")
-    print(f"  http://127.0.0.1:8717/graphql")
+    print("  http://127.0.0.1:8717/api/v1")
+    print("  http://127.0.0.1:8717/graphql")
 
 
-def build(project: Path) -> tuple[Path, Path]:
-    """Analyze project and write graph.json + report.json.
+def write_artifacts(
+    project: Path,
+    config: ProjectConfig,
+    graph: CodeGraph,
+    report: AnalysisReport,
+    quiet: bool = False,
+) -> tuple[Path, Path]:
+    """Persist an already-computed graph and report.
+
+    Split out of :func:`build` so that callers holding a graph in memory (the REST
+    and MCP trigger endpoints) can write it without analysing a second time.
 
     Returns:
-        (graph_path, report_path) tuple
+        ``(graph_path, report_path)``
     """
-    config = ProjectConfig.load(project)
-    graph, report = analyze(project, config)
-
-    # Write graph.json
     graph_file = graph_path(project, config)
     graph_file.parent.mkdir(parents=True, exist_ok=True)
     graph_file.write_text(json.dumps(graph.to_dict(), indent=2), encoding="utf-8")
 
-    # Write report.json
     report_file = report_path(project, config)
     report_file.parent.mkdir(parents=True, exist_ok=True)
     report_file.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
 
-    # Print human-readable summary
-    for line in report.summary_lines():
-        print(line)
+    if not quiet:
+        for line in report.summary_lines():
+            print(line)
 
     return graph_file, report_file
+
+
+def build(
+    project: Path, quiet: bool = False, jedi: bool | None = None
+) -> tuple[Path, Path, AnalysisReport]:
+    """Analyze a project and write graph.json + report.json.
+
+    Returns:
+        ``(graph_path, report_path, report)``. The in-memory report is returned so
+        that ``--strict`` can inspect it directly rather than re-reading and
+        re-parsing the file it just wrote.
+    """
+    config = ProjectConfig.load(project)
+    if jedi is not None and jedi != config.analysis.jedi:
+        config = replace(config, analysis=replace(config.analysis, jedi=jedi))
+    graph, report = analyze(project, config)
+    graph_file, report_file = write_artifacts(project, config, graph, report, quiet=quiet)
+    return graph_file, report_file, report
+
+
+def run_check(project: Path, args: Any) -> int:
+    """Compare current dead-code candidates against the baseline. Returns an exit code."""
+    config = ProjectConfig.load(project)
+
+    if args.analyze:
+        graph, report = analyze(project, config)
+        write_artifacts(project, config, graph, report, quiet=True)
+    else:
+        try:
+            graph = load_graph(project)
+        except GraphNotFoundError as e:
+            print(f"✗ {e}")
+            return 1
+
+    candidates = compute_reachability(graph, config).candidates()
+    baseline_path = args.baseline or (project / config.output.directory / BASELINE_NAME)
+
+    if args.update_baseline:
+        considered = severity_at_or_above(args.fail_on)
+        updated = Baseline(
+            entries={c.symbol.id: c.verdict for c in candidates if c.verdict in considered}
+        )
+        updated.save(baseline_path)
+        print(f"✓ Baseline written to {baseline_path} ({len(updated.entries)} entries)")
+        return 0
+
+    result = evaluate(candidates, Baseline.load(baseline_path), fail_on=args.fail_on)
+    for line in result.summary_lines():
+        print(line)
+
+    if result.failed(args.max_new):
+        print(
+            "\n✗ New dead code introduced. Remove it, or -- if it is reached by "
+            "reflection or config-driven dispatch that static analysis cannot see -- "
+            "mark it `# lineagelens: keep` and re-run with --update-baseline."
+        )
+        return 1
+    return 0
 
 
 def main() -> None:
@@ -116,9 +184,66 @@ def main() -> None:
     analyze_cmd = commands.add_parser("analyze", help="Analyze Python code and build graph")
     analyze_cmd.add_argument("project", type=Path, help="Project directory")
     analyze_cmd.add_argument("--strict", action="store_true", help="Exit with nonzero code if any failures occur")
+    analyze_cmd.add_argument(
+        "--no-jedi",
+        action="store_true",
+        help="Skip type inference. Faster, resolves fewer dynamic calls (useful on PR-time CI runs)",
+    )
+    analyze_cmd.add_argument("--quiet", action="store_true", help="Do not print the analysis summary")
 
     serve_cmd = commands.add_parser("serve", help="Start local web UI and GraphQL server")
     serve_cmd.add_argument("project", type=Path, help="Project directory")
+
+    check_cmd = commands.add_parser(
+        "check",
+        help="Fail on newly introduced dead code (CI ratchet)",
+        description=(
+            "Compare dead-code candidates against a committed baseline and exit 1 only "
+            "on ones that are new. A ratchet is adoptable on day one, where an absolute "
+            "gate would fail every existing codebase and get switched off."
+        ),
+    )
+    check_cmd.add_argument("project", type=Path, help="Project directory")
+    check_cmd.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Baseline file (default: <output dir>/dead-code-baseline.json)",
+    )
+    check_cmd.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="Rewrite the baseline from the current state and exit 0",
+    )
+    check_cmd.add_argument(
+        "--fail-on",
+        choices=list(SEVERITY),
+        default="dead",
+        help="Least severe verdict that should fail (default: dead)",
+    )
+    check_cmd.add_argument(
+        "--max-new",
+        type=int,
+        default=0,
+        help="Tolerate this many new candidates before failing (default: 0)",
+    )
+    check_cmd.add_argument(
+        "--analyze",
+        action="store_true",
+        help="Re-run the analysis first instead of using the stored graph",
+    )
+
+    hook_cmd = commands.add_parser("hook", help="Manage the git hook that keeps the graph current")
+    hook_cmd.add_argument("action", choices=["install", "uninstall", "status"])
+    hook_cmd.add_argument("project", type=Path, nargs="?", default=Path("."), help="Project directory")
+    hook_cmd.add_argument(
+        "--pre-commit",
+        action="store_true",
+        help="Use pre-commit instead of post-commit (adds seconds to every commit)",
+    )
+    hook_cmd.add_argument(
+        "--force", action="store_true", help="Append to a hook LineageLens did not create"
+    )
 
     args = parser.parse_args()
     project = args.project.resolve()
@@ -158,9 +283,37 @@ def main() -> None:
 
         return
 
+    if args.command == "hook":
+        kind = "pre-commit" if args.pre_commit else "post-commit"
+        try:
+            if args.action == "install":
+                path = hooks.install(project, kind=kind, force=args.force)
+                print(f"✓ Installed {kind} hook at {path}")
+                if kind == "pre-commit":
+                    print("  Note: this runs on every commit and will add a few seconds each time.")
+                print("\n  Add .lineagelens/ to .gitignore -- the graph is a build artifact,")
+                print("  not source. Publish it from CI if agents need it centrally.")
+            elif args.action == "uninstall":
+                removed = hooks.uninstall(project, kind=kind)
+                print(f"✓ Removed the managed block from the {kind} hook" if removed
+                      else f"No LineageLens block found in the {kind} hook")
+            else:
+                for name, present in hooks.status(project).items():
+                    print(f"  {name:12s} {'installed' if present else '-'}")
+        except hooks.HookError as e:
+            raise SystemExit(f"✗ {e}") from e
+        return
+
+    if args.command == "check":
+        raise SystemExit(run_check(project, args))
+
     # analyze and serve commands
     config = ProjectConfig.load(project)
-    graph_file, report_file = build(project)
+    _graph_file, _report_file, analysis_report = build(
+        project,
+        quiet=getattr(args, "quiet", False),
+        jedi=False if getattr(args, "no_jedi", False) else None,
+    )
 
     if args.command == "serve":
         # Check if frontend is available (provide guidance if not, but don't block)
@@ -178,11 +331,13 @@ def main() -> None:
         uvicorn.run(create_app(project, config), host=config.server.host, port=config.server.port)
 
     # Check for failures if --strict is set
-    if args.command == "analyze" and args.strict:
-        import json
-        report = json.loads(report_file.read_text())
-        if report.get("failures"):
-            raise SystemExit(1)
+    if (
+        args.command == "analyze"
+        and args.strict
+        and analysis_report is not None
+        and analysis_report.has_failures()
+    ):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
