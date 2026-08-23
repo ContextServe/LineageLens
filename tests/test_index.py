@@ -55,7 +55,7 @@ def test_index_is_rebuilt_when_the_graph_changes(tmp_path):
     root = make_project(tmp_path)
     config = ProjectConfig.load(root)
     graph, report = analyze(root, config)
-    graph_file, _ = write_artifacts(root, config, graph, report, quiet=True)
+    _graph_file, _ = write_artifacts(root, config, graph, report, quiet=True)
     invalidate(root)
 
     first = load_index(root)

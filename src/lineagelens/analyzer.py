@@ -195,7 +195,10 @@ def resolve_module_symbol(name: str | None, module: Module, graph: CodeGraph) ->
     if not name:
         return None
     head, *tail = name.split(".")
-    candidate = ".".join([module.imports[head], *tail]) if head in module.imports else ".".join([module.name, name])
+    if head in module.imports:
+        candidate = ".".join([module.imports[head], *tail])
+    else:
+        candidate = f"{module.name}.{name}"
     return graph.symbols.get(candidate)
 
 
@@ -265,11 +268,10 @@ def _self_attr_assignment(stmt: ast.AST) -> tuple[str | None, ast.AST | None, as
             target = stmt.targets[0]
             if isinstance(target.value, ast.Name) and target.value.id == "self":
                 return target.attr, None, stmt.value
-    elif isinstance(stmt, ast.AnnAssign):
-        if isinstance(stmt.target, ast.Attribute):
-            target = stmt.target
-            if isinstance(target.value, ast.Name) and target.value.id == "self":
-                return target.attr, stmt.annotation, stmt.value
+    elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Attribute):
+        target = stmt.target
+        if isinstance(target.value, ast.Name) and target.value.id == "self":
+            return target.attr, stmt.annotation, stmt.value
     return None, None, None
 
 
@@ -460,7 +462,8 @@ class Definitions(ast.NodeVisitor):
         inputs = []
         args = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
         defaults = [None] * (len(args) - len(node.args.defaults)) + list(node.args.defaults)
-        for arg, default in zip(args, defaults):
+        # defaults is padded to len(args) above, so strict= catches a padding bug
+        for arg, default in zip(args, defaults, strict=True):
             inputs.append({"name": arg.arg, "type": expression(arg.annotation) if arg.annotation else "unknown", "default": expression(default) if default else None})
 
         parent_id = self._parent_id()
@@ -1248,7 +1251,7 @@ def emit_fixture_uses(graph: CodeGraph, config: ProjectConfig) -> None:
             continue
         if any(
             decorator.split(".")[-1] in ("fixture", "async_fixture")
-            and ("pytest" in decorator or "fixture" == decorator)
+            and ("pytest" in decorator or decorator == "fixture")
             for decorator in symbol.decorators
         ):
             fixtures.setdefault(symbol.name, symbol)

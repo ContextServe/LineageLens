@@ -10,14 +10,14 @@ from typing import Any
 
 import yaml
 
+from . import hooks
 from .analyzer import analyze
 from .config import ProjectConfig
-from . import hooks
 from .detect_config import detect_config
-from .queries import GraphNotFoundError, load_graph
-from .ratchet import SEVERITY, BASELINE_NAME, Baseline, evaluate, severity_at_or_above
-from .reachability import compute_reachability
 from .model import CodeGraph
+from .queries import GraphNotFoundError, load_graph
+from .ratchet import BASELINE_NAME, SEVERITY, Baseline, evaluate, severity_at_or_above
+from .reachability import compute_reachability
 from .report import AnalysisReport
 
 
@@ -82,8 +82,8 @@ def check_frontend_available() -> None:
     print("  pip install lineagelens[web]  # from PyPI")
     print()
     print("For now, the REST API and GraphQL are still available at:")
-    print(f"  http://127.0.0.1:8717/api/v1")
-    print(f"  http://127.0.0.1:8717/graphql")
+    print("  http://127.0.0.1:8717/api/v1")
+    print("  http://127.0.0.1:8717/graphql")
 
 
 def write_artifacts(
@@ -309,7 +309,7 @@ def main() -> None:
 
     # analyze and serve commands
     config = ProjectConfig.load(project)
-    graph_file, report_file, analysis_report = build(
+    _graph_file, _report_file, analysis_report = build(
         project,
         quiet=getattr(args, "quiet", False),
         jedi=False if getattr(args, "no_jedi", False) else None,
@@ -331,9 +331,13 @@ def main() -> None:
         uvicorn.run(create_app(project, config), host=config.server.host, port=config.server.port)
 
     # Check for failures if --strict is set
-    if args.command == "analyze" and args.strict and analysis_report is not None:
-        if analysis_report.has_failures():
-            raise SystemExit(1)
+    if (
+        args.command == "analyze"
+        and args.strict
+        and analysis_report is not None
+        and analysis_report.has_failures()
+    ):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -32,7 +32,6 @@
     "tests.fixtures.reachability_corpus.src.corpus.truly_dead.NeverUsed": "dead",
     "tests.fixtures.reachability_corpus.src.corpus.truly_dead.NeverUsed.also_never_used": "dead",
     "tests.fixtures.reachability_corpus.src.corpus.truly_dead.never_used": "dead",
-    "tests.fixtures.reachability_corpus.tests.helpers.unused_helper": "dead",
-    "tests.test_resolution.label_of": "dead"
+    "tests.fixtures.reachability_corpus.tests.helpers.unused_helper": "dead"
   }
 }

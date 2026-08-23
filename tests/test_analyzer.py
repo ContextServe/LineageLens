@@ -43,7 +43,7 @@ def test_config_driven_risk_rules_and_entry_points():
                 entry_points={"api_route": (".run",)},
             ),
         )
-        graph, report = analyze(root, config)
+        graph, _report = analyze(root, config)
         prox = graph.symbols["app.service.prox"]
         fe = graph.symbols["app.service.fe"]
         # resiliency signals now use Evidence; legacy .risks property still works

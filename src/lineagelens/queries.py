@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 class GraphNotFoundError(RuntimeError):
     """Graph file not found or couldn't be loaded."""
 
-    pass
 
 
 def load_graph(project: Path) -> CodeGraph:
@@ -235,7 +234,7 @@ def search_symbols(
 
 
 def get_callers(
-    graph: CodeGraph, symbol_id: str, index: "GraphIndex | None" = None
+    graph: CodeGraph, symbol_id: str, index: GraphIndex | None = None
 ) -> list[Relation]:
     """Relations where this symbol is the target (things that reference it).
 
@@ -248,7 +247,7 @@ def get_callers(
 
 
 def get_callees(
-    graph: CodeGraph, symbol_id: str, index: "GraphIndex | None" = None
+    graph: CodeGraph, symbol_id: str, index: GraphIndex | None = None
 ) -> list[Relation]:
     """Relations where this symbol is the source (things it references)."""
     if index is not None:
@@ -455,7 +454,7 @@ def is_test_path(file_or_id: str | None, test_roots: tuple[str, ...] = ("tests",
     # A container is test-related if its module path includes a test root directory
     else:
         parts = file_or_id.split(".")
-        for i, part in enumerate(parts):
+        for _index, part in enumerate(parts):
             if part in test_roots:
                 return True
 
@@ -550,7 +549,7 @@ def get_module_dependencies(graph: CodeGraph) -> dict[str, set[str]]:
 
 
 def get_codebase_metrics(
-    graph: CodeGraph, index: "GraphIndex | None" = None
+    graph: CodeGraph, index: GraphIndex | None = None
 ) -> dict[str, Any]:
     """Get aggregate codebase metrics and statistics.
 
@@ -632,5 +631,5 @@ def get_codebase_metrics(
             "max_chain": max_depth,
             "average_chain": round(avg_depth, 2),
         },
-        "modules": len(set(s.module for s in graph.symbols.values())),
+        "modules": len({s.module for s in graph.symbols.values()}),
     }

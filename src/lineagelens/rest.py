@@ -9,16 +9,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from .analyzer import analyze
 from .config import ProjectConfig
 from .index import invalidate, load_index
-from .reachability import compute_reachability
 from .queries import (
     GraphNotFoundError,
-    find_duplicate_names,
     get_callees,
     get_callers,
     get_lineage,
@@ -30,6 +28,7 @@ from .queries import (
     list_resiliency_risks,
     search_symbols,
 )
+from .reachability import compute_reachability
 
 
 # Pydantic models for responses
@@ -153,7 +152,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         config = index.config
 
@@ -168,10 +167,9 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         # First pass: emit Container nodes (packages and modules)
         for container in graph.containers.values():
             # Skip if filtering by module and this container isn't in/under that module
-            if module:
-                # Container is in scope if its id matches or starts with the module id
-                if container.id != module and not container.id.startswith(module + "."):
-                    continue
+            # In scope if the id matches the module or sits under it.
+            if module and container.id != module and not container.id.startswith(module + "."):
+                continue
 
             has_risk = False  # Containers don't have risk flags directly
             is_test = is_test_path(container.file, test_roots=config.test_roots)
@@ -200,9 +198,10 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         # Second pass: emit Symbol nodes
         for symbol in graph.symbols.values():
             # Skip if filtering by module and this symbol's parent doesn't match
-            if module:
-                if symbol.parent != module and not (symbol.parent and symbol.parent.startswith(module + ".")):
-                    continue
+            if module and symbol.parent != module and not (
+                symbol.parent and symbol.parent.startswith(module + ".")
+            ):
+                continue
 
             has_risk = len(symbol.resiliency) > 0
             is_test = is_test_path(symbol.file, test_roots=config.test_roots)
@@ -267,7 +266,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         symbol = get_symbol(graph, symbol_id)
         if not symbol:
@@ -297,7 +296,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         results = search_symbols(graph, text, kind=kind, limit=limit)
         return [
@@ -327,7 +326,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         relations = get_callers(graph, symbol_id, index)
         return [
@@ -350,7 +349,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         relations = get_callees(graph, symbol_id, index)
         return [
@@ -373,7 +372,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         steps = get_lineage(graph, symbol_id, direction=direction, max_depth=max_depth)
         return [
@@ -394,7 +393,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         report = impact_analysis(graph, symbol_id, max_depth=max_depth)
         return ImpactReportOut(
@@ -419,7 +418,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         overview = get_module_overview(graph, module)
         if not overview:
@@ -439,7 +438,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         entries = list_entry_points(graph, kind=kind)
         return [
@@ -469,7 +468,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         risks = list_resiliency_risks(graph, min_severity=min_severity)
         return [RiskOut(**r) for r in risks]
@@ -493,7 +492,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         result = compute_reachability(graph, index.config)
         candidates = result.candidates()
@@ -535,7 +534,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             index = load_index(project)
             graph = index.graph
         except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
         if symbol_id not in graph.symbols:
             raise HTTPException(status_code=404, detail=f"Symbol not found: {symbol_id}")

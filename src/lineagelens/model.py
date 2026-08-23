@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-
 # Bump whenever the on-disk shape or the meaning of symbol ids changes, so a
 # stale graph.json is rejected outright instead of silently producing nonsense.
 #
