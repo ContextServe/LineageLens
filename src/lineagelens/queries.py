@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .model import CodeGraph, Container, Relation, Symbol
+from .model import CodeGraph, Container, Evidence, Relation, Symbol
 from .report import AnalysisReport
 
 
@@ -19,6 +19,15 @@ class GraphNotFoundError(RuntimeError):
     """Graph file not found or couldn't be loaded."""
 
     pass
+
+
+@dataclass(frozen=True)
+class DeadCodeCandidate:
+    """A symbol flagged as potentially dead code with confidence level."""
+
+    symbol: Symbol
+    confidence: str  # "confirmed" | "unconfirmed_possible_dynamic_dispatch"
+    reason: str
 
 
 def load_graph(project: Path) -> CodeGraph:
@@ -73,12 +82,19 @@ def load_graph(project: Path) -> CodeGraph:
             inputs=s_raw.get("inputs", []),
             outputs=s_raw.get("outputs", []),
             decorators=s_raw.get("decorators", []),
+            bases=s_raw.get("bases", []),
             entry_point=s_raw.get("entry_point"),
         )
         # Note: resiliency signals would be reconstructed here too
         graph.add_symbol(symbol)
 
-    # Reconstruct relations (simple for now, doesn't reconstruct Evidence objects)
+    # Helper for Evidence reconstruction
+    def _load_evidence(raw: dict | None, default: Evidence) -> Evidence:
+        if not raw:
+            return default
+        return Evidence(tier=raw.get("tier", default.tier), label=raw.get("label", default.label), confidence=raw.get("confidence"))
+
+    # Reconstruct relations
     for r_raw in raw.get("relations", []):
         relation = Relation(
             source=r_raw["source"],
@@ -86,7 +102,9 @@ def load_graph(project: Path) -> CodeGraph:
             kind=r_raw["kind"],
             file=r_raw["file"],
             line=r_raw["line"],
+            evidence=_load_evidence(r_raw.get("evidence"), Evidence(tier="deterministic_fact", label="static_ast")),
             resolution=r_raw.get("resolution", "resolved"),
+            resolution_evidence=_load_evidence(r_raw.get("resolution_evidence"), Evidence(tier="deterministic_fact", label="static_scope_walk")),
             arguments=r_raw.get("arguments", []),
         )
         graph.add_relation(relation)
@@ -349,3 +367,208 @@ def list_resiliency_risks(graph: CodeGraph, *, min_severity: str | None = None) 
                 )
 
     return results
+
+
+def is_test_path(file_or_id: str | None, test_roots: tuple[str, ...] = ("tests",)) -> bool:
+    """Check if a file or container id is under a test root.
+
+    Args:
+        file_or_id: Root-relative file path (e.g., "tests/test_foo.py") or container id (e.g., "app.tests.utils")
+        test_roots: Tuple of test root directory names (default: ("tests",))
+
+    Returns:
+        True if the path/id starts with any test root
+    """
+    if not file_or_id:
+        return False
+
+    # File path format: "tests/test_foo.py" or "tests/utils.py"
+    if "/" in file_or_id:
+        for root in test_roots:
+            if file_or_id.startswith(root + "/") or file_or_id == root:
+                return True
+
+    # Container id format: "app.tests" or "myproject.tests.helpers"
+    # A container is test-related if its module path includes a test root directory
+    else:
+        parts = file_or_id.split(".")
+        for i, part in enumerate(parts):
+            if part in test_roots:
+                return True
+
+    return False
+
+
+def list_unreferenced_symbols(graph: CodeGraph) -> list[DeadCodeCandidate]:
+    """Find symbols that have no incoming relations (no callers).
+
+    Classifies each candidate by confidence level:
+    - "confirmed": zero relations target this symbol, and no unresolved dynamic calls match its name
+    - "unconfirmed_possible_dynamic_dispatch": zero direct callers, but an ambiguous dynamic-dispatch
+      call site exists elsewhere with the same method name (may be called via duck-typing)
+
+    Excludes entry points (API routes, CLI commands, tests, framework callbacks)
+    since they are designed to be invoked by external systems, not in-repo code.
+
+    Args:
+        graph: CodeGraph
+
+    Returns:
+        List of DeadCodeCandidate objects
+    """
+    called_targets = {rel.target for rel in graph.relations}
+    unresolved_names: set[str] = set()
+    for rel in graph.relations:
+        if rel.resolution == "external_or_dynamic" and rel.target.startswith("external:"):
+            raw = rel.target[len("external:"):]
+            bare = raw.rsplit(".", 1)[-1]
+            if bare and bare != "<unresolved>":
+                unresolved_names.add(bare)
+
+    results: list[DeadCodeCandidate] = []
+    for sym in graph.symbols.values():
+        if sym.id in called_targets or sym.entry_point:
+            continue
+        if sym.kind in ("function", "method") and sym.name in unresolved_names:
+            results.append(DeadCodeCandidate(sym, "unconfirmed_possible_dynamic_dispatch",
+                f"an unresolved dynamic call site elsewhere targets a method/function named '{sym.name}'"))
+        else:
+            results.append(DeadCodeCandidate(sym, "confirmed",
+                "no relation of any resolution kind references this symbol, and no ambiguous dynamic-dispatch call site shares its name"))
+    return results
+
+
+def find_duplicate_names(graph: CodeGraph) -> set[str]:
+    """Find symbols that share the same name and kind in different modules.
+
+    This is a "same name in multiple places" heuristic, not a body-hash duplicate check.
+    Useful for detecting naming conflicts or accidental duplicates.
+
+    Args:
+        graph: CodeGraph
+
+    Returns:
+        Set of names that appear more than once for the same kind
+    """
+    # Group by (kind, name) tuple
+    name_counts = {}
+    for symbol in graph.symbols.values():
+        key = (symbol.kind, symbol.name)
+        name_counts[key] = name_counts.get(key, 0) + 1
+
+    # Return names that appear more than once (per kind)
+    return {name for (kind, name), count in name_counts.items() if count > 1}
+
+
+def get_module_dependencies(graph: CodeGraph) -> dict[str, set[str]]:
+    """Build module-to-module dependency graph.
+
+    Shows which modules depend on which other modules based on symbol calls.
+
+    Args:
+        graph: CodeGraph
+
+    Returns:
+        Dict mapping module_id -> set of module_ids it depends on
+    """
+    dependencies: dict[str, set[str]] = {}
+
+    for relation in graph.relations:
+        source_sym = graph.symbols.get(relation.source)
+        target_sym = graph.symbols.get(relation.target)
+
+        if not source_sym or not target_sym:
+            continue
+
+        source_module = source_sym.module
+        target_module = target_sym.module
+
+        # Don't include self-dependencies
+        if source_module == target_module:
+            continue
+
+        if source_module not in dependencies:
+            dependencies[source_module] = set()
+
+        dependencies[source_module].add(target_module)
+
+    return dependencies
+
+
+def get_codebase_metrics(graph: CodeGraph) -> dict[str, Any]:
+    """Get aggregate codebase metrics and statistics.
+
+    Args:
+        graph: CodeGraph
+
+    Returns:
+        Dict with various metrics about the codebase
+    """
+    unreferenced = list_unreferenced_symbols(graph)
+    duplicates = find_duplicate_names(graph)
+    entry_points = list_entry_points(graph)
+    risks = list_resiliency_risks(graph)
+
+    # Calculate call depth statistics
+    max_depth = 0
+    avg_depth = 0
+    depth_sum = 0
+    depth_count = 0
+
+    for symbol_id in graph.symbols.keys():
+        lineage = get_lineage(graph, symbol_id, direction="forward", max_depth=100)
+        depth = len(lineage)
+        max_depth = max(max_depth, depth)
+        depth_sum += depth
+        depth_count += 1
+
+    avg_depth = depth_sum / depth_count if depth_count > 0 else 0
+
+    # Risk distribution by category
+    risk_by_category: dict[str, int] = {}
+    risk_by_severity: dict[str, int] = {}
+    for risk in risks:
+        category = risk.get("category", "unknown")
+        severity = risk.get("severity", "unknown")
+        risk_by_category[category] = risk_by_category.get(category, 0) + 1
+        risk_by_severity[severity] = risk_by_severity.get(severity, 0) + 1
+
+    # Entry points by type
+    entry_by_type: dict[str, int] = {}
+    for ep in entry_points:
+        ep_type = ep.entry_point or "unknown"
+        entry_by_type[ep_type] = entry_by_type.get(ep_type, 0) + 1
+
+    confirmed = [c for c in unreferenced if c.confidence == "confirmed"]
+    unconfirmed = [c for c in unreferenced if c.confidence != "confirmed"]
+
+    return {
+        "total_symbols": len(graph.symbols),
+        "total_containers": len(graph.containers),
+        "total_relations": len(graph.relations),
+        "total_entry_points": len(entry_points),
+        "entry_points_by_type": entry_by_type,
+        "dead_code": {
+            "count": len(unreferenced),
+            "confirmed_count": len(confirmed),
+            "unconfirmed_count": len(unconfirmed),
+            "percentage": round(100 * len(unreferenced) / len(graph.symbols), 2) if graph.symbols else 0,
+            "confirmed_percentage": round(100 * len(confirmed) / len(graph.symbols), 2) if graph.symbols else 0,
+        },
+        "duplicates": {
+            "count": len(duplicates),
+            "total_occurrences": sum(
+                len([s for s in graph.symbols.values() if s.name == name]) for name in duplicates
+            ),
+        },
+        "risks": {
+            "total": len(risks),
+            "by_category": risk_by_category,
+            "by_severity": risk_by_severity,
+        },
+        "call_depth": {
+            "max": max_depth,
+            "average": round(avg_depth, 2),
+        },
+        "modules": len(set(s.module for s in graph.symbols.values())),
+    }

@@ -1,37 +1,34 @@
 import CytoscapeLib from 'cytoscape'
 
 /**
- * Highlight a flow path (caller → target → callees) in the Cytoscape graph.
+ * Highlight a full lineage path (all reachable nodes/edges) in the Cytoscape graph.
  * Fades everything not on the path.
+ *
+ * @param cy Cytoscape core instance
+ * @param reachableIds Set of node IDs that are reachable via the full lineage
  */
-export function highlightFlow(
+export function highlightLineage(
   cy: CytoscapeLib.Core,
-  symbolId: string,
-  callerIds: string[],
-  calleeIds: string[]
+  reachableIds: Set<string>
 ) {
   // Clear any existing highlights
   cy.$('node, edge').removeClass('highlighted faded')
 
-  // Collect all nodes to highlight: the symbol itself + its callers + its callees
-  const highlightedNodeIds = new Set([symbolId, ...callerIds, ...calleeIds])
-
-  // Collect all edges to highlight:
-  // - edges FROM callers TO symbolId
-  // - edges FROM symbolId TO callees
+  // Collect all edges whose both endpoints are in the reachable set
   const highlightedEdgeIds = new Set<string>()
   cy.edges().forEach((edge) => {
     const source = edge.source().id()
     const target = edge.target().id()
 
-    if ((callerIds.includes(source) && target === symbolId) || (source === symbolId && calleeIds.includes(target))) {
+    // Only highlight if both endpoints are in the reachable set
+    if (reachableIds.has(source) && reachableIds.has(target)) {
       highlightedEdgeIds.add(edge.id())
     }
   })
 
   // Apply highlighting
   cy.nodes().forEach((node) => {
-    if (highlightedNodeIds.has(node.id())) {
+    if (reachableIds.has(node.id())) {
       node.addClass('highlighted')
     } else {
       node.addClass('faded')

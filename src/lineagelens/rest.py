@@ -16,14 +16,17 @@ from .analyzer import analyze
 from .config import ProjectConfig
 from .queries import (
     GraphNotFoundError,
+    find_duplicate_names,
     get_callees,
     get_callers,
     get_lineage,
     get_module_overview,
     get_symbol,
     impact_analysis,
+    is_test_path,
     list_entry_points,
     list_resiliency_risks,
+    list_unreferenced_symbols,
     load_graph,
     search_symbols,
 )
@@ -65,6 +68,10 @@ class NodeView(BaseModel):
     entry_point: str | None
     async_: bool
     has_resiliency_flag: bool
+    is_test: bool = False
+    possibly_dead: bool = False  # Backward compat: true if any dead-code confidence
+    dead_code_confidence: str | None = None  # "confirmed" | "unconfirmed_possible_dynamic_dispatch" | None
+    duplicate_name: bool = False
 
 
 class EdgeView(BaseModel):
@@ -134,33 +141,93 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         """Get graph data for visualization (with optional module filtering).
 
         For large repos, module scoping allows lazy loading one module at a time.
+        Includes both Symbols and Containers for compound (hierarchical) layout.
         """
         try:
             graph = load_graph(project)
         except GraphNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
+        # Load config to get test_roots
+        config = ProjectConfig.load(project)
+
+        # Precompute unreferenced symbols and duplicate names for efficiency
+        unreferenced = list_unreferenced_symbols(graph)
+        dead_code_confidence = {c.symbol.id: c.confidence for c in unreferenced}
+        duplicate_names = find_duplicate_names(graph)
+
         # Collect nodes
         nodes = []
         rendered_node_ids = set()  # Track which nodes we're actually rendering
 
+        # First pass: emit Container nodes (packages and modules)
+        for container in graph.containers.values():
+            # Skip if filtering by module and this container isn't in/under that module
+            if module:
+                # Container is in scope if its id matches or starts with the module id
+                if container.id != module and not container.id.startswith(module + "."):
+                    continue
+
+            has_risk = False  # Containers don't have risk flags directly
+            is_test = is_test_path(container.file, test_roots=config.test_roots)
+
+            # Defensive: null out parent if it won't exist in rendered nodes
+            # (This happens after filtering in both module-scoped and test-filtered cases)
+            parent_id = container.parent
+            # We'll validate parent refs after all nodes are collected
+
+            node = NodeView(
+                id=container.id,
+                label=container.name,
+                kind=container.kind,
+                parent=parent_id,
+                entry_point=None,
+                async_=False,
+                has_resiliency_flag=has_risk,
+                is_test=is_test,
+                possibly_dead=False,
+                dead_code_confidence=None,
+                duplicate_name=False,
+            )
+            nodes.append(node)
+            rendered_node_ids.add(container.id)
+
+        # Second pass: emit Symbol nodes
         for symbol in graph.symbols.values():
             # Skip if filtering by module and this symbol's parent doesn't match
-            if module and symbol.parent != module:
-                continue
+            if module:
+                if symbol.parent != module and not (symbol.parent and symbol.parent.startswith(module + ".")):
+                    continue
 
             has_risk = len(symbol.resiliency) > 0
+            is_test = is_test_path(symbol.file, test_roots=config.test_roots)
+            dead_confidence = dead_code_confidence.get(symbol.id)
+            possibly_dead = dead_confidence is not None
+            duplicate_name = symbol.name in duplicate_names
+
+            # Defensive: null out parent if it won't exist in rendered nodes
+            parent_id = symbol.parent
+
             node = NodeView(
                 id=symbol.id,
                 label=symbol.name,
                 kind=symbol.kind,
-                parent=symbol.parent,
+                parent=parent_id,
                 entry_point=symbol.entry_point,
                 async_=symbol.async_,
                 has_resiliency_flag=has_risk,
+                is_test=is_test,
+                possibly_dead=possibly_dead,
+                dead_code_confidence=dead_confidence,
+                duplicate_name=duplicate_name,
             )
             nodes.append(node)
             rendered_node_ids.add(symbol.id)
+
+        # Third pass: defensive cleanup — null out any parent refs that don't resolve
+        for node in nodes:
+            if node.parent and node.parent not in rendered_node_ids:
+                node.parent = None
 
         # Collect edges
         # Only include edges where BOTH source and target exist in the rendered nodes
