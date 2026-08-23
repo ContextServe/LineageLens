@@ -27,7 +27,9 @@ GraphQL REST MCP
 **Responsibility**: Parse Python source files and extract code structure.
 
 **Design**:
-- Pure AST-based (never imports target code, always safe)
+- Static only, and it never imports or executes the target project. Type
+  inference goes through Jedi, which parses with `parso` rather than importing,
+  so the safety guarantee holds.
 - Two-pass algorithm: Definitions (collect symbols) + Relationships (collect relations)
 - Resilient: catches all errors per-file, continues analysis
 - Reports: `AnalysisReport` tracks failures, warnings, success metrics
@@ -41,7 +43,65 @@ GraphQL REST MCP
 - `analyze(root, config)` → `(CodeGraph, AnalysisReport)` - main entry point
 - Helper functions: `dotted()`, `expression()`, `infer()` - AST utilities
 
-**Important Decision**: Two separate visitor passes allows relationships visitor to handle KeyError safely (symbols guaranteed to exist from first pass).
+**Important Decision**: separate passes let the relationships visitor assume
+every symbol already exists, so it never has to guard a lookup.
+
+The pipeline is now five phases, not two:
+
+1. **Definitions** — parse each file, emit `Symbol`s and `Container`s, plus one
+   synthetic `<module>` symbol per module to own statements outside any function.
+   Without it every module-level call site was discarded, which made all
+   framework wiring invisible.
+2. **Attribute hoisting** — map `self.attr` to a class id, so `self.db.query()`
+   resolves. Recognises annotations, constructor calls, annotated factories, and
+   annotated-parameter passthrough (`def __init__(self, db: Database): self.db = db`).
+3. **Relationships** — emit relations. Calls plus the reference kinds:
+   `REFERENCES`, `ANNOTATES`, `INHERITS`, `DECORATES`, `EXPORTS`, `IMPORTS`.
+   Cheap static resolution runs first and type inference is a gated fallback.
+4. **Whole-graph passes** — `OVERRIDES` (needs every `INHERITS` edge),
+   `USES_FIXTURE`, and project-level entry points (`__main__` guards,
+   `[project.scripts]`).
+5. **Reachability** (on demand, cached) — walk from entry points and assign a
+   verdict plus rescue mechanism per symbol.
+
+### Relation kinds
+
+Reachability in Python does not flow through calls alone, so the graph models
+more than calls. Each kind is switchable via `analysis.relation_kinds`.
+
+| kind | source → target | tier |
+|---|---|---|
+| `CALLS` / `AWAIT_CALLS` / `CREATES_TASK` | caller → callee | fact; heuristic when the target came from inference |
+| `REFERENCES` | scope → a name loaded as a value | fact |
+| `ANNOTATES` | annotated symbol → class | fact |
+| `INHERITS` | subclass → base | fact |
+| `OVERRIDES` | override → base method | **heuristic** — Python has no `override` keyword |
+| `DECORATES` | decorated → decorator | fact |
+| `EXPORTS` | module scope → `__all__` entry | fact |
+| `IMPORTS` | module scope → module scope | fact |
+| `USES_FIXTURE` | test → fixture | **heuristic** — a name match |
+| `REFERENCES_STRING` | scope → symbol named in a string | **heuristic**, off by default |
+
+`REFERENCES` is the one with volume risk: unfiltered it emits 27,522 edges on a
+real project, more than twice the call count. Two rules keep it near 1,400 and
+are load-bearing, not optimisations — emit only when the name resolves to an
+in-repo `Symbol`, and consider only the outermost node of an attribute chain.
+
+### New modules
+
+| module | responsibility |
+|---|---|
+| `index.py` | `GraphIndex`: cached adjacency and lookup tables, plus an mtime-keyed loader so a server parses `graph.json` once rather than per request |
+| `entrypoints.py` | entry-point rules — the roots of the reachability walk |
+| `reachability.py` | the walk, the verdict vocabulary, and rescue mechanisms |
+| `ratchet.py` | dead-code baseline comparison for CI |
+| `hooks.py` | git hook installation |
+
+### Schema version
+
+`graph.json` carries `schema_version`, and `load_graph` refuses a mismatch rather
+than serving symbol ids that mean something different from what the reader
+expects.
 
 ---
 
@@ -136,7 +196,8 @@ GraphQL REST MCP
 
 **Responsibility**: Expose queries as Model Context Protocol tools for Claude Code.
 
-**Tools**: 9 tools (same functions as queries.py, wrapped for MCP)
+**Tools**: the `queries.py` functions wrapped for MCP, plus `list_dead_code`
+and `get_reachability` over the reachability model.
 
 **Design**:
 - Uses FastMCP for easy tool registration
@@ -224,7 +285,9 @@ On next query, optionally merge enrichment data (query-time, not write-time)
 Run LineageLens on itself:
 ```bash
 lineagelens analyze .
-# Verify: 13 files, 141 symbols, 0 failures
+# Self-analysis is a smoke test, not a fixture. The real regression gate is
+# tests/fixtures/reachability_corpus + EXPECTED.yaml, which pins a verdict and a
+# rescue mechanism for every symbol in a project built to exercise each one.
 ```
 
 ### Smoke Tests
@@ -249,7 +312,7 @@ lineagelens analyze .
 - **Caching**: MCP server caches graph by mtime (avoid re-parsing)
 
 ### Scaling
-- Tested up to 13 files / 141 symbols / 666 relations successfully
+- Exercised against a real 152-file / 1,772-symbol / 13,958-relation project
 - Estimated good up to 10K LOC on modern machines
 - For very large codebases: module-scoped queries recommended
 

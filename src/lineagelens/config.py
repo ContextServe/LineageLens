@@ -54,7 +54,8 @@ class AnalysisConfig:
     entry_points: dict[str, tuple[str, ...]] = field(default_factory=lambda: {
         "api_route": (".get", ".post", ".put", ".patch", ".delete", ".websocket"),
         "cli_command": (".command", ".callback"),
-        "framework_callback": (".middleware", ".exception_handler", ".on_event", "validator", "field_validator", "model_validator"),
+        "framework_callback": (".middleware", ".exception_handler", ".on_event", "validator", "field_validator", "model_validator",
+                                ".tool", ".resource", ".prompt", ".listener", ".subscribe"),
         "task": (".task", ".shared_task", "shared_task", ".periodic_task"),
         "dispatch_registration": (".register",),
     })
@@ -72,6 +73,7 @@ class AnalysisConfig:
         "abstract": True,        # @abstractmethod declarations
         "singledispatch": True,  # .register decorators
         "django": True,          # management commands, AppConfig.ready
+        "visitor_dispatch": True,# visit_* methods of ast.NodeVisitor subclasses
         "main_module": True,     # if __name__ == "__main__"
         "console_scripts": True, # [project.scripts] in pyproject.toml
         "pragma": True,          # # lineagelens: keep
@@ -164,8 +166,14 @@ class ProjectConfig:
                 match_words=tuple(item["match_words"]),
                 only_in_async=bool(item.get("only_in_async", False)),
             ))
-        entry_points = {key: tuple(values) for key, values in (raw.get("entry_points", {}) or {}).items()}
         defaults = AnalysisConfig()
+        # Merge per family rather than replacing the whole mapping. Replacing it
+        # meant that listing one family in lineagelens.yaml silently switched off
+        # every other -- so a project that customised `api_route` stopped detecting
+        # tests, tasks and framework callbacks, and reported them all as dead.
+        entry_points = dict(defaults.entry_points)
+        for family, values in (raw.get("entry_points") or {}).items():
+            entry_points[family] = tuple(values)
         max_calls = raw.get("jedi_max_calls", defaults.jedi_max_calls)
         kinds = raw.get("relation_kinds")
         entry_rules = dict(defaults.entry_point_rules)
@@ -175,7 +183,7 @@ class ProjectConfig:
         return AnalysisConfig(
             entry_point_rules=entry_rules,
             risk_rules=tuple(rules) or defaults.risk_rules,
-            entry_points=entry_points or defaults.entry_points,
+            entry_points=entry_points,
             relation_kinds=tuple(kinds) if kinds is not None else defaults.relation_kinds,
             module_scope_roots=str(raw.get("module_scope_roots", defaults.module_scope_roots)),
             jedi=bool(raw.get("jedi", defaults.jedi)),

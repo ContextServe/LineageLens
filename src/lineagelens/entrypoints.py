@@ -135,6 +135,14 @@ def is_abstract(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     )
 
 
+#: Base classes that dispatch to methods by computed name. ``ast.NodeVisitor.visit``
+#: does ``getattr(self, "visit_" + node.__class__.__name__)``, so no call site ever
+#: names ``visit_Call`` -- and because the visitor methods are the entry to the
+#: whole traversal, treating them as dead cascades through everything they call.
+VISITOR_BASES = ("NodeVisitor", "NodeTransformer")
+VISITOR_PREFIX = "visit_"
+
+
 def mark_project_roots(graph: CodeGraph, root: Path, config: ProjectConfig) -> None:
     """Roots that need project-level context rather than a single definition."""
     rules = config.analysis.entry_point_rules
@@ -143,6 +151,45 @@ def mark_project_roots(graph: CodeGraph, root: Path, config: ProjectConfig) -> N
         _mark_main_modules(graph, root)
     if rules.get("console_scripts", True):
         _mark_console_scripts(graph, root)
+    if rules.get("visitor_dispatch", True):
+        _mark_visitor_methods(graph)
+
+
+def _mark_visitor_methods(graph: CodeGraph) -> None:
+    """Mark ``visit_*`` methods of visitor subclasses as dispatch targets.
+
+    Needs the whole graph rather than a single definition, because the decision
+    depends on the class's base list and on transitively inheriting from a
+    visitor base within the project.
+    """
+    members: dict[str, list[Symbol]] = {}
+    for symbol in graph.symbols.values():
+        if symbol.kind in ("method", "function") and symbol.parent:
+            members.setdefault(symbol.parent, []).append(symbol)
+
+    classes = {s.id: s for s in graph.symbols.values() if s.kind == "class"}
+
+    def is_visitor(class_symbol: Symbol, seen: set[str] | None = None) -> bool:
+        seen = seen if seen is not None else set()
+        if class_symbol.id in seen:
+            return False  # guard against a cyclic base chain
+        seen.add(class_symbol.id)
+        for base in class_symbol.bases:
+            tail = base.rsplit(".", 1)[-1]
+            if tail in VISITOR_BASES:
+                return True
+            # An in-project intermediate class may be the one inheriting it.
+            for candidate in classes.values():
+                if candidate.name == tail and is_visitor(candidate, seen):
+                    return True
+        return False
+
+    for class_symbol in classes.values():
+        if not is_visitor(class_symbol):
+            continue
+        for member in members.get(class_symbol.id, ()):
+            if member.name.startswith(VISITOR_PREFIX) or member.name == "generic_visit":
+                member.mark_entry_point("visitor_dispatch")
 
 
 def _mark_main_modules(graph: CodeGraph, root: Path) -> None:

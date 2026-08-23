@@ -29,11 +29,6 @@ def relations_to(graph, suffix: str) -> list:
     return [r for r in graph.relations if r.target.endswith(suffix)]
 
 
-def label_of(graph, suffix: str) -> str | None:
-    matches = relations_to(graph, suffix)
-    return matches[0].resolution_evidence.label if matches else None
-
-
 # --------------------------------------------------------------------------- 1a
 def test_same_named_classes_in_different_modules_do_not_cross_resolve(tmp_path):
     """Two classes sharing a name must not steal each other's incoming edges.
