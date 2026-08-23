@@ -21,9 +21,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class JediTarget:
-    """A target symbol resolved by Jedi."""
+    """A target symbol resolved by Jedi.
 
-    module_path: Path
+    ``module_path`` is None when Jedi cannot attribute the definition to a file on
+    disk -- builtins and some compiled extension modules. Callers must treat that as
+    "not in this project" and skip it. Substituting the *calling* file's path here (an
+    earlier bug) let stdlib targets such as ``datetime.datetime.isoformat`` pass an
+    ``is_relative_to(root)`` in-repo check and then suffix-match an unrelated local
+    symbol of the same name.
+    """
+
+    module_path: Path | None
     line: int
     column: int
     type: str  # jedi's "function"/"class"/"instance"/"module" etc.
@@ -77,6 +85,18 @@ class JediResolver:
             self._scripts[file_path] = None
             return None
 
+    @staticmethod
+    def _is_builtin(defn: Any) -> bool:
+        """Whether a definition lives in a builtin module.
+
+        Wrapped because Jedi's API surface varies across versions; a missing or raising
+        ``in_builtin_module`` must not abort resolution.
+        """
+        try:
+            return bool(defn.in_builtin_module())
+        except Exception:
+            return False
+
     def resolve_call(self, file_path: Path, line: int, column: int) -> list[JediTarget]:
         """Resolve a call site to its target symbol(s) using Jedi.
 
@@ -99,9 +119,11 @@ class JediResolver:
             results: list[JediTarget] = []
             for defn in definitions:
                 try:
+                    if self._is_builtin(defn):
+                        continue
                     results.append(
                         JediTarget(
-                            module_path=Path(defn.module_path) if defn.module_path else file_path,
+                            module_path=Path(defn.module_path) if defn.module_path else None,
                             line=defn.line or 0,
                             column=defn.column or 0,
                             type=defn.type or "unknown",
