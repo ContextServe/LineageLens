@@ -30,11 +30,7 @@ CORPUS = Path(__file__).resolve().parent / "fixtures" / "reachability_corpus"
 # Symbol ids that are known to be wrong today, mapped to what they should be.
 # Each entry is a defect with a scheduled fix; the tests below fail if an entry
 # becomes unnecessary, so this map cannot rot into a permanent allowlist.
-PENDING_ID_FIXES: dict[str, str] = {
-    # Module naming strips every path component equal to "src", not just the
-    # leading source root, so src/corpus/src/nested.py collapses one level.
-    "corpus.nested.nested_fn": "corpus.src.nested.nested_fn",
-}
+PENDING_ID_FIXES: dict[str, str] = {}
 
 # The number of symbols the *current* dead-code logic gets wrong relative to
 # EXPECTED.yaml. This is a ratchet: lower it as phases land, never raise it.
@@ -51,7 +47,10 @@ PENDING_ID_FIXES: dict[str, str] = {
 #   polymorphic_override        2   no OVERRIDES edge
 #   entry_point:*               3   console_script / celery task / pytest fixture
 #   dunder_all_export           1   no EXPORTS edge
-MAX_FALSE_VERDICTS = 29
+#
+# The module-scope source node closed the 6 static_call cases, taking it to 23.
+# Synthetic module-scope nodes are excluded from the count -- see below.
+MAX_FALSE_VERDICTS = 23
 
 
 @pytest.fixture(scope="module")
@@ -123,7 +122,13 @@ def test_dead_code_false_verdicts_are_ratcheting_down(corpus_graph, expected):
     flagged = {c.symbol.id for c in list_unreferenced_symbols(corpus_graph)}
 
     false_positives, false_negatives = [], []
-    for sid in corpus_graph.symbols:
+    for sid, symbol in corpus_graph.symbols.items():
+        # Synthetic module-scope nodes are reachability *roots* by construction.
+        # The pre-reachability query has no concept of a root, so it flags all of
+        # them; counting that as error would swamp the signal this ratchet exists
+        # to track. They are asserted properly by the verdict test below.
+        if symbol.kind == "module_scope":
+            continue
         key = canonical(sid)
         entry = expected.get(key)
         if entry is None:

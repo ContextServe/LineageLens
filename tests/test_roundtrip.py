@@ -118,3 +118,43 @@ def test_write_artifacts_emits_both_files(tmp_path):
     assert graph_file.exists() and report_file.exists()
     payload = json.loads(graph_file.read_text())
     assert payload["symbols"] and payload["relations"] and payload["containers"]
+
+
+def test_stale_schema_is_rejected(tmp_path):
+    """A graph.json from a different schema must fail loudly, not silently.
+
+    Phase 2 changed what symbol ids mean, so ids from an older graph are not
+    comparable. Serving them would produce confidently wrong answers.
+    """
+    import json
+
+    import pytest
+
+    from lineagelens.queries import GraphNotFoundError
+
+    root = build_project(tmp_path)
+    config = ProjectConfig.load(root)
+    graph, report = analyze(root, config)
+    graph_file, _ = write_artifacts(root, config, graph, report, quiet=True)
+
+    payload = json.loads(graph_file.read_text())
+    payload["schema_version"] = 1
+    graph_file.write_text(json.dumps(payload))
+
+    with pytest.raises(GraphNotFoundError, match="schema"):
+        load_graph(root)
+
+
+def test_schema_version_and_project_root_are_persisted(tmp_path):
+    import json
+
+    from lineagelens.model import SCHEMA_VERSION
+
+    root = build_project(tmp_path)
+    config = ProjectConfig.load(root)
+    graph, report = analyze(root, config)
+    graph_file, _ = write_artifacts(root, config, graph, report, quiet=True)
+
+    payload = json.loads(graph_file.read_text())
+    assert payload["schema_version"] == SCHEMA_VERSION
+    assert payload["project_root"] == str(root.resolve())

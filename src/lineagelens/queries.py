@@ -11,7 +11,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .model import CodeGraph, Container, Evidence, Relation, ResiliencySignal, Symbol
+from .model import (
+    SCHEMA_VERSION,
+    CodeGraph,
+    Container,
+    Evidence,
+    Relation,
+    ResiliencySignal,
+    Symbol,
+)
 from .report import AnalysisReport, FileFailure, SymbolWarning
 
 
@@ -49,8 +57,14 @@ def load_graph(project: Path) -> CodeGraph:
     except (OSError, json.JSONDecodeError) as e:
         raise GraphNotFoundError(f"Failed to load graph: {e}") from e
 
-    # Deserialize back into CodeGraph with proper types
-    # (This is a simplified version; production would use Pydantic or similar)
+    found = raw.get("schema_version", 1)
+    if found != SCHEMA_VERSION:
+        raise GraphNotFoundError(
+            f"{path} was written by a different LineageLens graph schema "
+            f"(found v{found}, expected v{SCHEMA_VERSION}). Symbol ids are not "
+            f"comparable across versions.\nRe-run: lineagelens analyze {project}"
+        )
+
     graph = CodeGraph(project_root=raw.get("project_root", str(project)))
 
     # Reconstruct containers

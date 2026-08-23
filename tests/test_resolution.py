@@ -269,3 +269,111 @@ def test_reexport_through_package_init_resolves_to_the_definition(tmp_path):
         "the re-exported function shows zero callers; only the package-level "
         "`pkg.sub.worker` name was tried"
     )
+
+
+# ------------------------------------------------- module-scope source node
+def test_module_level_call_produces_a_relation(tmp_path):
+    """Statements outside any function used to produce no relation at all.
+
+    Not even an unresolved one -- which hid every bit of wiring: `app = App()`,
+    `include_router(...)`, registry population, `if __name__ == "__main__"`.
+    """
+    root = write_project(
+        tmp_path,
+        {
+            "src/pkg/__init__.py": "",
+            "src/pkg/mod.py": (
+                "def build():\n"
+                "    return 1\n"
+                "\n"
+                "app = build()\n"
+            ),
+        },
+    )
+    graph, _ = analyze(root)
+
+    edges = relations_to(graph, "pkg.mod.build")
+    assert edges, "module-level call produced no relation"
+    assert edges[0].source == "pkg.mod.<module>"
+
+
+def test_main_guard_call_is_attributed_to_module_scope(tmp_path):
+    root = write_project(
+        tmp_path,
+        {
+            "src/pkg/__init__.py": "",
+            "src/pkg/mod.py": (
+                "def run_it():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                'if __name__ == "__main__":\n'
+                "    run_it()\n"
+            ),
+        },
+    )
+    graph, _ = analyze(root)
+    edges = relations_to(graph, "pkg.mod.run_it")
+    assert edges and edges[0].source == "pkg.mod.<module>"
+
+
+def test_class_body_call_is_attributed_to_the_class(tmp_path):
+    """A statement in a class body belongs to the class, not to the module."""
+    root = write_project(
+        tmp_path,
+        {
+            "src/pkg/__init__.py": "",
+            "src/pkg/mod.py": (
+                "def default_factory():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "class Config:\n"
+                "    value = default_factory()\n"
+            ),
+        },
+    )
+    graph, _ = analyze(root)
+    edges = relations_to(graph, "pkg.mod.default_factory")
+    assert edges and edges[0].source == "pkg.mod.Config"
+
+
+def test_module_scope_node_does_not_steal_line_one_definitions(tmp_path):
+    """The synthetic node sits at line 1, where the first real def also lives.
+
+    Indexing it by location let `<module>` win that (file, line) key, so a call
+    to a function defined on line 1 resolved to the module node instead.
+    """
+    root = write_project(
+        tmp_path,
+        {
+            "src/pkg/__init__.py": "",
+            "src/pkg/first.py": "def on_line_one():\n    return 1\n",
+            "src/pkg/caller.py": (
+                "from pkg.first import on_line_one\n"
+                "\n"
+                "def go():\n"
+                "    return on_line_one()\n"
+            ),
+        },
+    )
+    graph, _ = analyze(root)
+    targets = {r.target for r in graph.relations if r.source == "pkg.caller.go"}
+    assert "pkg.first.on_line_one" in targets
+    assert "pkg.first.<module>" not in targets
+
+
+def test_module_scope_nodes_exist_for_every_module(tmp_path):
+    root = write_project(
+        tmp_path,
+        {
+            "src/pkg/__init__.py": "",
+            "src/pkg/a.py": "x = 1\n",
+            "src/pkg/b.py": "y = 2\n",
+        },
+    )
+    graph, _ = analyze(root)
+    scope_nodes = {s.id for s in graph.symbols.values() if s.kind == "module_scope"}
+    assert scope_nodes == {"pkg.<module>", "pkg.a.<module>", "pkg.b.<module>"}
+    for node_id in scope_nodes:
+        assert graph.symbols[node_id].parent == node_id.rsplit(".", 1)[0]
