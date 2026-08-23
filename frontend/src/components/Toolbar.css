@@ -107,3 +107,27 @@
   border: 2px solid #8b5cf6;
   background: transparent;
 }
+
+/* Reachability verdicts. Only `dead` is red: `probably_dead` and `test_only` are
+   real findings but not safe to act on unchecked, and painting them the same is
+   what made the previous single boolean flag misleading. */
+.color-box.probably-dead {
+  background: #f97316;
+}
+
+.color-box.test-only {
+  background: #a855f7;
+}
+
+.color-box.dynamic-only {
+  background: #0ea5e9;
+}
+
+.verdict-filter {
+  background: #1f2937;
+  color: #e5e7eb;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+}

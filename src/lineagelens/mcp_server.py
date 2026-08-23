@@ -19,6 +19,7 @@ from mcp.server.mcpserver.context import Context
 from .analyzer import analyze
 from .config import ProjectConfig
 from .index import invalidate, load_index
+from .reachability import compute_reachability
 from .queries import (
     GraphNotFoundError,
     find_duplicate_names as query_find_duplicates,
@@ -32,7 +33,6 @@ from .queries import (
     impact_analysis as query_impact_analysis,
     list_entry_points as query_list_entry_points,
     list_resiliency_risks as query_list_resiliency_risks,
-    list_unreferenced_symbols as query_list_unreferenced,
     search_symbols as query_search_symbols,
 )
 
@@ -365,29 +365,51 @@ def create_mcp_server() -> MCPServer:
             return {"error": str(e)}
 
     @server.tool()
-    async def list_dead_code(**kwargs: Any) -> dict[str, Any]:
-        """Find potentially dead code (unreferenced symbols) with confidence levels.
+    async def list_dead_code(
+        verdict: str | None = None, scope: str | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Find code that is not reachable from any entry point.
 
-        Returns symbols that have no incoming calls and are not entry points
-        (API routes, CLI commands, tests, framework callbacks).
+        Reachability is computed by walking outward from entry points over every
+        edge kind, not by asking "does anything call this". Calls alone do not
+        model Python reachability: a request model referenced only from a route
+        signature, a dependency handed to Depends(), a base class and a name in
+        __all__ are all live and none are called.
 
-        Confidence levels:
-        - "confirmed": no relations of any kind reference this symbol, and no unresolved
-          dynamic-dispatch call sites share its name. Safe to review for deletion.
-        - "unconfirmed_possible_dynamic_dispatch": zero direct callers, but an ambiguous
-          dynamic call site exists elsewhere with the same name. May be called via duck-typing
-          or runtime dispatch. Do not delete without manual verification.
+        Verdicts, in descending severity:
+          dead           not reachable by any modelled mechanism, and no
+                         same-named unresolved call site exists
+          probably_dead  unreachable, but an unresolved call shares its name, so
+                         deadness cannot be asserted
+          test_only      reachable only from tests -- deleting it breaks the
+                         suite, but nothing shipped uses it
+
+        Symbols that are alive, dynamic_only or public_api are not returned here.
+        Call get_reachability on any symbol to see why it is considered alive.
+
+        IMPORTANT: static analysis cannot see reflection, config-driven dispatch
+        or plugin loading. A `dead` verdict means "no static reference exists",
+        not "unused at runtime". Check before deleting, and record the answer with
+        a `# lineagelens: keep` comment if the symbol is reached dynamically.
+
+        Args:
+            verdict: Filter to one verdict (dead, probably_dead, test_only)
+            scope: Filter by "source" or "test"
 
         Returns:
-            List of dead code candidates with confidence levels
+            Candidates with a verdict and reason each, most severe first
         """
         try:
-            graph = get_cached_graph(PROJECT_PATH)
-            unreferenced = query_list_unreferenced(graph)
+            index = get_cached_index(PROJECT_PATH)
+            result = compute_reachability(index.graph, index.config)
+            candidates = result.candidates()
+            if verdict:
+                candidates = [c for c in candidates if c.verdict == verdict]
+            if scope:
+                candidates = [c for c in candidates if c.scope == scope]
             return {
-                "count": len(unreferenced),
-                "confirmed_count": sum(1 for c in unreferenced if c.confidence == "confirmed"),
-                "unconfirmed_count": sum(1 for c in unreferenced if c.confidence != "confirmed"),
+                "count": len(candidates),
+                "by_verdict": result.by_verdict(),
                 "dead_code_candidates": [
                     {
                         "id": c.symbol.id,
@@ -397,11 +419,54 @@ def create_mcp_server() -> MCPServer:
                         "line": c.symbol.line,
                         "module": c.symbol.module,
                         "description": c.symbol.description,
-                        "confidence": c.confidence,
+                        "verdict": c.verdict,
+                        "scope": c.scope,
                         "reason": c.reason,
                     }
-                    for c in unreferenced
+                    for c in candidates
                 ],
+            }
+        except GraphNotFoundError as e:
+            return {"error": str(e)}
+
+    @server.tool()
+    async def get_reachability(symbol_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Explain why a symbol is considered reachable, or why it is not.
+
+        Consult this before deleting anything. It names the mechanism that reached
+        the symbol, the symbol it was reached through, and that mechanism's trust
+        tier -- deterministic_fact for something read off literal syntax,
+        deterministic_heuristic for a name match such as type inference or a
+        polymorphic override.
+
+        Args:
+            symbol_id: Fully qualified symbol id
+
+        Returns:
+            The verdict, the rescue mechanism, and the reasoning
+        """
+        try:
+            index = get_cached_index(PROJECT_PATH)
+            if symbol_id not in index.graph.symbols:
+                return {"error": f"Symbol not found: {symbol_id}"}
+            candidate = compute_reachability(index.graph, index.config).explain(symbol_id)
+            if candidate is None:
+                return {"error": f"No verdict for {symbol_id}"}
+            return {
+                "id": symbol_id,
+                "verdict": candidate.verdict,
+                "scope": candidate.scope,
+                "reason": candidate.reason,
+                "rescue": (
+                    {
+                        "mechanism": candidate.rescue.name,
+                        "tier": candidate.rescue.evidence.tier,
+                        "detail": candidate.rescue.detail,
+                        "via_symbol": candidate.rescue.via_symbol,
+                    }
+                    if candidate.rescue
+                    else None
+                ),
             }
         except GraphNotFoundError as e:
             return {"error": str(e)}

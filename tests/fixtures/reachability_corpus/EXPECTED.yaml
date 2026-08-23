@@ -65,8 +65,11 @@ corpus.api_fastapi._Router:
   rescue: static_call
   scope: source
 corpus.api_fastapi._Router.get:
-  verdict: alive
-  rescue: static_call
+  # `router.get(...)` where `router = _Router()`. The receiver's type is inferred
+  # from its construction, not read off an annotation, so the honest verdict is
+  # dynamic_only -- confident, but not a syntactic fact.
+  verdict: dynamic_only
+  rescue: local_type_inference_construction
   scope: source
 corpus.api_fastapi._Router.get.decorate:
   # A nested function returned by name; never called at its definition site.
@@ -161,13 +164,17 @@ corpus.exported.exported_only:
 
 # --- inheritance and polymorphic dispatch ----------------------------------
 corpus.inheritance.Base:
+  # Both annotated (consume(provider: Base)) and inherited from. Being a base
+  # class is the stronger constraint on deletion, so it is the reason reported.
   verdict: alive
-  rescue: type_annotation
+  rescue: base_class
   scope: source
 corpus.inheritance.Base.op:
-  # Called through the annotated base parameter in consume().
+  # Called through the annotated base parameter in consume(), *and* declared
+  # @abstractmethod. The abstract declaration is reported: it makes this a
+  # reachability root in its own right, independent of any caller.
   verdict: alive
-  rescue: annotated_parameter
+  rescue: abstract_declaration
   scope: source
 corpus.inheritance.ChildA:
   verdict: alive
@@ -193,6 +200,12 @@ corpus.mainguard.run_it:
   # Called at module scope inside `if __name__ == "__main__":`.
   verdict: alive
   rescue: static_call
+  scope: source
+"corpus.mainguard.<module>":
+  # Reported as the main-guard entry point rather than as a generic module body,
+  # because that is the specific reason this module executes.
+  verdict: alive
+  rescue: entry_point:main_module
   scope: source
 
 # --- module id must keep a nested "src" component --------------------------
@@ -268,8 +281,11 @@ corpus.tasks._App:
   rescue: static_call
   scope: source
 corpus.tasks._App.task:
-  verdict: alive
-  rescue: decorator
+  # `@celery_app.task` where `celery_app = _App()`. Reached as a referenced value,
+  # but the receiver's type came from inference, so the tier is heuristic. The
+  # mechanism says how it was referenced; the verdict says how sure we are.
+  verdict: dynamic_only
+  rescue: passed_as_value
   scope: source
 corpus.tasks.do_work:
   # Registered by decorator; nothing in-repo calls it. The dotted string in
@@ -340,8 +356,10 @@ tests.conftest.db:
   rescue: entry_point:test_fixture
   scope: test
 tests.helpers.helper:
-  verdict: alive
-  rescue: static_call
+  # `from helpers import helper` is not package-qualified, so no static rule can
+  # resolve it and only type inference finds the target. Genuinely dynamic_only.
+  verdict: dynamic_only
+  rescue: jedi_inference
   scope: test
 tests.helpers.unused_helper:
   # CONTROL: dead, but in a test file. Triage priority differs from source-scope
@@ -391,10 +409,6 @@ tests.test_corpus.test_x:
   rescue: module_scope
   scope: source
 "corpus.inheritance.<module>":
-  verdict: alive
-  rescue: module_scope
-  scope: source
-"corpus.mainguard.<module>":
   verdict: alive
   rescue: module_scope
   scope: source

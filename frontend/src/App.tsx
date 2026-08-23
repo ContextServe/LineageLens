@@ -3,7 +3,7 @@ import './App.css'
 import { CytoscapeGraph } from './graph/CytoscapeGraph'
 import { SearchPanel } from './components/SearchPanel'
 import { DetailPanel } from './components/DetailPanel'
-import { Toolbar } from './components/Toolbar'
+import { Toolbar, type VerdictFilter } from './components/Toolbar'
 
 interface GraphViewData {
   nodes: Array<{
@@ -15,7 +15,10 @@ interface GraphViewData {
     async_: boolean
     has_resiliency_flag: boolean
     is_test: boolean
-    possibly_dead: boolean
+    verdict?: string
+    rescue_mechanism?: string
+    rescue_tier?: string
+    scope?: string
     duplicate_name: boolean
   }>
   edges: Array<{
@@ -33,6 +36,7 @@ export function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [testFilter, setTestFilter] = useState<'all' | 'source' | 'tests'>('all')
+  const [verdictFilter, setVerdictFilter] = useState<VerdictFilter>('all')
 
   // Load graph on mount
   useEffect(() => {
@@ -64,11 +68,17 @@ export function App() {
     for (const node of graphData.nodes) {
       nodeIsTest.set(node.id, node.is_test)
 
-      if (testFilter === 'all') {
-        nodesToKeep.add(node.id)
-      } else if (testFilter === 'source' && !node.is_test) {
-        nodesToKeep.add(node.id)
-      } else if (testFilter === 'tests' && node.is_test) {
+      const passesTestFilter =
+        testFilter === 'all' ||
+        (testFilter === 'source' && !node.is_test) ||
+        (testFilter === 'tests' && node.is_test)
+
+      // Containers have no verdict of their own, so they survive a verdict filter
+      // in order to keep the compound hierarchy intact around the nodes that match.
+      const passesVerdictFilter =
+        verdictFilter === 'all' || !node.verdict || node.verdict === verdictFilter
+
+      if (passesTestFilter && passesVerdictFilter) {
         nodesToKeep.add(node.id)
       }
     }
@@ -123,6 +133,8 @@ export function App() {
             onRefresh={fetchGraph}
             testFilter={testFilter}
             onTestFilterChange={setTestFilter}
+            verdictFilter={verdictFilter}
+            onVerdictFilterChange={setVerdictFilter}
           />
           {graphData && (
             <CytoscapeGraph

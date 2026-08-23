@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from .config import ProjectConfig
 from .model import (
     SCHEMA_VERSION,
     CodeGraph,
@@ -22,20 +23,14 @@ from .model import (
 )
 from .report import AnalysisReport, FileFailure, SymbolWarning
 
+if TYPE_CHECKING:
+    from .reachability import DeadCodeCandidate
+
 
 class GraphNotFoundError(RuntimeError):
     """Graph file not found or couldn't be loaded."""
 
     pass
-
-
-@dataclass(frozen=True)
-class DeadCodeCandidate:
-    """A symbol flagged as potentially dead code with confidence level."""
-
-    symbol: Symbol
-    confidence: str  # "confirmed" | "unconfirmed_possible_dynamic_dispatch"
-    reason: str
 
 
 def load_graph(project: Path) -> CodeGraph:
@@ -462,43 +457,32 @@ def is_test_path(file_or_id: str | None, test_roots: tuple[str, ...] = ("tests",
     return False
 
 
-def list_unreferenced_symbols(graph: CodeGraph) -> list[DeadCodeCandidate]:
-    """Find symbols that have no incoming relations (no callers).
+def list_unreferenced_symbols(
+    graph: CodeGraph, config: ProjectConfig | None = None
+) -> list[DeadCodeCandidate]:
+    """Symbols that warrant attention as possible dead code.
 
-    Classifies each candidate by confidence level:
-    - "confirmed": zero relations target this symbol, and no unresolved dynamic calls match its name
-    - "unconfirmed_possible_dynamic_dispatch": zero direct callers, but an ambiguous dynamic-dispatch
-      call site exists elsewhere with the same method name (may be called via duck-typing)
+    Delegates to :mod:`lineagelens.reachability`. The previous implementation asked
+    "does any relation target this symbol?", which treated a graph of call edges as
+    a model of reachability. On a real project that was wrong 71% of the time,
+    because a Pydantic model referenced only from a route signature, a dependency
+    handed to Depends(), a base class and a name in __all__ are all live and none
+    are called.
 
-    Excludes entry points (API routes, CLI commands, tests, framework callbacks)
-    since they are designed to be invoked by external systems, not in-repo code.
+    Returns only symbols with an actionable verdict -- ``dead``, ``probably_dead``
+    or ``test_only``. Use :func:`lineagelens.reachability.compute_reachability`
+    directly for a verdict on every symbol, including why the rest are alive.
 
     Args:
         graph: CodeGraph
+        config: ProjectConfig; loaded defaults are used if omitted
 
     Returns:
-        List of DeadCodeCandidate objects
+        Candidates, most severe first
     """
-    called_targets = {rel.target for rel in graph.relations}
-    unresolved_names: set[str] = set()
-    for rel in graph.relations:
-        if rel.resolution == "external_or_dynamic" and rel.target.startswith("external:"):
-            raw = rel.target[len("external:"):]
-            bare = raw.rsplit(".", 1)[-1]
-            if bare and bare != "<unresolved>":
-                unresolved_names.add(bare)
+    from .reachability import compute_reachability
 
-    results: list[DeadCodeCandidate] = []
-    for sym in graph.symbols.values():
-        if sym.id in called_targets or sym.entry_point:
-            continue
-        if sym.kind in ("function", "method") and sym.name in unresolved_names:
-            results.append(DeadCodeCandidate(sym, "unconfirmed_possible_dynamic_dispatch",
-                f"an unresolved dynamic call site elsewhere targets a method/function named '{sym.name}'"))
-        else:
-            results.append(DeadCodeCandidate(sym, "confirmed",
-                "no relation of any resolution kind references this symbol, and no ambiguous dynamic-dispatch call site shares its name"))
-    return results
+    return compute_reachability(graph, config).candidates()
 
 
 def find_duplicate_names(graph: CodeGraph) -> set[tuple[str, str]]:
@@ -599,8 +583,9 @@ def get_codebase_metrics(graph: CodeGraph, index: Any = None) -> dict[str, Any]:
         ep_type = ep.entry_point or "unknown"
         entry_by_type[ep_type] = entry_by_type.get(ep_type, 0) + 1
 
-    confirmed = [c for c in unreferenced if c.confidence == "confirmed"]
-    unconfirmed = [c for c in unreferenced if c.confidence != "confirmed"]
+    by_verdict: dict[str, int] = {}
+    for candidate in unreferenced:
+        by_verdict[candidate.verdict] = by_verdict.get(candidate.verdict, 0) + 1
 
     return {
         "total_symbols": len(graph.symbols),
@@ -610,10 +595,13 @@ def get_codebase_metrics(graph: CodeGraph, index: Any = None) -> dict[str, Any]:
         "entry_points_by_type": entry_by_type,
         "dead_code": {
             "count": len(unreferenced),
-            "confirmed_count": len(confirmed),
-            "unconfirmed_count": len(unconfirmed),
+            "by_verdict": by_verdict,
             "percentage": round(100 * len(unreferenced) / len(graph.symbols), 2) if graph.symbols else 0,
-            "confirmed_percentage": round(100 * len(confirmed) / len(graph.symbols), 2) if graph.symbols else 0,
+            "dead_percentage": (
+                round(100 * by_verdict.get("dead", 0) / len(graph.symbols), 2)
+                if graph.symbols
+                else 0
+            ),
         },
         "duplicates": {
             "count": len(duplicates),

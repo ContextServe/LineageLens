@@ -30,7 +30,9 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol }: Cytosca
           entry_point: node.entry_point,
           async_: node.async_,
           has_risk: node.has_resiliency_flag,
-          possibly_dead: node.possibly_dead,
+          verdict: node.verdict,
+          rescue_mechanism: node.rescue_mechanism,
+          rescue_tier: node.rescue_tier,
           duplicate_name: node.duplicate_name,
         },
       })),
@@ -57,10 +59,19 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol }: Cytosca
             'text-valign': 'center',
             'text-halign': 'center',
             'background-color': (ele: any) => {
-              // Priority: entry_point > has_risk > possibly_dead > default
+              // Colour by reachability verdict. Only `dead` gets the alarming
+              // colour: `probably_dead` and `test_only` are real findings but not
+              // safe to act on without checking, and painting them identically is
+              // what made the old boolean flag misleading.
+              switch (ele.data('verdict')) {
+                case 'dead': return '#ef4444'          // red: no static reference at all
+                case 'probably_dead': return '#f97316' // amber: a same-named dynamic call exists
+                case 'test_only': return '#a855f7'     // purple: only tests reach it
+                case 'dynamic_only': return '#0ea5e9'  // blue: alive, but via a name match
+                case 'public_api': return '#14b8a6'    // teal: exported for outside consumers
+              }
               if (ele.data('entry_point')) return '#3b82f6'
               if (ele.data('has_risk')) return '#f59e0b'
-              if (ele.data('possibly_dead')) return '#ef4444'
               return '#6b7280'
             },
             'border-width': (ele: any) => {
