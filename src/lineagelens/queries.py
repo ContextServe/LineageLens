@@ -24,6 +24,7 @@ from .model import (
 from .report import AnalysisReport, FileFailure, SymbolWarning
 
 if TYPE_CHECKING:
+    from .index import GraphIndex
     from .reachability import DeadCodeCandidate
 
 
@@ -233,7 +234,9 @@ def search_symbols(
     return results
 
 
-def get_callers(graph: CodeGraph, symbol_id: str, index: Any = None) -> list[Relation]:
+def get_callers(
+    graph: CodeGraph, symbol_id: str, index: "GraphIndex | None" = None
+) -> list[Relation]:
     """Relations where this symbol is the target (things that reference it).
 
     Pass a :class:`~lineagelens.index.GraphIndex` to avoid a linear scan; without
@@ -244,7 +247,9 @@ def get_callers(graph: CodeGraph, symbol_id: str, index: Any = None) -> list[Rel
     return [rel for rel in graph.relations if rel.target == symbol_id]
 
 
-def get_callees(graph: CodeGraph, symbol_id: str, index: Any = None) -> list[Relation]:
+def get_callees(
+    graph: CodeGraph, symbol_id: str, index: "GraphIndex | None" = None
+) -> list[Relation]:
     """Relations where this symbol is the source (things it references)."""
     if index is not None:
         return index.callees_of(symbol_id)
@@ -544,7 +549,9 @@ def get_module_dependencies(graph: CodeGraph) -> dict[str, set[str]]:
     return dependencies
 
 
-def get_codebase_metrics(graph: CodeGraph, index: Any = None) -> dict[str, Any]:
+def get_codebase_metrics(
+    graph: CodeGraph, index: "GraphIndex | None" = None
+) -> dict[str, Any]:
     """Get aggregate codebase metrics and statistics.
 
     Args:
@@ -564,7 +571,12 @@ def get_codebase_metrics(graph: CodeGraph, index: Any = None) -> dict[str, Any]:
     # set, not a depth at all.
     from .index import index_for
 
-    chains = (index or index_for(graph)).max_call_chain
+    # Bound to a name rather than written as `(index or index_for(graph)).x`:
+    # a parenthesised expression is not a resolvable receiver, so the attribute
+    # access produced no edge and LineageLens reported its own max_call_chain --
+    # and everything that only it reaches -- as dead.
+    resolved_index = index if index is not None else index_for(graph)
+    chains = resolved_index.max_call_chain
     max_depth = max(chains.values(), default=0)
     avg_depth = (sum(chains.values()) / len(chains)) if chains else 0
 

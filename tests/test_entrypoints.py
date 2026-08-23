@@ -293,3 +293,136 @@ def test_disabling_all_rules_yields_no_entry_points():
     )
     graph, _ = analyze(CORPUS, off)
     assert not [s for s in graph.symbols.values() if s.entry_point_kinds]
+
+
+def test_visitor_methods_are_dispatch_entry_points(tmp_path):
+    """ast.NodeVisitor.visit does getattr(self, "visit_" + type name).
+
+    No call site ever names visit_Call, and because the visitor methods are the
+    entry to the traversal, treating them as dead cascades through everything
+    they call. Found by running LineageLens on itself.
+    """
+    root = project(
+        tmp_path,
+        {
+            "src/pkg/__init__.py": "",
+            "src/pkg/walker.py": (
+                "import ast\n"
+                "\n"
+                "\n"
+                "class Walker(ast.NodeVisitor):\n"
+                "    def visit_Call(self, node):\n"
+                "        return self.helper()\n"
+                "\n"
+                "    def helper(self):\n"
+                "        return 1\n"
+                "\n"
+                "    def not_a_visitor(self):\n"
+                "        return 2\n"
+            ),
+        },
+    )
+    graph, _ = analyze(root)
+    assert kinds_of(graph, "pkg.walker.Walker.visit_Call") == ["visitor_dispatch"]
+    assert kinds_of(graph, "pkg.walker.Walker.not_a_visitor") == [], (
+        "only visit_* methods are dispatch targets"
+    )
+
+
+def test_visitor_detection_follows_an_intermediate_base(tmp_path):
+    root = project(
+        tmp_path,
+        {
+            "src/pkg/__init__.py": "",
+            "src/pkg/base.py": "import ast\n\n\nclass Mid(ast.NodeVisitor):\n    pass\n",
+            "src/pkg/leaf.py": (
+                "from pkg.base import Mid\n"
+                "\n"
+                "\n"
+                "class Leaf(Mid):\n"
+                "    def visit_Name(self, node):\n"
+                "        return 1\n"
+            ),
+        },
+    )
+    graph, _ = analyze(root)
+    assert kinds_of(graph, "pkg.leaf.Leaf.visit_Name") == ["visitor_dispatch"]
+
+
+def test_visitor_detection_terminates_on_a_cyclic_base_chain(tmp_path):
+    """Not legal Python, but a graph can hold one via a bad resolution."""
+    from lineagelens.entrypoints import _mark_visitor_methods
+
+    root = project(
+        tmp_path,
+        {
+            "src/pkg/__init__.py": "",
+            "src/pkg/mod.py": (
+                "class A(B):\n"
+                "    def visit_X(self, node):\n"
+                "        return 1\n"
+                "\n"
+                "\n"
+                "class B(A):\n"
+                "    pass\n"
+            ),
+        },
+    )
+    graph, _ = analyze(root)
+    _mark_visitor_methods(graph)  # must return rather than recurse forever
+    assert "pkg.mod.A.visit_X" in graph.symbols
+
+
+def test_visitor_rule_is_switchable(tmp_path):
+    root = project(
+        tmp_path,
+        {
+            "src/pkg/__init__.py": "",
+            "src/pkg/walker.py": (
+                "import ast\n"
+                "\n"
+                "\n"
+                "class Walker(ast.NodeVisitor):\n"
+                "    def visit_Call(self, node):\n"
+                "        return 1\n"
+            ),
+        },
+    )
+    base = ProjectConfig.load(root)
+    off = replace(
+        base,
+        analysis=replace(
+            base.analysis,
+            entry_point_rules={**base.analysis.entry_point_rules, "visitor_dispatch": False},
+        ),
+    )
+    graph, _ = analyze(root, off)
+    assert kinds_of(graph, "pkg.walker.Walker.visit_Call") == []
+
+
+def test_a_custom_entry_point_family_does_not_disable_the_others(tmp_path):
+    """Listing one family in the config used to replace the whole mapping.
+
+    A project that customised api_route silently stopped detecting tests, tasks
+    and framework callbacks, and then reported all of them as dead code.
+    """
+    root = project(
+        tmp_path,
+        {
+            "lineagelens.yaml": (
+                "analysis:\n"
+                "  entry_points:\n"
+                "    api_route:\n"
+                "    - .handle\n"
+            ),
+            "src/pkg/__init__.py": "",
+            "tests/test_thing.py": "def test_it():\n    assert True\n",
+        },
+    )
+    config = ProjectConfig.load(root)
+    assert config.analysis.entry_points["api_route"] == (".handle",), "custom family applied"
+    assert config.analysis.entry_points["cli_command"], "other families keep their defaults"
+    assert "task" in config.analysis.entry_points
+
+    graph, _ = analyze(root, config)
+    assert kinds_of(graph, "tests.test_thing.test_it") == ["test"]
