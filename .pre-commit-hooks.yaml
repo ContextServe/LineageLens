@@ -1,0 +1,23 @@
+# For repositories that use the pre-commit framework rather than raw git hooks.
+# Better DX than a bespoke installer: version-pinned, shared through the repo's
+# own config, and it participates in `pre-commit autoupdate`.
+- id: lineagelens-check
+  name: LineageLens dead-code ratchet
+  description: >-
+    Fail on dead code that is new relative to the committed baseline. Only
+    newly-unreachable symbols fail, so this is adoptable on an existing codebase.
+  entry: lineagelens check .
+  language: python
+  pass_filenames: false
+  always_run: true
+
+- id: lineagelens-analyze
+  name: LineageLens graph
+  description: >-
+    Regenerate the code graph. Adds a few seconds to every commit; prefer the
+    post-commit hook (`lineagelens hook install`) unless the graph is committed.
+  entry: lineagelens analyze . --quiet
+  language: python
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit]
