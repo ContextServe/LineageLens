@@ -29,13 +29,20 @@ class Evidence:
         """Convert a legacy string label to typed Evidence (best-guess mapping)."""
         # Tier 1: deterministic facts -- read directly off literal AST
         if raw in ("static_ast", "annotation", "static_scope_walk", "annotated_parameter",
-                   "annotated_assignment", "annotated_attribute", "annotated_parameter_passthrough"):
+                   "annotated_assignment", "annotated_attribute", "annotated_parameter_passthrough",
+                   "import_substitution",
+                   # syntax observations for the non-call relation kinds
+                   "static_ast_base", "static_ast_decorator", "static_ast_annotation",
+                   "static_ast_dunder_all", "static_ast_import", "static_ast_name_load"):
             return cls(tier="deterministic_fact", label=raw)
         # Tier 2: deterministic heuristics -- reproducible, but inferred
         if raw in ("return_expression", "inferred_type", "resolved", "external_or_dynamic",
                    "local_type_inference_construction", "local_type_inference_factory",
                    "local_type_inference_attribute", "unresolved_dynamic_dispatch",
-                   "jedi_inference", "jedi_ambiguous"):
+                   "jedi_inference", "jedi_ambiguous",
+                   # name-based links: no syntax proves these, only a matching name
+                   "mro_name_match", "pytest_fixture_name",
+                   "string_literal_dotted_name", "string_reference"):
             return cls(tier="deterministic_heuristic", label=raw)
         # Tier 3: probabilistic
         if raw == "llm":
