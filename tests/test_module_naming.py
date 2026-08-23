@@ -7,8 +7,6 @@ produces zero matches.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from lineagelens.analyzer import module_name
 from lineagelens.config import ProjectConfig
 
