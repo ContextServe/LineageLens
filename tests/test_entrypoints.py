@@ -288,7 +288,7 @@ def test_disabling_all_rules_yields_no_entry_points():
         config,
         analysis=replace(
             config.analysis,
-            entry_point_rules={k: False for k in config.analysis.entry_point_rules},
+            entry_point_rules=dict.fromkeys(config.analysis.entry_point_rules, False),
         ),
     )
     graph, _ = analyze(CORPUS, off)

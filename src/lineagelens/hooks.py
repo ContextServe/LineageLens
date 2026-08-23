@@ -130,7 +130,7 @@ def status(project: Path) -> dict[str, bool]:
     try:
         directory = hooks_dir(project)
     except HookError:
-        return {kind: False for kind in SUPPORTED}
+        return dict.fromkeys(SUPPORTED, False)
     result = {}
     for kind in SUPPORTED:
         path = directory / kind

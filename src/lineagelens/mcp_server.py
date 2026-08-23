@@ -6,7 +6,6 @@ without reading full source, reducing token cost and enabling safe impact analys
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import asdict
@@ -14,27 +13,50 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
-from mcp.server.mcpserver.context import Context
 
 from .analyzer import analyze
 from .config import ProjectConfig
 from .index import invalidate, load_index
-from .reachability import compute_reachability
 from .queries import (
     GraphNotFoundError,
+)
+from .queries import (
     find_duplicate_names as query_find_duplicates,
+)
+from .queries import (
     get_callees as query_get_callees,
+)
+from .queries import (
     get_callers as query_get_callers,
+)
+from .queries import (
     get_codebase_metrics as query_get_metrics,
+)
+from .queries import (
     get_lineage as query_get_lineage,
+)
+from .queries import (
     get_module_dependencies as query_get_module_deps,
+)
+from .queries import (
     get_module_overview as query_get_module_overview,
+)
+from .queries import (
     get_symbol as query_get_symbol,
+)
+from .queries import (
     impact_analysis as query_impact_analysis,
+)
+from .queries import (
     list_entry_points as query_list_entry_points,
+)
+from .queries import (
     list_resiliency_risks as query_list_resiliency_risks,
+)
+from .queries import (
     search_symbols as query_search_symbols,
 )
+from .reachability import compute_reachability
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -359,7 +381,7 @@ def create_mcp_server() -> MCPServer:
             deps = query_get_module_deps(graph)
             return {
                 "count": len(deps),
-                "dependencies": {module: sorted(list(dep_set)) for module, dep_set in deps.items()},
+                "dependencies": {module: sorted(dep_set) for module, dep_set in deps.items()},
             }
         except GraphNotFoundError as e:
             return {"error": str(e)}

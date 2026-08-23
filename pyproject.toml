@@ -20,7 +20,11 @@ dependencies = ["PyYAML>=6.0", "jedi>=0.19", "tomli>=2.0; python_version<'3.11'"
 web = ["fastapi>=0.110", "strawberry-graphql[fastapi]>=0.235", "uvicorn>=0.29", "pydantic>=2.0"]
 mcp = ["mcp>=1.0"]
 llm = ["httpx>=0.27"]
-dev = ["pytest>=8.0", "ruff>=0.5"]
+# ruff is pinned to a minor range, not just a floor. Its default rule set
+# widened between releases, which turned CI lint into a moving target that
+# failed on code nobody had touched. [tool.ruff.lint] now selects rules
+# explicitly, and this bound stops a new release adding more unannounced.
+dev = ["pytest>=8.0", "ruff>=0.16,<0.17"]
 
 [project.scripts]
 lineagelens = "lineagelens.cli:main"
@@ -46,3 +50,50 @@ pythonpath = ["src"]
 # name) so the analyzer sees realistic input. Linting it would mean rewriting
 # fixtures to satisfy a linter rather than to exercise the analyzer.
 extend-exclude = ["tests/fixtures"]
+target-version = "py310"
+
+[tool.ruff.lint]
+# Selected explicitly rather than relying on ruff's defaults. Those defaults
+# widened between releases, and with only a `ruff>=0.5` floor that silently
+# turned CI lint into a moving target. Pin the intent here instead.
+select = [
+  "E4", "E7", "E9",  # pycodestyle: real errors, not formatting opinions
+  "F",               # pyflakes
+  "I",               # import sorting
+  "UP",              # pyupgrade (this project targets 3.10+)
+  "B",               # bugbear: likely bugs
+  "SIM",             # simplifiable constructs
+  "C4",              # comprehension misuse
+  "FLY",             # static string joins
+  "PIE",             # misc lints
+  "RUF",             # ruff's own
+  "BLE",             # blind excepts (see the ignore below)
+  "S",               # bandit-style security checks
+  "DTZ",             # naive datetimes
+]
+
+ignore = [
+  # The analyzer's documented contract is that it never aborts on a bad input
+  # file: a syntax error, an encoding problem or an unexpected AST shape must be
+  # recorded in the report and analysis must continue on the next file. That is
+  # implemented with broad excepts on purpose, and each one records a
+  # FileFailure or a SymbolWarning rather than swallowing the error silently.
+  "BLE001",
+  # Same reasoning where the recovery genuinely is "carry on": probing an
+  # optional third-party API surface that varies by version.
+  "S110",
+  # This project shells out to `git` to resolve the hooks directory, which is the
+  # only correct way to support worktrees and core.hooksPath. Resolving it from
+  # PATH is intended -- hardcoding /usr/bin/git would break on any machine that
+  # installs git elsewhere. The argument vector is a literal list, never a shell
+  # string, so there is no injection surface.
+  "S603", "S607",
+  # Informational glyphs (e.g. U+2139) in human-facing CLI output. The homoglyph
+  # concern applies to identifiers and compared strings, not to display text.
+  "RUF001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on hard-coded fixture values and build throwaway projects in
+# tmp_path; neither is a security finding.
+"tests/*" = ["S101", "S108"]

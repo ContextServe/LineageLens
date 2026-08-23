@@ -92,9 +92,7 @@ def detect(
     if rules.get("pytest", True) and is_test_file(module_path):
         if any(name.split(".")[-1] in FIXTURE_DECORATORS for name in decorators):
             kinds.append("test_fixture")
-        elif node.name.startswith("test_"):
-            kinds.append("test")
-        elif class_stack and class_stack[-1].startswith("Test") and node.name.startswith("test_"):
+        elif node.name.startswith("test_") or (class_stack and class_stack[-1].startswith("Test") and node.name.startswith("test_")):
             kinds.append("test")
 
     if rules.get("unittest", True) and node.name in UNITTEST_HOOKS:
