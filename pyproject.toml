@@ -14,7 +14,15 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Software Development :: Quality Assurance",
 ]
-dependencies = ["PyYAML>=6.0", "jedi>=0.19", "tomli>=2.0; python_version<'3.11'"]
+dependencies = [
+  "PyYAML>=6.0",
+  "jedi>=0.19",
+  "fastapi>=0.110",
+  "strawberry-graphql[fastapi]>=0.235",
+  "uvicorn>=0.29",
+  "pydantic>=2.0",
+  "tomli>=2.0; python_version<'3.11'",
+]
 
 [project.optional-dependencies]
 web = ["fastapi>=0.110", "strawberry-graphql[fastapi]>=0.235", "uvicorn>=0.29", "pydantic>=2.0"]
