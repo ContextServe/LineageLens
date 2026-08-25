@@ -43,14 +43,41 @@ def detect_config(project: Path) -> DetectionResult:
     )
 
 
+def is_java_project(project: Path) -> bool:
+    """Check if the directory is a Java project (pom.xml, build.gradle, or .java files)."""
+    return (
+        (project / "pom.xml").exists()
+        or (project / "build.gradle").exists()
+        or (project / "build.gradle.kts").exists()
+        or any(project.glob("src/main/java/**/*.java"))
+        or any(project.glob("**/*.java"))
+    )
+
+
+def is_js_project(project: Path) -> bool:
+    """Check if the directory is a JS/TS project (package.json, tsconfig.json, or .js/.ts files)."""
+    return (
+        (project / "package.json").exists()
+        or (project / "tsconfig.json").exists()
+        or any(project.glob("src/**/*.ts"))
+        or any(project.glob("src/**/*.js"))
+        or any(project.glob("src/**/*.tsx"))
+        or any(project.glob("src/**/*.jsx"))
+    )
+
+
 def _detect_source_roots(project: Path) -> list[str]:
-    """Find directories containing Python packages/modules."""
+    """Find directories containing Python or Java packages/modules."""
     candidates = []
+
+    # Check for Java conventional directories first
+    if (project / "src" / "main" / "java").is_dir():
+        candidates.append("src/main/java")
 
     # Check for common conventional directories
     for name in ["src", "lib", "app", "source"]:
         dir_path = project / name
-        if dir_path.is_dir() and _has_python_files(dir_path):
+        if dir_path.is_dir() and (_has_python_files(dir_path) or _has_java_files(dir_path)):
             candidates.append(name)
 
     # Check for top-level __init__.py (single-module layout)
@@ -288,6 +315,11 @@ def _scan_dependencies(project: Path) -> set[str]:
 def _has_python_files(directory: Path) -> bool:
     """Check if directory or subdirectories contain Python files."""
     return any(directory.rglob("*.py"))
+
+
+def _has_java_files(directory: Path) -> bool:
+    """Check if directory or subdirectories contain Java files."""
+    return any(directory.rglob("*.java"))
 
 
 def _build_notes(

@@ -122,11 +122,50 @@ def build(
     """Analyze a project and write graph.json + report.json.
 
     Returns:
-        ``(graph_path, report_path, report)``. The in-memory report is returned so
-        that ``--strict`` can inspect it directly rather than re-reading and
-        re-parsing the file it just wrote.
+        ``(graph_path, report_path, report)``.
     """
+    from .detect_config import is_java_project, is_js_project
+    from .java_bridge import run_java_analysis
+    from .js_bridge import run_js_analysis
+
     config = ProjectConfig.load(project)
+
+    # Check if target project is JS/TS
+    if is_js_project(project) or getattr(config, "language", None) in ("javascript", "typescript", "js", "ts"):
+        graph_file = run_js_analysis(project)
+        report_file = report_path(project, config)
+        report = AnalysisReport(
+            project_root=str(project),
+            started_at="",
+            finished_at="",
+            files_scanned=1,
+            files_skipped=0,
+            symbols_found=0,
+            relations_found=0,
+            containers_found=0,
+        )
+        if not quiet:
+            print(f"✓ JavaScript/TypeScript analysis complete. Graph written to {graph_file}")
+        return graph_file, report_file, report
+
+    # Check if target project is Java
+    if is_java_project(project) or getattr(config, "language", None) == "java":
+        graph_file = run_java_analysis(project)
+        report_file = report_path(project, config)
+        report = AnalysisReport(
+            project_root=str(project),
+            started_at="",
+            finished_at="",
+            files_scanned=1,
+            files_skipped=0,
+            symbols_found=0,
+            relations_found=0,
+            containers_found=0,
+        )
+        if not quiet:
+            print(f"✓ Java analysis complete. Graph written to {graph_file}")
+        return graph_file, report_file, report
+
     if jedi is not None and jedi != config.analysis.jedi:
         config = replace(config, analysis=replace(config.analysis, jedi=jedi))
     graph, report = analyze(project, config)
