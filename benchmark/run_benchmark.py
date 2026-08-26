@@ -15,6 +15,7 @@ from typing import Optional
 import yaml
 import tempfile
 import shutil
+import re
 
 
 def log(msg: str, level: str = "INFO", section: bool = False):
@@ -159,6 +160,431 @@ def prepare_clones(work_dir: str, repo_url: str, base_sha: str, config: dict) ->
 
     log(f"Created two clones at {base_sha[:8]}")
     return str(mcp_clone), str(nonmcp_clone)
+
+
+def extract_files_from_response(response_text: str) -> list:
+    """
+    Extract file paths from '## Files I would change' block.
+    Returns: list of file paths (one per line after the marker)
+    """
+    files = []
+    marker = "## Files I would change"
+    if marker not in response_text:
+        log(f"WARNING: No '{marker}' section found in response", "WARN")
+        return files
+
+    # Find the section
+    idx = response_text.find(marker)
+    section = response_text[idx + len(marker):]
+
+    # Extract lines until we hit another ## or end of string
+    lines = section.split('\n')
+    for line in lines[1:]:  # Skip the header line
+        line = line.strip()
+        if line.startswith('##'):
+            break
+        if line and not line.startswith('#'):
+            files.append(line)
+
+    return files
+
+
+def parse_claude_jsonl(jsonl_data: str, scenario: str) -> dict:
+    """
+    Parse JSONL output from claude -p --output-format json.
+    Logs all tool invocations for validation.
+    Returns: {cost_usd, tokens_in, tokens_out, tool_calls, response_text}
+    """
+    lines = jsonl_data.strip().split('\n')
+    if not lines:
+        return {}
+
+    cost_usd = 0.0
+    tokens_in = 0
+    tokens_out = 0
+    tool_calls = []
+    response_text = ""
+
+    # Process each line
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            log(f"Failed to parse JSONL line {i}: {e}", "WARN")
+            continue
+
+        # Extract metadata from message objects
+        if "content" in obj and isinstance(obj.get("content"), list):
+            for block in obj["content"]:
+                if block.get("type") == "text":
+                    response_text += block.get("text", "")
+                elif block.get("type") == "tool_use":
+                    tool_name = block.get("name", "unknown")
+                    tool_input = block.get("input", {})
+                    tool_calls.append({
+                        "name": tool_name,
+                        "input": tool_input
+                    })
+                    log(f"Tool call: {tool_name}", "DEBUG")
+                    if isinstance(tool_input, dict):
+                        for key, val in tool_input.items():
+                            log(f"  {key}: {str(val)[:100]}", "DEBUG")
+
+        # Extract cost/token data (if present)
+        if "usage" in obj:
+            usage = obj["usage"]
+            tokens_in = usage.get("input_tokens", tokens_in)
+            tokens_out = usage.get("output_tokens", tokens_out)
+
+        if "cost" in obj:
+            cost_usd = obj["cost"].get("total_usd", cost_usd)
+
+    # Log validation info
+    log(f"Scenario {scenario}: {len(tool_calls)} tool calls", "INFO")
+    for tc in tool_calls:
+        log(f"  - {tc['name']}", "DEBUG")
+
+    return {
+        "cost_usd": cost_usd,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "tool_calls": tool_calls,
+        "response_text": response_text
+    }
+
+
+def run_claude_scenario(scenario: str, prompt: str, clone_path: str, config: dict, mcp_clone_path: str = None) -> dict:
+    """
+    Run claude with either MCP or baseline tool restrictions.
+
+    Args:
+        scenario: 'mcp' or 'baseline'
+        prompt: Full prompt text (rendered with PR metadata)
+        clone_path: Path to the repo clone to work from
+        config: Benchmark config dict
+        mcp_clone_path: (MCP only) Path to MCP clone for graph access
+
+    Returns: {
+        scenario, cost_usd, tokens_in, tokens_out, duration_sec,
+        tool_calls, source_files_read, files_identified, raw_response
+    }
+    """
+    log(f"Running Claude Scenario: {scenario.upper()}", "INFO", section=True)
+    start_time = time.time()
+
+    model = config.get("model", "claude-sonnet-4-5")
+    budget_usd = config.get("budget_usd", 3.00)
+    timeout = config.get("timeout_seconds", 900)
+    mcp_prefix = config.get("mcp_tool_prefix", "mcp__lineagelens")
+
+    log(f"Working directory: {clone_path}")
+    log(f"Model: {model}")
+    log(f"Budget: ${budget_usd}")
+    log(f"Timeout: {timeout}s")
+
+    # Build claude command
+    cmd = ["claude", "-p", prompt]
+
+    if scenario == "mcp":
+        # MCP scenario: strict tool restriction
+        if not mcp_clone_path:
+            log("ERROR: mcp_clone_path required for MCP scenario", "ERROR")
+            return {}
+
+        # Build MCP config
+        mcp_config = {
+            "mcpServers": {
+                "lineagelens": {
+                    "command": "lineagelens-mcp",
+                    "env": {
+                        "LINEAGELENS_PROJECT": str(Path(mcp_clone_path).absolute())
+                    }
+                }
+            }
+        }
+        mcp_config_json = json.dumps(mcp_config)
+
+        cmd.extend([
+            "--strict-mcp-config", mcp_config_json,
+            "--allowedTools", f"{mcp_prefix}__*",
+            "--model", model,
+            "--max-budget-usd", str(budget_usd),
+            "--output-format", "json"
+        ])
+
+        log(f"Tool restriction: {mcp_prefix}__* (MCP tools only)", "INFO")
+        log(f"Excluded: {mcp_prefix}__trigger_analysis (would corrupt pre-built graph)", "DEBUG")
+
+    else:
+        # Baseline scenario: standard file exploration tools
+        allowed_tools = "Read,Glob,Grep,Bash(find *),Bash(ls *)"
+        cmd.extend([
+            "--allowedTools", allowed_tools,
+            "--model", model,
+            "--max-budget-usd", str(budget_usd),
+            "--output-format", "json"
+        ])
+
+        log(f"Tool restriction: {allowed_tools}", "INFO")
+
+    # Run claude
+    log(f"Running: claude -p <prompt> [flags]", "INFO")
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(clone_path),
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+
+        duration = time.time() - start_time
+
+        if result.returncode != 0:
+            log(f"Claude exited with code {result.returncode}", "ERROR")
+            log(f"stderr: {result.stderr[:200]}", "ERROR")
+            return {}
+
+        # Parse JSONL output
+        parsed = parse_claude_jsonl(result.stdout, scenario)
+        log(f"Duration: {duration:.1f}s", "INFO")
+        log(f"Cost: ${parsed.get('cost_usd', 0):.2f}", "INFO")
+        log(f"Tokens: {parsed.get('tokens_in', 0)} in, {parsed.get('tokens_out', 0)} out", "INFO")
+
+        # Extract identified files
+        response_text = parsed.get("response_text", "")
+        files_identified = extract_files_from_response(response_text)
+        log(f"Files identified: {len(files_identified)}", "INFO")
+
+        # Check for source file reads in MCP scenario
+        source_files_read = []
+        if scenario == "mcp":
+            for tc in parsed.get("tool_calls", []):
+                tool_name = tc.get("name", "")
+                tool_input = tc.get("input", {})
+                # Check if any Read/Glob/Bash was used on source files
+                if tool_name in ["Read", "Glob", "Bash"]:
+                    file_arg = tool_input.get("path", "") or tool_input.get("pattern", "") or tool_input.get("command", "")
+                    # Check for source file patterns
+                    if re.search(r'\.(py|java|ts|tsx|js|jsx)$', str(file_arg)):
+                        source_files_read.append({
+                            "tool": tool_name,
+                            "arg": file_arg
+                        })
+                        log(f"⚠️  VIOLATION: {tool_name} called on source file: {file_arg}", "WARN")
+
+        return {
+            "scenario": scenario,
+            "cost_usd": parsed.get("cost_usd", 0.0),
+            "tokens_in": parsed.get("tokens_in", 0),
+            "tokens_out": parsed.get("tokens_out", 0),
+            "duration_sec": duration,
+            "tool_calls": parsed.get("tool_calls", []),
+            "source_files_read": source_files_read,
+            "files_identified": files_identified,
+            "raw_response": response_text
+        }
+
+    except subprocess.TimeoutExpired:
+        log(f"Claude call timed out after {timeout}s", "ERROR")
+        return {}
+    except Exception as e:
+        log(f"Claude call failed: {e}", "ERROR")
+        return {}
+
+
+def get_ground_truth_files(clone_path: str, base_sha: str, merge_sha: str) -> set:
+    """
+    Get the ground truth list of changed files via git diff.
+    Returns: set of relative file paths that were modified in the PR
+    """
+    if not merge_sha:
+        log("WARNING: PR not merged, cannot determine ground truth", "WARN")
+        return set()
+
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{base_sha}...{merge_sha}"],
+            cwd=str(clone_path),
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode != 0:
+            log(f"git diff failed: {result.stderr}", "WARN")
+            return set()
+
+        files = set(result.stdout.strip().split('\n'))
+        files = {f for f in files if f.strip()}  # Remove empty strings
+        return files
+    except Exception as e:
+        log(f"Failed to get ground truth: {e}", "ERROR")
+        return set()
+
+
+def normalize_path(path: str) -> str:
+    """Normalize a path for comparison (strip leading/trailing whitespace, forward slashes)."""
+    return path.strip().lstrip('./').replace('\\', '/')
+
+
+def compute_metrics(identified: list, ground_truth: set) -> dict:
+    """
+    Compute precision, recall, F1 for file identification.
+
+    Args:
+        identified: List of file paths identified by Claude
+        ground_truth: Set of files actually changed in the PR
+
+    Returns: {precision, recall, f1, tp, fp, fn}
+    """
+    identified_normalized = {normalize_path(f) for f in identified}
+    ground_truth_normalized = {normalize_path(f) for f in ground_truth}
+
+    tp = len(identified_normalized & ground_truth_normalized)  # True positives
+    fp = len(identified_normalized - ground_truth_normalized)  # False positives
+    fn = len(ground_truth_normalized - identified_normalized)  # False negatives
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "identified_count": len(identified_normalized),
+        "ground_truth_count": len(ground_truth_normalized)
+    }
+
+
+def write_report(results: list, ground_truth: set, work_dir: str, pr_num: int) -> tuple:
+    """
+    Write summary.md and summary.json reports.
+
+    Args:
+        results: List of scenario result dicts from run_claude_scenario()
+        ground_truth: Set of files changed in the PR
+        work_dir: Work directory for output
+        pr_num: PR number for naming
+
+    Returns: (summary_md_path, summary_json_path)
+    """
+    work_path = Path(work_dir)
+    results_dir = work_path / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Compute metrics for each scenario
+    mcp_result = next((r for r in results if r.get("scenario") == "mcp"), {})
+    baseline_result = next((r for r in results if r.get("scenario") == "baseline"), {})
+
+    mcp_metrics = compute_metrics(mcp_result.get("files_identified", []), ground_truth)
+    baseline_metrics = compute_metrics(baseline_result.get("files_identified", []), ground_truth)
+
+    # Write summary.md
+    summary_md_path = results_dir / "summary.md"
+    with open(summary_md_path, 'w') as f:
+        f.write(f"# Benchmark Results: PR #{pr_num}\n\n")
+        f.write("## Overview\n\n")
+        f.write("Comparison of LineageLens MCP vs. Baseline (file exploration) approaches.\n\n")
+
+        f.write("## Results\n\n")
+        f.write("| Metric | MCP | Baseline |\n")
+        f.write("|--------|-----|----------|\n")
+        f.write(f"| Cost (USD) | ${mcp_result.get('cost_usd', 0):.2f} | ${baseline_result.get('cost_usd', 0):.2f} |\n")
+        f.write(f"| Tokens In | {mcp_result.get('tokens_in', 0):,} | {baseline_result.get('tokens_in', 0):,} |\n")
+        f.write(f"| Tokens Out | {mcp_result.get('tokens_out', 0):,} | {baseline_result.get('tokens_out', 0):,} |\n")
+        f.write(f"| Duration (s) | {mcp_result.get('duration_sec', 0):.1f} | {baseline_result.get('duration_sec', 0):.1f} |\n")
+        f.write(f"| Files Identified | {mcp_metrics['identified_count']} | {baseline_metrics['identified_count']} |\n")
+        f.write(f"| Precision | {mcp_metrics['precision']:.3f} | {baseline_metrics['precision']:.3f} |\n")
+        f.write(f"| Recall | {mcp_metrics['recall']:.3f} | {baseline_metrics['recall']:.3f} |\n")
+        f.write(f"| F1 Score | {mcp_metrics['f1']:.3f} | {baseline_metrics['f1']:.3f} |\n\n")
+
+        # Ground truth
+        f.write("## Ground Truth\n\n")
+        f.write(f"Files changed in PR: {len(ground_truth)}\n\n")
+        for fname in sorted(ground_truth):
+            f.write(f"- {fname}\n")
+
+        # MCP details
+        f.write("\n## Scenario A: MCP-Tool-Only\n\n")
+        f.write(f"Cost: ${mcp_result.get('cost_usd', 0):.2f}\n")
+        f.write(f"Duration: {mcp_result.get('duration_sec', 0):.1f}s\n")
+        f.write(f"Tool Calls: {len(mcp_result.get('tool_calls', []))}\n")
+        if mcp_result.get('source_files_read'):
+            f.write(f"⚠️  **SOURCE FILE READS DETECTED**: {len(mcp_result.get('source_files_read'))}\n")
+            for sfr in mcp_result.get('source_files_read', []):
+                f.write(f"  - {sfr['tool']}: {sfr['arg']}\n")
+        else:
+            f.write("✓ No source file reads detected (tool-only execution)\n")
+
+        # Baseline details
+        f.write("\n## Scenario B: Baseline (File Exploration)\n\n")
+        f.write(f"Cost: ${baseline_result.get('cost_usd', 0):.2f}\n")
+        f.write(f"Duration: {baseline_result.get('duration_sec', 0):.1f}s\n")
+        f.write(f"Tool Calls: {len(baseline_result.get('tool_calls', []))}\n")
+
+        # Comparison
+        cost_ratio = mcp_result.get('cost_usd', 0) / max(baseline_result.get('cost_usd', 1), 0.01)
+        time_ratio = mcp_result.get('duration_sec', 0) / max(baseline_result.get('duration_sec', 1), 0.01)
+        f1_delta = mcp_metrics['f1'] - baseline_metrics['f1']
+
+        f.write("\n## Summary\n\n")
+        if cost_ratio < 1:
+            f.write(f"✓ **MCP was {(1/cost_ratio):.1f}x cheaper** (${mcp_result.get('cost_usd', 0):.2f} vs ${baseline_result.get('cost_usd', 0):.2f})\n")
+        else:
+            f.write(f"• MCP cost was {cost_ratio:.1f}x baseline\n")
+
+        if time_ratio < 1:
+            f.write(f"✓ **MCP was {(1/time_ratio):.1f}x faster** ({mcp_result.get('duration_sec', 0):.1f}s vs {baseline_result.get('duration_sec', 0):.1f}s)\n")
+        else:
+            f.write(f"• MCP took {time_ratio:.1f}x baseline time\n")
+
+        if f1_delta > 0:
+            f.write(f"✓ **MCP F1 was +{f1_delta:.3f} points higher**\n")
+        elif f1_delta < 0:
+            f.write(f"• MCP F1 was {f1_delta:.3f} points lower\n")
+        else:
+            f.write(f"• F1 scores were equal\n")
+
+    # Write summary.json
+    summary_json_path = results_dir / "summary.json"
+    summary_data = {
+        "pr_number": pr_num,
+        "ground_truth_files": sorted(ground_truth),
+        "mcp": {
+            "cost_usd": mcp_result.get("cost_usd", 0),
+            "tokens_in": mcp_result.get("tokens_in", 0),
+            "tokens_out": mcp_result.get("tokens_out", 0),
+            "duration_sec": mcp_result.get("duration_sec", 0),
+            "tool_calls": len(mcp_result.get("tool_calls", [])),
+            "source_file_violations": len(mcp_result.get("source_files_read", [])),
+            "metrics": mcp_metrics,
+            "files_identified": mcp_result.get("files_identified", [])
+        },
+        "baseline": {
+            "cost_usd": baseline_result.get("cost_usd", 0),
+            "tokens_in": baseline_result.get("tokens_in", 0),
+            "tokens_out": baseline_result.get("tokens_out", 0),
+            "duration_sec": baseline_result.get("duration_sec", 0),
+            "tool_calls": len(baseline_result.get("tool_calls", [])),
+            "metrics": baseline_metrics,
+            "files_identified": baseline_result.get("files_identified", [])
+        }
+    }
+
+    with open(summary_json_path, 'w') as f:
+        json.dump(summary_data, f, indent=2)
+
+    log(f"Report written to {summary_md_path}", "INFO")
+    log(f"Data written to {summary_json_path}", "INFO")
+
+    return (str(summary_md_path), str(summary_json_path))
 
 
 def load_and_render_prompt(scenario: str, pr_title: str, pr_body: str) -> str:
@@ -316,7 +742,7 @@ def main():
     log(f"✓ Merge commit: {pr_info['merge_sha'][:8] if pr_info['merge_sha'] else 'N/A (not merged)'}")
 
     # Test prompt loading (verify templates exist and render correctly)
-    log("Testing prompt templates", "INFO", section=True)
+    log("Loading prompt templates", "INFO", section=True)
     try:
         mcp_prompt = load_and_render_prompt("mcp", pr_info["title"], pr_info["body"])
         log(f"✓ MCP prompt loaded ({len(mcp_prompt)} chars)")
@@ -326,13 +752,69 @@ def main():
         log(f"Failed to load prompts: {e}", "ERROR")
         sys.exit(1)
 
-    # Summary
-    log("Benchmark setup complete and validated", "INFO", section=True)
-    log("Prepare phase has completed successfully.")
+    # Get ground truth (files changed in PR)
+    log("Determining ground truth (files changed in PR)", "INFO", section=True)
+    ground_truth = get_ground_truth_files(nonmcp_clone, pr_info["base_sha"], pr_info["merge_sha"])
+    log(f"Ground truth: {len(ground_truth)} files changed", "INFO")
+    for fname in sorted(list(ground_truth)[:10]):
+        log(f"  - {fname}", "DEBUG")
+    if len(ground_truth) > 10:
+        log(f"  ... and {len(ground_truth) - 10} more", "DEBUG")
+
+    # Run Claude scenarios
+    log("Claude Analysis Phase - Running both scenarios", "INFO", section=True)
+
+    results = []
+
+    # Scenario A: MCP-only
+    log("Scenario A: MCP-Tool-Only", "INFO", section=True)
+    mcp_result = run_claude_scenario(
+        "mcp",
+        mcp_prompt,
+        config["work_dir"],
+        config,
+        mcp_clone_path=mcp_clone
+    )
+    if not mcp_result:
+        log("FAILED: MCP scenario did not complete", "ERROR")
+        sys.exit(1)
+    results.append(mcp_result)
+
+    # Scenario B: Baseline
+    log("Scenario B: Baseline (File Exploration)", "INFO", section=True)
+    baseline_result = run_claude_scenario(
+        "baseline",
+        baseline_prompt,
+        nonmcp_clone,
+        config
+    )
+    if not baseline_result:
+        log("FAILED: Baseline scenario did not complete", "ERROR")
+        sys.exit(1)
+    results.append(baseline_result)
+
+    # Generate report
+    log("Generating benchmark report", "INFO", section=True)
+    try:
+        summary_md, summary_json = write_report(
+            results,
+            ground_truth,
+            config["work_dir"],
+            config["repo"]["pr"]
+        )
+        log(f"✓ Report written to {summary_md}", "INFO")
+        log(f"✓ Data written to {summary_json}", "INFO")
+    except Exception as e:
+        log(f"Failed to write report: {e}", "ERROR")
+        sys.exit(1)
+
+    # Final summary
+    log("Benchmark COMPLETE", "INFO", section=True)
+    log("✓ Prepare phase: DONE", "INFO")
+    log("✓ Claude analysis (A & B): DONE", "INFO")
+    log("✓ Scoring and report: DONE", "INFO")
     log("", "INFO")
-    log("Next: Run the Claude analysis phase (Stage 5A & 5B)", "INFO")
-    log("  - Scenario A (MCP): Claude with LineageLens MCP tools only")
-    log("  - Scenario B (Baseline): Claude with Read/Glob/Bash tools only")
+    log(f"Results available at: {config['work_dir']}/results/", "INFO")
     log("", "INFO")
 
 
