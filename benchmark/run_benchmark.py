@@ -191,9 +191,22 @@ def extract_files_from_response(response_text: str) -> list:
 
 def parse_claude_jsonl(jsonl_data: str, scenario: str) -> dict:
     """
-    Parse JSONL output from claude -p --output-format json.
+    Parse JSONL output from claude -p --output-format stream-json --verbose.
+
+    Real schema (confirmed by manual spike, not the Messages-API shape we
+    originally guessed): each line is a top-level SDK event with a "type"
+    field:
+      - "system"    — init event (subtype "init"), no content
+      - "assistant" — has "message": {"content": [...]}, content blocks are
+                       {"type": "text", "text": ...} or
+                       {"type": "tool_use", "name": ..., "input": {...}}
+      - "user"      — tool_result echoes, not needed here
+      - "result"    — final summary line: "total_cost_usd", "usage"
+                       ({"input_tokens", "output_tokens", ...}), "result"
+                       (the final response text), "is_error"
+
     Logs all tool invocations for validation.
-    Returns: {cost_usd, tokens_in, tokens_out, tool_calls, response_text}
+    Returns: {cost_usd, tokens_in, tokens_out, tool_calls, response_text, is_error}
     """
     lines = jsonl_data.strip().split('\n')
     if not lines:
@@ -204,8 +217,8 @@ def parse_claude_jsonl(jsonl_data: str, scenario: str) -> dict:
     tokens_out = 0
     tool_calls = []
     response_text = ""
+    is_error = False
 
-    # Process each line
     for i, line in enumerate(lines):
         if not line.strip():
             continue
@@ -216,9 +229,11 @@ def parse_claude_jsonl(jsonl_data: str, scenario: str) -> dict:
             log(f"Failed to parse JSONL line {i}: {e}", "WARN")
             continue
 
-        # Extract metadata from message objects
-        if "content" in obj and isinstance(obj.get("content"), list):
-            for block in obj["content"]:
+        event_type = obj.get("type")
+
+        if event_type == "assistant":
+            content = obj.get("message", {}).get("content", [])
+            for block in content:
                 if block.get("type") == "text":
                     response_text += block.get("text", "")
                 elif block.get("type") == "tool_use":
@@ -233,26 +248,32 @@ def parse_claude_jsonl(jsonl_data: str, scenario: str) -> dict:
                         for key, val in tool_input.items():
                             log(f"  {key}: {str(val)[:100]}", "DEBUG")
 
-        # Extract cost/token data (if present)
-        if "usage" in obj:
-            usage = obj["usage"]
+        elif event_type == "result":
+            # Final summary line — authoritative cost/usage/result text
+            cost_usd = obj.get("total_cost_usd", cost_usd)
+            usage = obj.get("usage", {})
             tokens_in = usage.get("input_tokens", tokens_in)
             tokens_out = usage.get("output_tokens", tokens_out)
+            is_error = obj.get("is_error", False)
+            # "result" holds the model's final text if no text block was
+            # captured from an "assistant" event (defensive fallback)
+            if not response_text:
+                response_text = obj.get("result", "")
 
-        if "cost" in obj:
-            cost_usd = obj["cost"].get("total_usd", cost_usd)
-
-    # Log validation info
     log(f"Scenario {scenario}: {len(tool_calls)} tool calls", "INFO")
     for tc in tool_calls:
         log(f"  - {tc['name']}", "DEBUG")
+
+    if is_error:
+        log(f"Scenario {scenario}: claude reported is_error=true", "WARN")
 
     return {
         "cost_usd": cost_usd,
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "tool_calls": tool_calls,
-        "response_text": response_text
+        "response_text": response_text,
+        "is_error": is_error
     }
 
 
@@ -307,16 +328,38 @@ def run_claude_scenario(scenario: str, prompt: str, clone_path: str, config: dic
         }
         mcp_config_json = json.dumps(mcp_config)
 
+        # NOTE: --strict-mcp-config is a bare boolean flag ("only use the
+        # servers passed via --mcp-config, ignore everything else") — it
+        # does NOT take the JSON itself as its value. Confirmed via
+        # `claude --help`. Passing the JSON directly after
+        # --strict-mcp-config (the original bug here) means --mcp-config is
+        # never set, so *no* MCP server loads at all — Claude then reports
+        # the lineagelens tools as simply not present, which is exactly
+        # what the first real run showed (0 tool calls, $0 cost display
+        # bug aside).
+        # Confirmed by manual spike (2026-08-25): Claude calls
+        # trigger_analysis unprompted as an early exploratory step even
+        # though the prompt never mentions it. --allowedTools alone can't
+        # stop this (it's an allow-glob, not a deny-list), so it must be
+        # explicitly denied via --disallowedTools (confirmed real flag via
+        # `claude --help`) — otherwise it silently re-runs Python-only
+        # analysis in-process mid-session and could corrupt a pre-built
+        # Java/JS graph.
+        trigger_analysis_tool = f"{mcp_prefix}__trigger_analysis"
+
         cmd.extend([
-            "--strict-mcp-config", mcp_config_json,
+            "--mcp-config", mcp_config_json,
+            "--strict-mcp-config",
             "--allowedTools", f"{mcp_prefix}__*",
+            "--disallowedTools", trigger_analysis_tool,
             "--model", model,
             "--max-budget-usd", str(budget_usd),
-            "--output-format", "json"
+            "--output-format", "stream-json",
+            "--verbose"
         ])
 
         log(f"Tool restriction: {mcp_prefix}__* (MCP tools only)", "INFO")
-        log(f"Excluded: {mcp_prefix}__trigger_analysis (would corrupt pre-built graph)", "DEBUG")
+        log(f"Excluded: {trigger_analysis_tool} (would corrupt pre-built graph)", "INFO")
 
     else:
         # Baseline scenario: standard file exploration tools
@@ -325,7 +368,8 @@ def run_claude_scenario(scenario: str, prompt: str, clone_path: str, config: dic
             "--allowedTools", allowed_tools,
             "--model", model,
             "--max-budget-usd", str(budget_usd),
-            "--output-format", "json"
+            "--output-format", "stream-json",
+            "--verbose"
         ])
 
         log(f"Tool restriction: {allowed_tools}", "INFO")
