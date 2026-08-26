@@ -161,6 +161,40 @@ def prepare_clones(work_dir: str, repo_url: str, base_sha: str, config: dict) ->
     return str(mcp_clone), str(nonmcp_clone)
 
 
+def load_and_render_prompt(scenario: str, pr_title: str, pr_body: str) -> str:
+    """
+    Load the appropriate prompt template (mcp or baseline) and render it
+    with PR title/body.
+
+    Args:
+        scenario: "mcp" or "baseline"
+        pr_title: PR title string
+        pr_body: PR body string
+
+    Returns:
+        Rendered prompt string
+    """
+    script_dir = Path(__file__).parent
+    if scenario == "mcp":
+        prompt_file = script_dir / "prompt_mcp.md"
+    else:
+        prompt_file = script_dir / "prompt_baseline.md"
+
+    if not prompt_file.exists():
+        log(f"Prompt template not found: {prompt_file}", "ERROR")
+        sys.exit(1)
+
+    with open(prompt_file, 'r') as f:
+        template = f.read()
+
+    # Replace placeholders
+    rendered = template.replace("{pr_title}", pr_title)
+    rendered = rendered.replace("{pr_body}", pr_body)
+
+    log(f"Loaded {scenario} prompt template from {prompt_file.name}")
+    return rendered
+
+
 def run_lineagelens_init_analyze(clone_path: str, source_roots: list) -> bool:
     """
     Run 'lineagelens init' then 'lineagelens analyze' in the mcp clone.
@@ -281,12 +315,24 @@ def main():
     log(f"✓ Base commit: {pr_info['base_sha'][:8]}")
     log(f"✓ Merge commit: {pr_info['merge_sha'][:8] if pr_info['merge_sha'] else 'N/A (not merged)'}")
 
+    # Test prompt loading (verify templates exist and render correctly)
+    log("Testing prompt templates", "INFO", section=True)
+    try:
+        mcp_prompt = load_and_render_prompt("mcp", pr_info["title"], pr_info["body"])
+        log(f"✓ MCP prompt loaded ({len(mcp_prompt)} chars)")
+        baseline_prompt = load_and_render_prompt("baseline", pr_info["title"], pr_info["body"])
+        log(f"✓ Baseline prompt loaded ({len(baseline_prompt)} chars)")
+    except Exception as e:
+        log(f"Failed to load prompts: {e}", "ERROR")
+        sys.exit(1)
+
     # Summary
     log("Benchmark setup complete and validated", "INFO", section=True)
-    log("Next steps:")
-    log("  1. Review the clones at the paths above")
-    log("  2. Verify graph.json was created in MCP clone")
-    log("  3. Run Stage 5A & 5B: Claude analysis on both clones")
+    log("Prepare phase has completed successfully.")
+    log("", "INFO")
+    log("Next: Run the Claude analysis phase (Stage 5A & 5B)", "INFO")
+    log("  - Scenario A (MCP): Claude with LineageLens MCP tools only")
+    log("  - Scenario B (Baseline): Claude with Read/Glob/Bash tools only")
     log("", "INFO")
 
 
