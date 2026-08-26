@@ -18,6 +18,11 @@ lib/
 lib64/
 parts/
 sdist/
+src/java/.gradle
+src/java/bin
+src/js/node_modules
+src/js/dist
+
 var/
 wheels/
 share/python-wheels/

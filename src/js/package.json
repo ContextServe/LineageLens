@@ -1,0 +1,24 @@
+{
+  "name": "lineagelens-js",
+  "version": "0.1.0",
+  "description": "JavaScript and TypeScript AST code graph analyzer for LineageLens",
+  "main": "dist/cli.js",
+  "bin": {
+    "lineagelens-js": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "esbuild src/cli.ts --bundle --platform=node --target=node18 --outfile=dist/cli.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "typescript": "^5.4.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.20.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2"
+  }
+}
