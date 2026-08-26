@@ -38,8 +38,20 @@ def log(msg: str, level: str = "INFO", section: bool = False):
         print(f"[{ts}] {level:7s} | {msg}")
 
 
-def run_cmd(cmd, cwd=None, check=True, capture=False):
-    """Run a shell command, optionally capturing output."""
+def run_cmd(cmd, cwd=None, check=True, capture=False, timeout=None):
+    """
+    Run a shell command, optionally capturing output.
+
+    Args:
+        cmd: Command list
+        cwd: Working directory
+        check: Raise on non-zero exit
+        capture: Capture stdout/stderr
+        timeout: Timeout in seconds (default: 1800 to accommodate large clones/analysis)
+    """
+    if timeout is None:
+        timeout = 1800  # 30 min default, much larger than the old 300s
+
     log(f"Running: {' '.join(cmd)}")
     try:
         result = subprocess.run(
@@ -48,13 +60,13 @@ def run_cmd(cmd, cwd=None, check=True, capture=False):
             check=check,
             capture_output=capture,
             text=True,
-            timeout=300
+            timeout=timeout
         )
         if capture:
             return result.stdout, result.stderr, result.returncode
         return None, None, 0
     except subprocess.TimeoutExpired:
-        log(f"Command timed out: {' '.join(cmd)}", "ERROR")
+        log(f"Command timed out after {timeout}s: {' '.join(cmd)}", "ERROR")
         raise
     except Exception as e:
         log(f"Command failed: {e}", "ERROR")
@@ -142,6 +154,7 @@ def prepare_clones(work_dir: str, repo_url: str, base_sha: str, config: dict) ->
 
     mcp_dir = config.get("mcp_dir", "mcptest")
     nonmcp_dir = config.get("nonmcp_dir", "nonmcp_test")
+    timeout = config.get("timeout_seconds", 900)
 
     mcp_clone = work_path / mcp_dir
     nonmcp_clone = work_path / nonmcp_dir
@@ -153,10 +166,12 @@ def prepare_clones(work_dir: str, repo_url: str, base_sha: str, config: dict) ->
             shutil.rmtree(clone_path)
 
     # Clone both repos at base commit
+    # Use a longer timeout for clone (can take several minutes for large repos)
+    clone_timeout = max(timeout * 2, 3600)  # At least 1 hour for clone
     for clone_path, name in [(mcp_clone, "mcp"), (nonmcp_clone, "nonmcp")]:
         log(f"Cloning {name} to {clone_path}")
-        run_cmd(["git", "clone", repo_url, str(clone_path)])
-        run_cmd(["git", "checkout", base_sha], cwd=str(clone_path))
+        run_cmd(["git", "clone", repo_url, str(clone_path)], timeout=clone_timeout)
+        run_cmd(["git", "checkout", base_sha], cwd=str(clone_path), timeout=timeout)
 
     log(f"Created two clones at {base_sha[:8]}")
     return str(mcp_clone), str(nonmcp_clone)
@@ -277,7 +292,7 @@ def parse_claude_jsonl(jsonl_data: str, scenario: str) -> dict:
     }
 
 
-def run_claude_scenario(scenario: str, prompt: str, clone_path: str, config: dict, mcp_clone_path: str = None) -> dict:
+def run_claude_scenario(scenario: str, prompt: str, clone_path: str, config: dict, mcp_clone_path: str = None, results_dir: str = None) -> dict:
     """
     Run claude with either MCP or baseline tool restrictions.
 
@@ -287,6 +302,7 @@ def run_claude_scenario(scenario: str, prompt: str, clone_path: str, config: dic
         clone_path: Path to the repo clone to work from
         config: Benchmark config dict
         mcp_clone_path: (MCP only) Path to MCP clone for graph access
+        results_dir: Directory to persist raw JSONL transcript
 
     Returns: {
         scenario, cost_usd, tokens_in, tokens_out, duration_sec,
@@ -387,13 +403,27 @@ def run_claude_scenario(scenario: str, prompt: str, clone_path: str, config: dic
 
         duration = time.time() - start_time
 
-        if result.returncode != 0:
-            log(f"Claude exited with code {result.returncode}", "ERROR")
-            log(f"stderr: {result.stderr[:200]}", "ERROR")
-            return {}
+        # **Always** persist the raw transcript, even on error (Gap B fix)
+        if results_dir:
+            try:
+                results_path = Path(results_dir)
+                results_path.mkdir(parents=True, exist_ok=True)
+                transcript_path = results_path / f"{scenario}_stream.jsonl"
+                with open(transcript_path, 'w') as f:
+                    f.write(result.stdout)
+                log(f"Transcript persisted to {transcript_path}", "DEBUG")
+            except Exception as e:
+                log(f"Failed to persist transcript: {e}", "WARN")
 
-        # Parse JSONL output
+        # Parse JSONL output (even if returncode != 0, in case there's partial output)
         parsed = parse_claude_jsonl(result.stdout, scenario)
+
+        # Log full stderr if there was an error (Gap C fix)
+        if result.returncode != 0:
+            log(f"Claude exited with code {result.returncode}", "WARN")
+            log(f"stderr (full): {result.stderr}", "WARN")
+            # Still continue — partial output may be parseable
+
         log(f"Duration: {duration:.1f}s", "INFO")
         log(f"Cost: ${parsed.get('cost_usd', 0):.2f}", "INFO")
         log(f"Tokens: {parsed.get('tokens_in', 0)} in, {parsed.get('tokens_out', 0)} out", "INFO")
@@ -665,7 +695,7 @@ def load_and_render_prompt(scenario: str, pr_title: str, pr_body: str) -> str:
     return rendered
 
 
-def run_lineagelens_init_analyze(clone_path: str, source_roots: list) -> bool:
+def run_lineagelens_init_analyze(clone_path: str, source_roots: list, timeout: int = 900) -> bool:
     """
     Run 'lineagelens init' then 'lineagelens analyze' in the mcp clone.
     If source_roots is provided, patch lineagelens.yaml first.
@@ -674,7 +704,7 @@ def run_lineagelens_init_analyze(clone_path: str, source_roots: list) -> bool:
     clone = Path(clone_path)
 
     log(f"Running lineagelens init in {clone.name}")
-    run_cmd(["lineagelens", "init", "."], cwd=str(clone))
+    run_cmd(["lineagelens", "init", "."], cwd=str(clone), timeout=timeout)
 
     # If source_roots provided, patch the config
     if source_roots:
@@ -689,7 +719,9 @@ def run_lineagelens_init_analyze(clone_path: str, source_roots: list) -> bool:
             yaml.dump(config, f)
 
     log(f"Running lineagelens analyze in {clone.name}")
-    run_cmd(["lineagelens", "analyze", ".", "--quiet"], cwd=str(clone))
+    # Analyze can take several minutes, especially on large repos
+    analyze_timeout = max(timeout * 2, 1200)
+    run_cmd(["lineagelens", "analyze", ".", "--quiet"], cwd=str(clone), timeout=analyze_timeout)
 
     # Check for graph.json and validate it's not empty
     graph_file = clone / ".lineagelens" / "graph.json"
@@ -764,11 +796,12 @@ def main():
     # Run lineagelens init + analyze on mcp clone only
     log("Running LineageLens analysis on MCP clone", "INFO", section=True)
     source_roots = config.get("source_roots", [])
+    timeout = config.get("timeout_seconds", 900)
     if source_roots:
         log(f"Patching source_roots: {source_roots}")
     log("Initializing LineageLens configuration...")
     log("Running code graph analysis (this may take a few minutes)...")
-    success = run_lineagelens_init_analyze(mcp_clone, source_roots)
+    success = run_lineagelens_init_analyze(mcp_clone, source_roots, timeout=timeout)
 
     if not success:
         log("FAILED: Unable to generate code graph on MCP clone", "ERROR", section=True)
@@ -808,6 +841,10 @@ def main():
     # Run Claude scenarios
     log("Claude Analysis Phase - Running both scenarios", "INFO", section=True)
 
+    # Create results directory for transcripts
+    results_dir = Path(config["work_dir"]) / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     results = []
 
     # Scenario A: MCP-only
@@ -817,7 +854,8 @@ def main():
         mcp_prompt,
         config["work_dir"],
         config,
-        mcp_clone_path=mcp_clone
+        mcp_clone_path=mcp_clone,
+        results_dir=str(results_dir)
     )
     if not mcp_result:
         log("FAILED: MCP scenario did not complete", "ERROR")
@@ -830,7 +868,8 @@ def main():
         "baseline",
         baseline_prompt,
         nonmcp_clone,
-        config
+        config,
+        results_dir=str(results_dir)
     )
     if not baseline_result:
         log("FAILED: Baseline scenario did not complete", "ERROR")

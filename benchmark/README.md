@@ -76,15 +76,18 @@ This will:
 - **Empty graph guard**: If the MCP clone produces <20 symbols, fails loudly with remediation hints
 - **Source roots awareness**: Patches `lineagelens.yaml` if your repo isn't in `src/`
 - **Tool call verification**: Logs every command before running it
+- **Transcript auditing**: Raw `stream-json` output from both scenarios is always persisted to `results/` for complete tool-call traceability (useful for verifying MCP scenario never reads source files)
 
 ### Auditable Output
 
-All results stored in `<work_dir>/<repo>_pr<N>/`:
+All results stored under `<work_dir>/`:
 
-- `summary.md` — Human-readable comparison (cost, tokens, accuracy)
-- `summary.json` — Machine-readable metrics
-- `mcptest/` — Full MCP clone (input to Scenario A)
-- `nonmcp_test/` — Full baseline clone (input to Scenario B)
+- `results/summary.md` — Human-readable comparison (cost, tokens, accuracy)
+- `results/summary.json` — Machine-readable metrics
+- `results/mcp_stream.jsonl` — Raw stream-json transcript from MCP scenario (all tool calls logged)
+- `results/baseline_stream.jsonl` — Raw stream-json transcript from baseline scenario
+- `mcptest/` — Full MCP clone at PR base commit (input to Scenario A)
+- `nonmcp_test/` — Full baseline clone at PR base commit (input to Scenario B)
 
 ## Common Issues
 
@@ -179,13 +182,15 @@ Then manually average the results from each `summary.json`.
 
 ## Cost & Time Estimates
 
-- **Clone time**: 1-3 min per repo (depends on size)
+- **Clone time**: 1-3 min per repo (depends on size; langchain ~2GB = 1-2 min)
 - **LineageLens analyze**: 30s - 5min (depends on language/size)
 - **Claude MCP call**: 1-2 min (depends on budget_usd and model)
 - **Claude Baseline call**: 2-5 min (larger input context)
-- **Total**: ~10-20 min per benchmark run
+- **Total**: ~10-20 min per benchmark run (local + API latency)
 
 **Cost**: ~$3-5 per full run on a medium repo (depends on model choice and budget_usd cap)
+
+**Timeouts**: Script defaults to 30 min (1800s) for git clone and analyze operations, adjustable via `timeout_seconds` in config. Raw stream-json transcripts are always persisted to disk for debugging, even if the run times out or partially fails.
 
 ## Next Steps
 
