@@ -2,7 +2,7 @@ export const SCHEMA_VERSION = 2;
 
 export interface Evidence {
   tier: "deterministic_fact" | "deterministic_heuristic" | "probabilistic";
-  label: str;
+  label: string;
   confidence?: number | null;
 }
 

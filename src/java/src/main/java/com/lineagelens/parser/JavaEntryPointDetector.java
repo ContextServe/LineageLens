@@ -41,49 +41,39 @@ public class JavaEntryPointDetector {
             entryKinds.add("main_module");
         }
 
-        // Check annotations
+        // Check annotations directly from AST modifiers & resolved bindings
+        List<String> annotationNames = new ArrayList<>();
+
         IMethodBinding methodBinding = node.resolveBinding();
         if (methodBinding != null) {
             for (IAnnotationBinding annotation : methodBinding.getAnnotations()) {
-                String name = annotation.getName();
-                if (API_ROUTE_ANNOTATIONS.contains(name)) {
-                    entryKinds.add("api_route");
-                }
-                if (TEST_ANNOTATIONS.contains(name)) {
-                    entryKinds.add("test");
-                }
-                if (TEST_FIXTURE_ANNOTATIONS.contains(name)) {
-                    entryKinds.add("test_fixture");
-                }
-                if (TASK_ANNOTATIONS.contains(name)) {
-                    entryKinds.add("task");
-                }
-                if (CALLBACK_ANNOTATIONS.contains(name)) {
-                    entryKinds.add("framework_callback");
-                }
+                annotationNames.add(annotation.getName());
             }
-        } else {
-            // Fallback: check AST annotation names directly if bindings are unavailable
-            for (Object modifierObj : node.modifiers()) {
-                if (modifierObj instanceof org.eclipse.jdt.core.dom.Annotation ann) {
-                    String name = ann.getTypeName().getFullyQualifiedName();
-                    String simpleName = name.contains(".") ? name.substring(name.lastIndexOf('.') + 1) : name;
-                    if (API_ROUTE_ANNOTATIONS.contains(simpleName) && !entryKinds.contains("api_route")) {
-                        entryKinds.add("api_route");
-                    }
-                    if (TEST_ANNOTATIONS.contains(simpleName) && !entryKinds.contains("test")) {
-                        entryKinds.add("test");
-                    }
-                    if (TEST_FIXTURE_ANNOTATIONS.contains(simpleName) && !entryKinds.contains("test_fixture")) {
-                        entryKinds.add("test_fixture");
-                    }
-                    if (TASK_ANNOTATIONS.contains(simpleName) && !entryKinds.contains("task")) {
-                        entryKinds.add("task");
-                    }
-                    if (CALLBACK_ANNOTATIONS.contains(simpleName) && !entryKinds.contains("framework_callback")) {
-                        entryKinds.add("framework_callback");
-                    }
-                }
+        }
+
+        for (Object modifierObj : node.modifiers()) {
+            if (modifierObj instanceof org.eclipse.jdt.core.dom.Annotation ann) {
+                String name = ann.getTypeName().getFullyQualifiedName();
+                String simpleName = name.contains(".") ? name.substring(name.lastIndexOf('.') + 1) : name;
+                annotationNames.add(simpleName);
+            }
+        }
+
+        for (String name : annotationNames) {
+            if (API_ROUTE_ANNOTATIONS.contains(name) && !entryKinds.contains("api_route")) {
+                entryKinds.add("api_route");
+            }
+            if (TEST_ANNOTATIONS.contains(name) && !entryKinds.contains("test")) {
+                entryKinds.add("test");
+            }
+            if (TEST_FIXTURE_ANNOTATIONS.contains(name) && !entryKinds.contains("test_fixture")) {
+                entryKinds.add("test_fixture");
+            }
+            if (TASK_ANNOTATIONS.contains(name) && !entryKinds.contains("task")) {
+                entryKinds.add("task");
+            }
+            if (CALLBACK_ANNOTATIONS.contains(name) && !entryKinds.contains("framework_callback")) {
+                entryKinds.add("framework_callback");
             }
         }
 
