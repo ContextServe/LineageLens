@@ -13,18 +13,13 @@ import picocli.CommandLine.Command;
 public class Application implements Runnable {
 
     public static void main(String[] args) {
-        if (args.length > 0 && !args[0].startsWith("-") && !"analyze".equals(args[0]) && !"--help".equals(args[0]) && !"-h".equals(args[0])) {
-            // Default sub-command to analyze if directory path is passed directly
-            String[] newArgs = new String[args.length + 1];
-            newArgs[0] = "analyze";
-            System.arraycopy(args, 0, newArgs, 1, args.length);
-            args = newArgs;
-        } else if (args.length == 0) {
+        if (args.length == 0) {
             args = new String[]{"analyze", "."};
         }
-
         int exitCode = PicocliRunner.execute(Application.class, args);
-        System.exit(exitCode);
+        if (exitCode != 0 && !"true".equals(System.getProperty("lineagelens.test"))) {
+            System.exit(exitCode);
+        }
     }
 
     @Override
