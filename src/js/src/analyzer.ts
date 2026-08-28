@@ -305,21 +305,29 @@ export class JsAstAnalyzer {
       return expr.getText(sf).replace(/^@/, "");
     };
 
-    if (ts.canHaveDecorators(node)) {
+    const anyNode = node as any;
+
+    if (typeof ts.canHaveDecorators === "function" && ts.canHaveDecorators(node)) {
       const decs = ts.getDecorators(node);
       if (decs) {
         for (const dec of decs) {
           decorators.push(extractName(dec.expression));
         }
       }
+    } else if (anyNode.decorators) {
+      for (const dec of anyNode.decorators) {
+        decorators.push(extractName(dec.expression));
+      }
     }
-    if (node.modifiers) {
-      for (const mod of node.modifiers) {
-        if (ts.isDecorator(mod)) {
-          decorators.push(extractName(mod.expression));
+
+    if (anyNode.modifiers) {
+      for (const mod of anyNode.modifiers) {
+        if (ts.isDecorator(mod as any)) {
+          decorators.push(extractName((mod as any).expression));
         }
       }
     }
+
     return Array.from(new Set(decorators));
   }
 }
