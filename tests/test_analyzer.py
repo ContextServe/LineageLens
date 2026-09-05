@@ -85,3 +85,119 @@ def test_config_roundtrip_yaml(tmp_path):
     assert config.output.directory == ".artifacts"
     assert config.output.filename == "graph.json"
     assert config.server.port == 9000
+
+
+def test_python_method_local_variables_extraction():
+    """Test that local variables within methods are extracted with type information."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "src" / "app"
+        source.mkdir(parents=True)
+        (source / "utils.py").write_text(
+            """class Calculator:
+    def compute(self, a: int, b: int) -> int:
+        sum_val = a + b
+        product = a * b
+        result = sum_val + product
+        return result
+
+    def process_data(self):
+        items: list[str] = []
+        temp = "data"
+        count = 0
+        items.append(temp)
+        return items
+
+def standalone_func(x):
+    y = x * 2
+    z: str = "hello"
+    return y + len(z)
+"""
+        )
+        graph, _ = analyze(root, ProjectConfig(source_roots=("src",), test_roots=(), script_roots=()))
+
+        # Check compute method
+        compute_method = graph.symbols["app.utils.Calculator.compute"]
+        assert compute_method is not None
+        assert compute_method.kind == "method"
+        assert len(compute_method.locals) > 0, "compute() should have extracted local variables"
+
+        # Verify local variable names
+        local_names = {local["name"] for local in compute_method.locals}
+        assert "sum_val" in local_names, "Local variable 'sum_val' should be captured"
+        assert "product" in local_names, "Local variable 'product' should be captured"
+        assert "result" in local_names, "Local variable 'result' should be captured"
+
+        # Verify type information (complex expressions may infer as unknown)
+        sum_val_local = next((l for l in compute_method.locals if l["name"] == "sum_val"), None)
+        assert sum_val_local is not None
+        # Type inference for complex expressions may result in "unknown", which is acceptable
+        assert sum_val_local["type"] in ("int", "unknown"), f"sum_val type should be int or unknown, got {sum_val_local['type']}"
+
+        # Check process_data method
+        process_method = graph.symbols["app.utils.Calculator.process_data"]
+        assert process_method is not None
+        assert len(process_method.locals) > 0, "process_data() should have extracted local variables"
+
+        local_names_2 = {local["name"] for local in process_method.locals}
+        assert "items" in local_names_2, "Local variable 'items' should be captured"
+        assert "temp" in local_names_2, "Local variable 'temp' should be captured"
+        assert "count" in local_names_2, "Local variable 'count' should be captured"
+
+        # Verify type annotation was captured
+        items_local = next((l for l in process_method.locals if l["name"] == "items"), None)
+        assert items_local is not None
+        assert "list" in items_local["type"], f"items should have list type, got {items_local['type']}"
+
+        # Check standalone function
+        standalone_func = graph.symbols["app.utils.standalone_func"]
+        assert standalone_func is not None
+        assert len(standalone_func.locals) > 0, "standalone_func() should have extracted local variables"
+
+        standalone_locals = {l["name"] for l in standalone_func.locals}
+        assert "y" in standalone_locals, "Local variable 'y' should be captured"
+        assert "z" in standalone_locals, "Local variable 'z' should be captured"
+
+        # Check that z has type annotation
+        z_local = next((l for l in standalone_func.locals if l["name"] == "z"), None)
+        assert z_local is not None
+        assert z_local["type"] == "str", f"z should be str, got {z_local['type']}"
+
+
+def test_python_nested_function_scope_isolation():
+    """Test that nested function variables are NOT extracted as outer function locals (scope isolation)."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "src" / "app"
+        source.mkdir(parents=True)
+        (source / "scope_test.py").write_text(
+            """def outer():
+    x = 1  # outer local
+    def inner():
+        y = 2  # inner local (should NOT be in outer.locals)
+    z = 3  # outer local
+    return x + z
+
+def with_class():
+    a = 1  # with_class local
+    class Inner:
+        b = 2  # class attribute (should NOT be in with_class.locals)
+    c = 3
+    return a + c
+"""
+        )
+        graph, _ = analyze(root, ProjectConfig(source_roots=("src",), test_roots=(), script_roots=()))
+
+        # Check outer function
+        outer_func = graph.symbols["app.scope_test.outer"]
+        outer_locals = {l["name"] for l in outer_func.locals}
+        assert "x" in outer_locals, "Outer local 'x' should be extracted"
+        assert "z" in outer_locals, "Outer local 'z' should be extracted"
+        assert "y" not in outer_locals, "Inner local 'y' should NOT be in outer's locals (scope violation)"
+
+        # Check with_class function
+        with_class_func = graph.symbols["app.scope_test.with_class"]
+        with_class_locals = {l["name"] for l in with_class_func.locals}
+        assert "a" in with_class_locals, "Local 'a' should be extracted"
+        assert "c" in with_class_locals, "Local 'c' should be extracted"
+        assert "b" not in with_class_locals, "Class attribute 'b' should NOT be in with_class's locals (scope violation)"

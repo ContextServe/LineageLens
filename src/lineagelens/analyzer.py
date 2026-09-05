@@ -261,6 +261,64 @@ def _annotated_parameters(
     return params
 
 
+def _extract_locals(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[dict]:
+    """Extract local variables from a function/method body.
+
+    Returns a list of dicts with keys: name, type, line, kind
+    Only extracts from direct body statements, respecting scope boundaries.
+    Does NOT traverse nested functions, classes, or comprehensions.
+    """
+    locals_list = []
+
+    # Only iterate direct body statements (respects scope boundaries)
+    for stmt in node.body:
+        # Handle annotated assignments: x: int = 5
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            local_name = stmt.target.id
+            type_str = expression(stmt.annotation) if stmt.annotation else "unknown"
+            line = stmt.lineno if hasattr(stmt, 'lineno') else 0
+            locals_list.append({
+                "name": local_name,
+                "type": type_str,
+                "line": line,
+                "kind": "local"
+            })
+        # Handle regular assignments: x = 5
+        elif isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    local_name = target.id
+                    # Infer type from the value
+                    type_str = infer(stmt.value)
+                    line = stmt.lineno if hasattr(stmt, 'lineno') else 0
+                    locals_list.append({
+                        "name": local_name,
+                        "type": type_str,
+                        "line": line,
+                        "kind": "local"
+                    })
+        # Handle for loops: for x in items:
+        elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+            if isinstance(stmt.target, ast.Name):
+                local_name = stmt.target.id
+                # Infer element type, not container type
+                # For now, just mark as unknown since we can't easily infer element types
+                line = stmt.lineno if hasattr(stmt, 'lineno') else 0
+                locals_list.append({
+                    "name": local_name,
+                    "type": "unknown",  # Loop variable type inference is complex
+                    "line": line,
+                    "kind": "local"
+                })
+
+    # Deduplicate by name, keeping the last occurrence (Python scoping semantics)
+    seen = {}
+    for local in locals_list:
+        seen[local["name"]] = local
+
+    return list(seen.values())
+
+
 def _self_attr_assignment(stmt: ast.AST) -> tuple[str | None, ast.AST | None, ast.AST | None]:
     """Match self.attr assignment; return (attr_name, annotation, rhs) or (None, None, None)."""
     if isinstance(stmt, ast.Assign):
@@ -482,6 +540,7 @@ class Definitions(ast.NodeVisitor):
             inputs=inputs,
             outputs=[{"type": expression(node.returns) if node.returns else "unknown", "evidence": "annotation"}],
             decorators=[dotted(item) or expression(item) for item in node.decorator_list],
+            locals=_extract_locals(node),  # Extract local variables from method/function body
         )
         self.graph.add_symbol(symbol)
         self._register_child(symbol)

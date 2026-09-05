@@ -72,6 +72,12 @@ public class Symbol {
     @JsonProperty("final_")
     private boolean final_ = false;
 
+    @JsonProperty("locals")
+    private List<Map<String, Object>> locals = new ArrayList<>();  // Method-level variables
+
+    @JsonProperty("fields")
+    private List<Map<String, Object>> fields = new ArrayList<>();  // Class-level fields/attributes
+
     public Symbol() {}
 
     public Symbol(String id, String kind, String name, String file, int line, String module, String parent) {
@@ -240,5 +246,21 @@ public class Symbol {
 
     public void setFinal(boolean isFinal) {
         this.final_ = isFinal;
+    }
+
+    public List<Map<String, Object>> getLocals() {
+        return locals;
+    }
+
+    public void setLocals(List<Map<String, Object>> locals) {
+        this.locals = locals;
+    }
+
+    public List<Map<String, Object>> getFields() {
+        return fields;
+    }
+
+    public void setFields(List<Map<String, Object>> fields) {
+        this.fields = fields;
     }
 }

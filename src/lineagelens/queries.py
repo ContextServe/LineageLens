@@ -123,6 +123,8 @@ def load_graph(project: Path) -> CodeGraph:
             visibility=s_raw.get("visibility"),
             static_=s_raw.get("static_", False),
             final_=s_raw.get("final_", False),
+            locals=s_raw.get("locals", []),
+            fields=s_raw.get("fields", []),
         )
         graph.add_symbol(symbol)
 
