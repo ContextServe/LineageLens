@@ -119,6 +119,10 @@ def load_graph(project: Path) -> CodeGraph:
                 )
                 for sig in s_raw.get("resiliency", [])
             ],
+            type_=s_raw.get("type_"),
+            visibility=s_raw.get("visibility"),
+            static_=s_raw.get("static_", False),
+            final_=s_raw.get("final_", False),
         )
         graph.add_symbol(symbol)
 
