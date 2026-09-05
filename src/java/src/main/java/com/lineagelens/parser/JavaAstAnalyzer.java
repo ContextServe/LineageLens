@@ -751,5 +751,39 @@ public class JavaAstAnalyzer {
             }
             return null;
         }
+
+        @Override
+        public boolean visit(ImportDeclaration node) {
+            // Get the import name
+            String importName = node.getName().getFullyQualifiedName();
+
+            // Determine the target based on import type
+            String targetId;
+            if (node.isOnDemand()) {
+                // Wildcard import: "import java.util.*" → target is package "java.util"
+                targetId = importName;
+            } else if (node.isStatic()) {
+                // Static import: "import static java.util.Collections.emptyList" → keep full path
+                targetId = importName;
+            } else {
+                // Regular import: "import java.util.List" → keep full path
+                targetId = importName;
+            }
+
+            // Get the source package from the compilation unit
+            PackageDeclaration pkgDecl = cu.getPackage();
+            String sourcePackage = pkgDecl != null ? pkgDecl.getName().getFullyQualifiedName() : "";
+
+            // Create IMPORTS relation from the package to the imported type
+            if (!sourcePackage.isEmpty()) {
+                int line = cu.getLineNumber(node.getStartPosition());
+                Relation relation = new Relation(sourcePackage, targetId, "IMPORTS", relPath, line);
+                // Imports are typically external (standard library, 3rd-party)
+                relation.setResolution("external_or_dynamic", Evidence.heuristic("import_statement"));
+                graph.addRelation(relation);
+            }
+
+            return super.visit(node);
+        }
     }
 }
