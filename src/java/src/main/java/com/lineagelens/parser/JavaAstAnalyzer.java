@@ -8,11 +8,16 @@ import com.lineagelens.model.Symbol;
 import org.eclipse.jdt.core.JavaCore;
 import org.eclipse.jdt.core.dom.*;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 public class JavaAstAnalyzer {
@@ -66,28 +71,187 @@ public class JavaAstAnalyzer {
         return javaFiles;
     }
 
-    private Map<Path, CompilationUnit> parseCompilationUnits(List<Path> files) {
-        Map<Path, CompilationUnit> units = new HashMap<>();
+    /**
+     * Discover all Java source roots in the project.
+     * Handles Maven multi-module projects and Gradle projects.
+     */
+    private List<Path> discoverSourceRoots(Path root) throws IOException {
+        List<Path> sourceRoots = new ArrayList<>();
 
-        for (Path file : files) {
+        // Standard Maven layout: src/main/java, src/test/java
+        sourceRoots.add(root.resolve("src/main/java"));
+        sourceRoots.add(root.resolve("src/test/java"));
+
+        // Multi-module Maven: scan pom.xml for <module> entries
+        Path pomXml = root.resolve("pom.xml");
+        if (Files.exists(pomXml)) {
             try {
-                String source = Files.readString(file);
-                ASTParser parser = ASTParser.newParser(AST.JLS17);
-                parser.setSource(source.toCharArray());
-                parser.setKind(ASTParser.K_COMPILATION_UNIT);
-                parser.setResolveBindings(true);
-                parser.setBindingsRecovery(true);
-
-                Map<String, String> options = JavaCore.getOptions();
-                options.put(JavaCore.COMPILER_SOURCE, JavaCore.VERSION_17);
-                parser.setCompilerOptions(options);
-
-                CompilationUnit cu = (CompilationUnit) parser.createAST(null);
-                units.put(file, cu);
+                String pomContent = Files.readString(pomXml);
+                Pattern modulePattern = Pattern.compile("<module>([^<]+)</module>");
+                Matcher m = modulePattern.matcher(pomContent);
+                while (m.find()) {
+                    Path modulePath = root.resolve(m.group(1)).normalize();
+                    sourceRoots.add(modulePath.resolve("src/main/java"));
+                    sourceRoots.add(modulePath.resolve("src/test/java"));
+                }
             } catch (Exception e) {
-                System.err.println("Failed to parse Java file " + file + ": " + e.getMessage());
+                System.err.println("Warning: Failed to parse pom.xml for modules: " + e.getMessage());
             }
         }
+
+        // Gradle: scan build.gradle (simplified - assume standard layout)
+        Path buildGradle = root.resolve("build.gradle");
+        if (Files.exists(buildGradle)) {
+            // For now, we rely on standard layout discovery above
+            // Full Gradle parsing is complex and can be enhanced later
+        }
+
+        // Filter to only existing directories and return unique paths
+        return sourceRoots.stream()
+            .filter(Files::isDirectory)
+            .map(Path::normalize)
+            .distinct()
+            .toList();
+    }
+
+    /**
+     * Resolve classpath jars with best-effort strategy.
+     * First tries Maven, then Gradle cache, then falls back gracefully.
+     */
+    private List<Path> resolveClasspath(Path root) {
+        List<Path> classpath = new ArrayList<>();
+
+        // Try Maven dependency:build-classpath
+        Path pomXml = root.resolve("pom.xml");
+        if (Files.exists(pomXml)) {
+            try {
+                Process p = Runtime.getRuntime().exec(new String[]{
+                    "mvn", "dependency:build-classpath",
+                    "-DincludeScope=compile",
+                    "-q", "-f", pomXml.toAbsolutePath().toString()
+                });
+                BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                String line = br.readLine();
+                if (line != null && !line.trim().isEmpty()) {
+                    for (String jarPath : line.split(File.pathSeparator)) {
+                        Path jar = Paths.get(jarPath);
+                        if (Files.exists(jar)) {
+                            classpath.add(jar);
+                        }
+                    }
+                }
+                int exitCode = p.waitFor();
+                if (classpath.isEmpty() && exitCode == 0) {
+                    System.err.println("Warning: mvn dependency:build-classpath returned no jars");
+                } else if (!classpath.isEmpty()) {
+                    System.err.println("Resolved " + classpath.size() + " classpath jars via Maven");
+                    return classpath;
+                }
+            } catch (Exception e) {
+                System.err.println("Warning: Maven classpath resolution failed: " + e.getMessage());
+            }
+        }
+
+        // Try Gradle cache (basic heuristic)
+        Path gradleHome = Paths.get(System.getProperty("user.home"), ".gradle", "caches", "modules-2", "files-2.1");
+        if (Files.isDirectory(gradleHome)) {
+            try (Stream<Path> stream = Files.walk(gradleHome, 3)) {
+                stream.filter(p -> p.toString().endsWith(".jar"))
+                      .limit(100)  // Limit scan to avoid performance issues
+                      .forEach(classpath::add);
+            } catch (Exception e) {
+                System.err.println("Warning: Gradle cache scan failed: " + e.getMessage());
+            }
+        }
+
+        // If classpath is still empty, warn but don't fail
+        if (classpath.isEmpty()) {
+            System.err.println("Warning: Could not resolve classpath; will use sourcepath-only mode");
+        } else {
+            System.err.println("Resolved " + classpath.size() + " classpath entries");
+        }
+
+        return classpath;
+    }
+
+    private Map<Path, CompilationUnit> parseCompilationUnits(List<Path> files) throws IOException {
+        Map<Path, CompilationUnit> units = new HashMap<>();
+
+        if (files.isEmpty()) {
+            return units;
+        }
+
+        // Discover sourcepath and classpath
+        List<Path> sourcepathEntries = discoverSourceRoots(projectRoot);
+        List<Path> classpath = resolveClasspath(projectRoot);
+
+        System.err.println("Parsing " + files.size() + " files with "
+            + sourcepathEntries.size() + " source roots and "
+            + classpath.size() + " classpath entries");
+
+        // Convert to arrays for JDT API
+        String[] sourceFilePaths = files.stream()
+            .map(p -> p.toAbsolutePath().toString())
+            .toArray(String[]::new);
+
+        String[] sourcepaths = sourcepathEntries.stream()
+            .map(p -> p.toAbsolutePath().toString())
+            .toArray(String[]::new);
+
+        String[] classpaths = classpath.stream()
+            .map(p -> p.toAbsolutePath().toString())
+            .toArray(String[]::new);
+
+        // Set up compiler options
+        Map<String, String> options = JavaCore.getOptions();
+        options.put(JavaCore.COMPILER_SOURCE, JavaCore.VERSION_17);
+        options.put(JavaCore.COMPILER_COMPLIANCE, JavaCore.VERSION_17);
+
+        // Prepare parser
+        ASTParser parser = ASTParser.newParser(AST.JLS17);
+        parser.setKind(ASTParser.K_COMPILATION_UNIT);
+        parser.setResolveBindings(true);
+        parser.setBindingsRecovery(true);
+        parser.setIgnoreMethodBodies(false);
+        parser.setCompilerOptions(options);
+
+        // Set environment (critical for cross-file binding)
+        parser.setEnvironment(classpaths, sourcepaths, null, true);
+
+        // Batch parse via FileASTRequestor callback
+        FileASTRequestor requestor = new FileASTRequestor() {
+            @Override
+            public void acceptAST(String sourceFilePath, CompilationUnit cu) {
+                Path path = Paths.get(sourceFilePath);
+                units.put(path, cu);
+            }
+        };
+
+        try {
+            parser.createASTs(sourceFilePaths, null, new String[0], requestor, null);
+        } catch (Exception e) {
+            System.err.println("Warning: Batch parsing failed: " + e.getMessage());
+            System.err.println("Falling back to per-file parsing for robustness");
+
+            // Fallback: per-file parsing (old behavior) for robustness
+            for (Path file : files) {
+                try {
+                    String source = Files.readString(file);
+                    ASTParser fallbackParser = ASTParser.newParser(AST.JLS17);
+                    fallbackParser.setSource(source.toCharArray());
+                    fallbackParser.setKind(ASTParser.K_COMPILATION_UNIT);
+                    fallbackParser.setResolveBindings(true);
+                    fallbackParser.setBindingsRecovery(true);
+                    fallbackParser.setCompilerOptions(options);
+
+                    CompilationUnit cu = (CompilationUnit) fallbackParser.createAST(null);
+                    units.put(file, cu);
+                } catch (Exception e2) {
+                    System.err.println("Failed to parse Java file " + file + ": " + e2.getMessage());
+                }
+            }
+        }
+
         return units;
     }
 
@@ -310,7 +474,9 @@ public class JavaAstAnalyzer {
                         String targetClassId = findSymbolIdByName(baseName);
                         if (targetClassId != null && graph.getSymbol(targetClassId) != null) {
                             int line = cu.getLineNumber(node.getStartPosition());
-                            graph.addRelation(new Relation(fullId, targetClassId, "INHERITS", relPath, line));
+                            Relation relation = new Relation(fullId, targetClassId, "INHERITS", relPath, line);
+                            relation.setResolution("resolved", Evidence.fact("jdt_binding_resolution"));
+                            graph.addRelation(relation);
                         }
                     }
                 }
@@ -348,7 +514,9 @@ public class JavaAstAnalyzer {
                                 String targetMethodId = baseClassId + "." + methodName;
                                 if (graph.getSymbol(targetMethodId) != null) {
                                     int line = cu.getLineNumber(node.getStartPosition());
-                                    graph.addRelation(new Relation(methodId, targetMethodId, "OVERRIDES", relPath, line));
+                                    Relation relation = new Relation(methodId, targetMethodId, "OVERRIDES", relPath, line);
+                                    relation.setResolution("resolved", Evidence.fact("jdt_binding_resolution"));
+                                    graph.addRelation(relation);
                                 }
                             }
                         }
@@ -392,6 +560,9 @@ public class JavaAstAnalyzer {
                     Relation relation = new Relation(currentMethodId, targetMethodId, kind, relPath, line);
                     if (binding == null) {
                         relation.setResolution("resolved_via_inference", Evidence.heuristic("name_matching"));
+                    } else {
+                        // Binding resolved via JDT's cross-file/cross-module mechanism
+                        relation.setResolution("resolved", Evidence.fact("jdt_binding_resolution"));
                     }
                     graph.addRelation(relation);
                 }
