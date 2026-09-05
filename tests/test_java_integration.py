@@ -666,5 +666,156 @@ public class UserController {
                                    f"Framework annotation {rel.target} should be external_or_dynamic")
 
 
+    def test_method_locals_nested_blocks(self):
+        """Test that local variables in nested blocks (if/for/try) are captured."""
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            tmp_path = Path(tmp_dir_str)
+
+            java_src_dir = tmp_path / "src" / "main" / "java" / "com" / "example" / "blocks"
+            java_src_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create a class with methods containing nested blocks
+            blocks_file = java_src_dir / "BlocksTest.java"
+            blocks_file.write_text(
+                """package com.example.blocks;
+
+public class BlocksTest {
+    public void methodWithNestedBlocks() {
+        int x = 0;
+        if (x > 0) {
+            int y = 1;  // variable in if block
+        }
+        for (int i = 0; i < 10; i++) {
+            int loopLocal = i * 2;  // variable in for block
+        }
+        try {
+            int z = 2;  // variable in try block
+        } catch (Exception e) {
+            int catchLocal = 3;  // variable in catch block
+        }
+    }
+
+    public void simpleLoop() {
+        for (int j = 0; j < 5; j++) {
+            String item = "value";
+        }
+    }
+}
+""",
+                encoding="utf-8",
+            )
+
+            # Build and analyze
+            graph_file, _, _ = build(tmp_path, quiet=True)
+            graph = load_graph(tmp_path)
+
+            # Get the method with nested blocks
+            method_sym = get_symbol(graph, "com.example.blocks.BlocksTest.methodWithNestedBlocks")
+            self.assertIsNotNone(method_sym)
+            self.assertGreater(len(method_sym.locals), 0, "Should capture variables from all nested blocks")
+
+            # Verify variables are captured
+            local_names = {l["name"] for l in method_sym.locals}
+            self.assertIn("x", local_names, "Top-level local 'x' should be captured")
+            self.assertIn("y", local_names, "Local 'y' in if block should be captured")
+            self.assertIn("i", local_names, "Loop variable 'i' should be captured")
+            self.assertIn("loopLocal", local_names, "Local 'loopLocal' in for block should be captured")
+            self.assertIn("z", local_names, "Local 'z' in try block should be captured")
+            self.assertIn("e", local_names, "Catch parameter 'e' should be captured")
+            self.assertIn("catchLocal", local_names, "Local 'catchLocal' in catch block should be captured")
+
+            # Check simple loop method
+            simple_loop_sym = get_symbol(graph, "com.example.blocks.BlocksTest.simpleLoop")
+            self.assertIsNotNone(simple_loop_sym)
+            simple_loop_locals = {l["name"] for l in simple_loop_sym.locals}
+            self.assertIn("j", simple_loop_locals, "Loop variable 'j' should be captured")
+            self.assertIn("item", simple_loop_locals, "Local 'item' in for block should be captured")
+
+    def test_method_local_variables_extraction(self):
+        """Test that local variables within methods are captured with type information."""
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            tmp_path = Path(tmp_dir_str)
+
+            java_src_dir = tmp_path / "src" / "main" / "java" / "com" / "example" / "util"
+            java_src_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create a class with methods containing local variables
+            calc_file = java_src_dir / "Calculator.java"
+            calc_file.write_text(
+                """package com.example.util;
+
+import java.util.List;
+import java.util.ArrayList;
+
+public class Calculator {
+    public int compute(int a, int b) {
+        int sum = a + b;
+        int product = a * b;
+        int result = sum + product;
+        return result;
+    }
+
+    public List<String> processData() {
+        List<String> items = new ArrayList<>();
+        String temp = "data";
+        int count = 0;
+        items.add(temp);
+        return items;
+    }
+}
+""",
+                encoding="utf-8",
+            )
+
+            # Build and analyze
+            graph_file, _, _ = build(tmp_path, quiet=True)
+            graph = load_graph(tmp_path)
+
+            # Verify class symbol
+            calc_class = get_symbol(graph, "com.example.util.Calculator")
+            self.assertIsNotNone(calc_class)
+
+            # Get the compute method
+            compute_method = get_symbol(graph, "com.example.util.Calculator.compute")
+            self.assertIsNotNone(compute_method)
+            self.assertEqual(compute_method.kind, "method")
+
+            # Check that local variables were extracted
+            self.assertIsNotNone(compute_method.locals, "Method should have locals list")
+            self.assertGreater(len(compute_method.locals), 0, "compute() should have extracted local variables")
+
+            # Verify local variable information
+            local_names = {local["name"] for local in compute_method.locals}
+            self.assertIn("sum", local_names, "Local variable 'sum' should be captured")
+            self.assertIn("product", local_names, "Local variable 'product' should be captured")
+            self.assertIn("result", local_names, "Local variable 'result' should be captured")
+
+            # Verify type information
+            sum_local = next((l for l in compute_method.locals if l["name"] == "sum"), None)
+            self.assertIsNotNone(sum_local)
+            self.assertIn("int", sum_local["type"], f"sum should have int type, got {sum_local['type']}")
+
+            # Get the processData method with generic types
+            process_method = get_symbol(graph, "com.example.util.Calculator.processData")
+            self.assertIsNotNone(process_method)
+
+            # Check locals for processData
+            self.assertGreater(len(process_method.locals), 0, "processData() should have extracted local variables")
+
+            local_names_2 = {local["name"] for local in process_method.locals}
+            self.assertIn("items", local_names_2, "Local variable 'items' should be captured")
+            self.assertIn("temp", local_names_2, "Local variable 'temp' should be captured")
+            self.assertIn("count", local_names_2, "Local variable 'count' should be captured")
+
+            # Verify type information for generic type
+            items_local = next((l for l in process_method.locals if l["name"] == "items"), None)
+            self.assertIsNotNone(items_local)
+            # Type should be either java.util.ArrayList or java.util.List
+            self.assertTrue(
+                "ArrayList" in items_local["type"] or "List" in items_local["type"],
+                f"items should be a List type, got {items_local['type']}"
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

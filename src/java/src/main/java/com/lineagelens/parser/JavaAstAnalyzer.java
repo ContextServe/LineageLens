@@ -488,6 +488,9 @@ public class JavaAstAnalyzer {
                 symbol.markEntryPoint(entryKind);
             }
 
+            // Extract local variables from method body
+            extractMethodLocals(node, symbol);
+
             graph.addSymbol(symbol);
             scopeStack.push(methodId);
             return super.visit(node);
@@ -499,6 +502,172 @@ public class JavaAstAnalyzer {
                 scopeStack.pop();
             }
             super.endVisit(node);
+        }
+
+        private void extractMethodLocals(MethodDeclaration method, Symbol methodSymbol) {
+            // Extract local variables declared within the method body
+            Block body = method.getBody();
+            if (body == null) return;
+
+            // Recursively collect variables from all nested blocks
+            extractLocalsFromBlock(body, methodSymbol);
+        }
+
+        private void extractLocalsFromBlock(Block block, Symbol methodSymbol) {
+            // Recursively traverse block statements to capture locals at all nesting levels
+            for (Object stmt : block.statements()) {
+                if (stmt instanceof VariableDeclarationStatement varStmt) {
+                    for (Object fragObj : varStmt.fragments()) {
+                        if (fragObj instanceof VariableDeclarationFragment frag) {
+                            String varName = frag.getName().getIdentifier();
+
+                            // Resolve type
+                            ITypeBinding typeBinding = null;
+                            if (frag.getInitializer() != null) {
+                                typeBinding = frag.getInitializer().resolveTypeBinding();
+                            }
+                            if (typeBinding == null) {
+                                typeBinding = varStmt.getType().resolveBinding();
+                            }
+
+                            String typeStr = typeBinding != null ?
+                                typeBinding.getQualifiedName() :
+                                varStmt.getType().toString();
+
+                            int line = cu.getLineNumber(varStmt.getStartPosition());
+
+                            // Add to locals list as a map
+                            Map<String, Object> local = new HashMap<>();
+                            local.put("name", varName);
+                            local.put("type", typeStr);
+                            local.put("line", line);
+                            local.put("kind", "local");
+
+                            methodSymbol.getLocals().add(local);
+                        }
+                    }
+                }
+                // Recursively handle nested blocks: if/else, for, while, try/catch
+                else if (stmt instanceof IfStatement ifStmt) {
+                    if (ifStmt.getThenStatement() instanceof Block thenBlock) {
+                        extractLocalsFromBlock(thenBlock, methodSymbol);
+                    }
+                    if (ifStmt.getElseStatement() instanceof Block elseBlock) {
+                        extractLocalsFromBlock(elseBlock, methodSymbol);
+                    }
+                }
+                else if (stmt instanceof ForStatement forStmt) {
+                    // Handle for loop variable
+                    if (forStmt.initializers() != null) {
+                        for (Object init : forStmt.initializers()) {
+                            if (init instanceof VariableDeclarationExpression varDeclExpr) {
+                                for (Object fragObj : varDeclExpr.fragments()) {
+                                    if (fragObj instanceof VariableDeclarationFragment frag) {
+                                        extractVariableLocal(frag, varDeclExpr.getType(), methodSymbol);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Recursively handle for body
+                    if (forStmt.getBody() instanceof Block forBody) {
+                        extractLocalsFromBlock(forBody, methodSymbol);
+                    }
+                }
+                else if (stmt instanceof EnhancedForStatement enhancedFor) {
+                    // Handle enhanced for variable: for (Type x : items)
+                    SingleVariableDeclaration param = enhancedFor.getParameter();
+                    if (param != null) {
+                        String varName = param.getName().getIdentifier();
+                        ITypeBinding typeBinding = param.getType().resolveBinding();
+                        String typeStr = typeBinding != null ?
+                            typeBinding.getQualifiedName() :
+                            param.getType().toString();
+                        int line = cu.getLineNumber(enhancedFor.getStartPosition());
+
+                        Map<String, Object> local = new HashMap<>();
+                        local.put("name", varName);
+                        local.put("type", typeStr);
+                        local.put("line", line);
+                        local.put("kind", "local");
+                        methodSymbol.getLocals().add(local);
+                    }
+                    // Recursively handle for body
+                    if (enhancedFor.getBody() instanceof Block forBody) {
+                        extractLocalsFromBlock(forBody, methodSymbol);
+                    }
+                }
+                else if (stmt instanceof WhileStatement whileStmt) {
+                    // Recursively handle while body
+                    if (whileStmt.getBody() instanceof Block whileBody) {
+                        extractLocalsFromBlock(whileBody, methodSymbol);
+                    }
+                }
+                else if (stmt instanceof DoStatement doStmt) {
+                    // Recursively handle do-while body
+                    if (doStmt.getBody() instanceof Block doBody) {
+                        extractLocalsFromBlock(doBody, methodSymbol);
+                    }
+                }
+                else if (stmt instanceof TryStatement tryStmt) {
+                    // Recursively handle try body
+                    extractLocalsFromBlock(tryStmt.getBody(), methodSymbol);
+                    // Handle catch clauses
+                    for (Object catchObj : tryStmt.catchClauses()) {
+                        if (catchObj instanceof CatchClause catchClause) {
+                            // Extract catch parameter
+                            SingleVariableDeclaration param = catchClause.getException();
+                            if (param != null) {
+                                String varName = param.getName().getIdentifier();
+                                ITypeBinding typeBinding = param.getType().resolveBinding();
+                                String typeStr = typeBinding != null ?
+                                    typeBinding.getQualifiedName() :
+                                    param.getType().toString();
+                                int line = cu.getLineNumber(catchClause.getStartPosition());
+
+                                Map<String, Object> local = new HashMap<>();
+                                local.put("name", varName);
+                                local.put("type", typeStr);
+                                local.put("line", line);
+                                local.put("kind", "local");
+                                methodSymbol.getLocals().add(local);
+                            }
+                            // Recursively handle catch body
+                            extractLocalsFromBlock(catchClause.getBody(), methodSymbol);
+                        }
+                    }
+                    // Handle finally block
+                    if (tryStmt.getFinally() != null) {
+                        extractLocalsFromBlock(tryStmt.getFinally(), methodSymbol);
+                    }
+                }
+                else if (stmt instanceof Block nestedBlock) {
+                    // Handle plain nested blocks
+                    extractLocalsFromBlock(nestedBlock, methodSymbol);
+                }
+            }
+        }
+
+        private void extractVariableLocal(VariableDeclarationFragment frag, Type type, Symbol methodSymbol) {
+            String varName = frag.getName().getIdentifier();
+            ITypeBinding typeBinding = null;
+            if (frag.getInitializer() != null) {
+                typeBinding = frag.getInitializer().resolveTypeBinding();
+            }
+            if (typeBinding == null) {
+                typeBinding = type.resolveBinding();
+            }
+            String typeStr = typeBinding != null ?
+                typeBinding.getQualifiedName() :
+                type.toString();
+            int line = cu.getLineNumber(frag.getStartPosition());
+
+            Map<String, Object> local = new HashMap<>();
+            local.put("name", varName);
+            local.put("type", typeStr);
+            local.put("line", line);
+            local.put("kind", "local");
+            methodSymbol.getLocals().add(local);
         }
 
         @Override
