@@ -13,10 +13,10 @@ Before starting a new issue:
 ## ISSUE WORKFLOW (STRICT ORDER)
 
 ### Phase 1: SPECIFICATION (Before any code)
-- [ ] Create `SPEC_ISSUE_NN.md` in project root (NOT in branch yet)
-- [ ] Document: Why, Design, Implementation Plan, Testing Strategy, Success Criteria
-- [ ] Get user approval on spec before proceeding
-- [ ] **Only after approval**: Add spec to feature branch and commit
+- [ ] Create GitHub issue #NN with specification in description
+- [ ] Document in issue: Why, Design, Implementation Plan, Testing Strategy, Success Criteria
+- [ ] Get user approval by comment/reaction in the issue
+- [ ] **Only after approval**: Create feature branch and commit code (no spec file in repo)
 
 ### Phase 2: IMPLEMENTATION
 - [ ] Branch: On `feature/issue-NN-slug`
@@ -106,16 +106,37 @@ Do NOT proceed to next phase if:
 - ❌ Code review finds critical bugs (must fix)
 - ❌ Working on main branch directly (ALWAYS use feature branch)
 
-## SPEC CHECKLIST (per issue)
+## GITHUB ISSUE SPECIFICATION TEMPLATE
 
-Each spec must include:
-- [ ] Executive Summary (why this matters)
-- [ ] Design (how to solve it)
-- [ ] Implementation Details (files, functions, logic)
-- [ ] Testing Strategy (test cases, coverage)
-- [ ] Success Criteria (what done looks like)
-- [ ] Dependencies (what issues must complete first)
-- [ ] Review Checklist (final verification before merge)
+Create issue with this structure in description:
+
+```
+## Executive Summary
+Why this matters to LineageLens
+
+## Design
+How to solve it (architecture, approach)
+
+## Implementation Details
+- Files to create/modify
+- Key functions/classes
+- Algorithm/logic
+
+## Testing Strategy
+- Test cases (list 5-10)
+- Coverage areas
+
+## Success Criteria
+- What "done" looks like
+- Metrics for success
+
+## Dependencies
+- Issues that must complete first
+- Blockers
+
+## Review Checklist
+- Items to verify before merge
+```
 
 ## TEMPLATE: Issue NN Workflow
 
