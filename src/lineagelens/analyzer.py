@@ -526,6 +526,11 @@ class Definitions(ast.NodeVisitor):
 
         parent_id = self._parent_id()
 
+        # Detect method kind metadata
+        is_constructor = node.name == "__init__"
+        is_getter = node.name.startswith("get_") or node.name.startswith("is_")
+        is_setter = node.name.startswith("set_")
+
         symbol = Symbol(
             id=self.identifier(node.name),
             kind="method" if self.scope and self.scope[-1][:1].isupper() else "function",
@@ -540,6 +545,9 @@ class Definitions(ast.NodeVisitor):
             inputs=inputs,
             outputs=[{"type": expression(node.returns) if node.returns else "unknown", "evidence": "annotation"}],
             decorators=[dotted(item) or expression(item) for item in node.decorator_list],
+            constructor=is_constructor,
+            getter=is_getter and not is_setter,
+            setter=is_setter,
             locals=_extract_locals(node),  # Extract local variables from method/function body
         )
         self.graph.add_symbol(symbol)
