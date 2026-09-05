@@ -541,6 +541,63 @@ public class Container {
             config_field = get_symbol(graph, "com.example.collections.Container.config")
             self.assertIsNotNone(config_field)
 
+    def test_imports_relations(self):
+        """Test that IMPORTS relations are emitted for import statements."""
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            tmp_path = Path(tmp_dir_str)
+
+            java_src_dir = tmp_path / "src" / "main" / "java" / "com" / "example" / "service"
+            java_src_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create a class with various imports
+            service_file = java_src_dir / "DataService.java"
+            service_file.write_text(
+                """package com.example.service;
+
+import java.util.List;
+import java.util.Map;
+import java.io.IOException;
+import java.util.*;
+import static java.util.Collections.emptyList;
+
+public class DataService {
+    public List<String> getData() throws IOException {
+        return emptyList();
+    }
+}
+""",
+                encoding="utf-8",
+            )
+
+            # Build and analyze
+            graph_file, _, _ = build(tmp_path, quiet=True)
+            graph = load_graph(tmp_path)
+
+            # Verify class symbol
+            service_class = get_symbol(graph, "com.example.service.DataService")
+            self.assertIsNotNone(service_class)
+
+            # Check for IMPORTS relations from the package
+            import_relations = [r for r in graph.relations
+                               if r.source == "com.example.service" and r.kind == "IMPORTS"]
+
+            # Should have at least 5 import relations (List, Map, IOException, *, Collections.emptyList)
+            self.assertGreaterEqual(len(import_relations), 5,
+                                   f"Expected at least 5 IMPORTS relations, found {len(import_relations)}")
+
+            # Verify specific imports exist
+            targets = {r.target for r in import_relations}
+            self.assertIn("java.util.List", targets, "List import should be present")
+            self.assertIn("java.util.Map", targets, "Map import should be present")
+            self.assertIn("java.io.IOException", targets, "IOException import should be present")
+            self.assertIn("java.util", targets, "Wildcard import should target package")
+            self.assertIn("java.util.Collections.emptyList", targets, "Static import should be present")
+
+            # Verify resolution
+            for rel in import_relations:
+                # All imports should be marked as external_or_dynamic
+                self.assertEqual(rel.resolution, "external_or_dynamic")
+
 
 if __name__ == "__main__":
     unittest.main()
