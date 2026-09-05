@@ -338,6 +338,61 @@ public class JavaAstAnalyzer {
                 graph.getContainer(packageName).addChild(fullId);
             }
 
+            // Process fields explicitly
+            for (FieldDeclaration fieldDecl : node.getFields()) {
+                for (Object fragObj : fieldDecl.fragments()) {
+                    if (fragObj instanceof VariableDeclarationFragment frag) {
+                        String fieldName = frag.getName().getIdentifier();
+                        String fieldId = fullId + "." + fieldName;
+
+                        // Resolve type
+                        ITypeBinding typeBinding = null;
+                        if (frag.getInitializer() != null) {
+                            typeBinding = frag.getInitializer().resolveTypeBinding();
+                        }
+                        if (typeBinding == null) {
+                            typeBinding = fieldDecl.getType().resolveBinding();
+                        }
+
+                        String typeStr = typeBinding != null ?
+                            typeBinding.getQualifiedName() :
+                            fieldDecl.getType().toString();
+
+                        int fieldLine = cu.getLineNumber(fieldDecl.getStartPosition());
+                        int fieldEndLine = cu.getLineNumber(fieldDecl.getStartPosition() + fieldDecl.getLength());
+
+                        Symbol fieldSymbol = new Symbol(
+                            fieldId,
+                            "field",
+                            fieldName,
+                            relPath,
+                            fieldLine,
+                            packageName,
+                            fullId
+                        );
+                        fieldSymbol.setEndLine(fieldEndLine);
+                        fieldSymbol.setType(typeStr);
+
+                        // Extract visibility modifiers
+                        int modifiers = fieldDecl.getModifiers();
+                        if (Modifier.isPublic(modifiers)) fieldSymbol.setVisibility("public");
+                        else if (Modifier.isPrivate(modifiers)) fieldSymbol.setVisibility("private");
+                        else if (Modifier.isProtected(modifiers)) fieldSymbol.setVisibility("protected");
+                        else fieldSymbol.setVisibility("package");
+
+                        fieldSymbol.setStatic(Modifier.isStatic(modifiers));
+                        fieldSymbol.setFinal(Modifier.isFinal(modifiers));
+
+                        // Javadoc if present
+                        if (fieldDecl.getJavadoc() != null) {
+                            fieldSymbol.setDescription(fieldDecl.getJavadoc().toString().trim());
+                        }
+
+                        graph.addSymbol(fieldSymbol);
+                    }
+                }
+            }
+
             scopeStack.push(fullId);
             return super.visit(node);
         }
@@ -444,6 +499,112 @@ public class JavaAstAnalyzer {
                 scopeStack.pop();
             }
             super.endVisit(node);
+        }
+
+        @Override
+        public boolean visit(FieldDeclaration node) {
+            // Only process if inside a class/enum/interface (scopeStack not empty)
+            if (scopeStack.isEmpty()) return super.visit(node);
+
+            String parentClassId = scopeStack.peek();
+            Symbol parentSymbol = graph.getSymbol(parentClassId);
+            if (parentSymbol == null) return super.visit(node);
+
+            // Each VariableDeclarationFragment in the FieldDeclaration
+            for (Object fragObj : node.fragments()) {
+                if (fragObj instanceof VariableDeclarationFragment frag) {
+                    String fieldName = frag.getName().getIdentifier();
+                    String fieldId = parentClassId + "." + fieldName;
+
+                    // Resolve type via VariableDeclarationFragment's type
+                    ITypeBinding typeBinding = null;
+                    if (frag.getInitializer() != null) {
+                        typeBinding = frag.getInitializer().resolveTypeBinding();
+                    }
+                    if (typeBinding == null) {
+                        // Try to resolve via Type binding
+                        typeBinding = node.getType().resolveBinding();
+                    }
+
+                    String typeStr = typeBinding != null ?
+                        typeBinding.getQualifiedName() :
+                        node.getType().toString();  // Fallback to AST string
+
+                    int line = cu.getLineNumber(node.getStartPosition());
+                    int endLine = cu.getLineNumber(node.getStartPosition() + node.getLength());
+
+                    Symbol fieldSymbol = new Symbol(
+                        fieldId,
+                        "field",
+                        fieldName,
+                        relPath,
+                        line,
+                        packageName,
+                        parentClassId
+                    );
+                    fieldSymbol.setEndLine(endLine);
+                    fieldSymbol.setType(typeStr);  // Store resolved type
+
+                    // Extract visibility modifiers
+                    int modifiers = node.getModifiers();
+                    if (Modifier.isPublic(modifiers)) fieldSymbol.setVisibility("public");
+                    else if (Modifier.isPrivate(modifiers)) fieldSymbol.setVisibility("private");
+                    else if (Modifier.isProtected(modifiers)) fieldSymbol.setVisibility("protected");
+                    else fieldSymbol.setVisibility("package");
+
+                    fieldSymbol.setStatic(Modifier.isStatic(modifiers));
+                    fieldSymbol.setFinal(Modifier.isFinal(modifiers));
+
+                    // Javadoc if present
+                    if (node.getJavadoc() != null) {
+                        fieldSymbol.setDescription(node.getJavadoc().toString().trim());
+                    }
+
+                    graph.addSymbol(fieldSymbol);
+                }
+            }
+
+            return super.visit(node);
+        }
+
+        @Override
+        public boolean visit(EnumConstantDeclaration node) {
+            if (scopeStack.isEmpty()) return super.visit(node);
+
+            String parentEnumId = scopeStack.peek();
+            Symbol parentEnum = graph.getSymbol(parentEnumId);
+            if (parentEnum == null) return super.visit(node);
+
+            String constantName = node.getName().getIdentifier();
+            String constantId = parentEnumId + "." + constantName;
+
+            // Enum constant type = the enum class itself
+            String typeStr = parentEnumId;
+
+            int line = cu.getLineNumber(node.getStartPosition());
+            int endLine = cu.getLineNumber(node.getStartPosition() + node.getLength());
+
+            Symbol constantSymbol = new Symbol(
+                constantId,
+                "field",  // Treat as field
+                constantName,
+                relPath,
+                line,
+                packageName,
+                parentEnumId
+            );
+            constantSymbol.setEndLine(endLine);
+            constantSymbol.setType(typeStr);
+            constantSymbol.setVisibility("public");  // Enum constants always public
+            constantSymbol.setStatic(true);          // Enum constants always static
+            constantSymbol.setFinal(true);           // Enum constants always final
+
+            if (node.getJavadoc() != null) {
+                constantSymbol.setDescription(node.getJavadoc().toString().trim());
+            }
+
+            graph.addSymbol(constantSymbol);
+            return super.visit(node);
         }
     }
 

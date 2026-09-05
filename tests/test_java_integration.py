@@ -312,6 +312,235 @@ public class SimpleClass {
             metrics = get_codebase_metrics(graph)
             self.assertGreaterEqual(metrics["total_symbols"], 3)
 
+    def test_field_declarations_simple_class(self):
+        """Test that fields are created as first-class Symbol nodes."""
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            tmp_path = Path(tmp_dir_str)
+
+            java_src_dir = tmp_path / "src" / "main" / "java" / "com" / "example" / "model"
+            java_src_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create a class with various fields
+            person_file = java_src_dir / "Person.java"
+            person_file.write_text(
+                """package com.example.model;
+
+public class Person {
+    /**
+     * The person's name
+     */
+    public String name;
+
+    private int age;
+
+    protected double salary;
+
+    static final int MAX_AGE = 150;
+}
+""",
+                encoding="utf-8",
+            )
+
+            # Build and analyze
+            graph_file, _, _ = build(tmp_path, quiet=True)
+            graph = load_graph(tmp_path)
+
+            # Verify class symbol
+            person_class = get_symbol(graph, "com.example.model.Person")
+            self.assertIsNotNone(person_class)
+            self.assertEqual(person_class.kind, "class")
+
+            # Verify field symbols
+            name_field = get_symbol(graph, "com.example.model.Person.name")
+            self.assertIsNotNone(name_field)
+            self.assertEqual(name_field.kind, "field")
+            self.assertEqual(name_field.name, "name")
+            self.assertIn("String", name_field.type_ or "")
+
+            age_field = get_symbol(graph, "com.example.model.Person.age")
+            self.assertIsNotNone(age_field)
+            self.assertEqual(age_field.kind, "field")
+            self.assertIn("int", age_field.type_ or "")
+
+            salary_field = get_symbol(graph, "com.example.model.Person.salary")
+            self.assertIsNotNone(salary_field)
+            self.assertIn("double", salary_field.type_ or "")
+
+            # Verify modifier information
+            self.assertEqual(name_field.visibility, "public")
+            self.assertEqual(age_field.visibility, "private")
+            self.assertEqual(salary_field.visibility, "protected")
+
+            max_age_field = get_symbol(graph, "com.example.model.Person.MAX_AGE")
+            self.assertIsNotNone(max_age_field)
+            self.assertTrue(max_age_field.static_)
+            self.assertTrue(max_age_field.final_)
+
+            # Verify Javadoc was captured
+            self.assertIsNotNone(name_field.description)
+            self.assertIn("name", name_field.description)
+
+    def test_enum_constants_as_fields(self):
+        """Test that enum constants are treated as field symbols."""
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            tmp_path = Path(tmp_dir_str)
+
+            java_src_dir = tmp_path / "src" / "main" / "java" / "com" / "example" / "enums"
+            java_src_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create an enum
+            status_file = java_src_dir / "Status.java"
+            status_file.write_text(
+                """package com.example.enums;
+
+public enum Status {
+    /**
+     * Active status
+     */
+    ACTIVE,
+
+    INACTIVE,
+
+    PENDING;
+}
+""",
+                encoding="utf-8",
+            )
+
+            # Build and analyze
+            graph_file, _, _ = build(tmp_path, quiet=True)
+            graph = load_graph(tmp_path)
+
+            # Verify enum symbol
+            status_enum = get_symbol(graph, "com.example.enums.Status")
+            self.assertIsNotNone(status_enum)
+            self.assertEqual(status_enum.kind, "enum")
+
+            # Verify enum constants as fields
+            active_field = get_symbol(graph, "com.example.enums.Status.ACTIVE")
+            self.assertIsNotNone(active_field)
+            self.assertEqual(active_field.kind, "field")
+            self.assertEqual(active_field.type_, "com.example.enums.Status")
+            self.assertTrue(active_field.static_)
+            self.assertTrue(active_field.final_)
+            self.assertEqual(active_field.visibility, "public")
+
+            inactive_field = get_symbol(graph, "com.example.enums.Status.INACTIVE")
+            self.assertIsNotNone(inactive_field)
+
+            pending_field = get_symbol(graph, "com.example.enums.Status.PENDING")
+            self.assertIsNotNone(pending_field)
+
+            # Verify Javadoc on ACTIVE
+            self.assertIsNotNone(active_field.description)
+
+    def test_field_types_cross_module(self):
+        """Test that field types resolve correctly across modules (post #14 classpath fix)."""
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            tmp_path = Path(tmp_dir_str)
+
+            # Module A: defines interface
+            api_src_dir = tmp_path / "api" / "src" / "main" / "java" / "com" / "example" / "api"
+            api_src_dir.mkdir(parents=True, exist_ok=True)
+
+            provider_file = api_src_dir / "Provider.java"
+            provider_file.write_text(
+                """package com.example.api;
+
+public interface Provider {
+    String provide();
+}
+""",
+                encoding="utf-8",
+            )
+
+            # Module B: uses interface as field type
+            impl_src_dir = tmp_path / "impl" / "src" / "main" / "java" / "com" / "example" / "impl"
+            impl_src_dir.mkdir(parents=True, exist_ok=True)
+
+            impl_file = impl_src_dir / "Impl.java"
+            impl_file.write_text(
+                """package com.example.impl;
+
+import com.example.api.Provider;
+
+public class Impl {
+    private Provider provider;
+}
+""",
+                encoding="utf-8",
+            )
+
+            # Build and analyze
+            graph_file, _, _ = build(tmp_path, quiet=True)
+            graph = load_graph(tmp_path)
+
+            # Verify Provider interface exists
+            provider_interface = get_symbol(graph, "com.example.api.Provider")
+            self.assertIsNotNone(provider_interface)
+
+            # Verify Impl class exists
+            impl_class = get_symbol(graph, "com.example.impl.Impl")
+            self.assertIsNotNone(impl_class)
+
+            # Verify provider field exists and has correct type (cross-module reference)
+            provider_field = get_symbol(graph, "com.example.impl.Impl.provider")
+            self.assertIsNotNone(provider_field)
+            self.assertEqual(provider_field.kind, "field")
+            self.assertEqual(provider_field.visibility, "private")
+            # Type should be resolved to the interface (thanks to #14 classpath fix)
+            self.assertIsNotNone(provider_field.type_)
+
+    def test_array_and_generic_field_types(self):
+        """Test that array and generic field types are captured."""
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            tmp_path = Path(tmp_dir_str)
+
+            java_src_dir = tmp_path / "src" / "main" / "java" / "com" / "example" / "collections"
+            java_src_dir.mkdir(parents=True, exist_ok=True)
+
+            container_file = java_src_dir / "Container.java"
+            container_file.write_text(
+                """package com.example.collections;
+
+import java.util.List;
+import java.util.Map;
+
+public class Container {
+    private int[] values;
+    public String[][] matrix;
+    private List<String> items;
+    private Map<String, Integer> config;
+}
+""",
+                encoding="utf-8",
+            )
+
+            # Build and analyze
+            graph_file, _, _ = build(tmp_path, quiet=True)
+            graph = load_graph(tmp_path)
+
+            # Verify Container class
+            container_class = get_symbol(graph, "com.example.collections.Container")
+            self.assertIsNotNone(container_class)
+
+            # Verify array field
+            values_field = get_symbol(graph, "com.example.collections.Container.values")
+            self.assertIsNotNone(values_field)
+            self.assertIsNotNone(values_field.type_)
+
+            # Verify 2D array field
+            matrix_field = get_symbol(graph, "com.example.collections.Container.matrix")
+            self.assertIsNotNone(matrix_field)
+            self.assertEqual(matrix_field.visibility, "public")
+
+            # Verify generic fields exist
+            items_field = get_symbol(graph, "com.example.collections.Container.items")
+            self.assertIsNotNone(items_field)
+
+            config_field = get_symbol(graph, "com.example.collections.Container.config")
+            self.assertIsNotNone(config_field)
+
 
 if __name__ == "__main__":
     unittest.main()
