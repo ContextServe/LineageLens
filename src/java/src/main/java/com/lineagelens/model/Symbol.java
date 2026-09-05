@@ -60,6 +60,18 @@ public class Symbol {
     @JsonProperty("resiliency")
     private List<ResiliencySignal> resiliency = new ArrayList<>();
 
+    @JsonProperty("type_")
+    private String type_ = null;  // For fields: the type of the field
+
+    @JsonProperty("visibility")
+    private String visibility = null;  // "public", "private", "protected", "package"
+
+    @JsonProperty("static_")
+    private boolean static_ = false;
+
+    @JsonProperty("final_")
+    private boolean final_ = false;
+
     public Symbol() {}
 
     public Symbol(String id, String kind, String name, String file, int line, String module, String parent) {
@@ -196,5 +208,37 @@ public class Symbol {
 
     public void addResiliencySignal(ResiliencySignal signal) {
         resiliency.add(signal);
+    }
+
+    public String getType() {
+        return type_;
+    }
+
+    public void setType(String type) {
+        this.type_ = type;
+    }
+
+    public String getVisibility() {
+        return visibility;
+    }
+
+    public void setVisibility(String visibility) {
+        this.visibility = visibility;
+    }
+
+    public boolean isStatic() {
+        return static_;
+    }
+
+    public void setStatic(boolean isStatic) {
+        this.static_ = isStatic;
+    }
+
+    public boolean isFinal() {
+        return final_;
+    }
+
+    public void setFinal(boolean isFinal) {
+        this.final_ = isFinal;
     }
 }

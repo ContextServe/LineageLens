@@ -95,6 +95,10 @@ class Symbol:
     entry_point_kinds: list[str] = field(default_factory=list)
     is_abstract: bool = False
     resiliency: list[ResiliencySignal] = field(default_factory=list)
+    type_: str | None = None  # For fields: the type of the field
+    visibility: str | None = None  # "public", "private", "protected", "package"
+    static_: bool = False
+    final_: bool = False
 
     @property
     def entry_point(self) -> str | None:
