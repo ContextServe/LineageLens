@@ -12,7 +12,9 @@ from typing import Any, Literal
 #   2  module ids strip only a leading source root (a nested "src" component is
 #      no longer dropped); synthetic "<module>" symbols own module-level
 #      statements; project_root and schema_version are persisted
-SCHEMA_VERSION = 2
+#   3  IMPORTS/DECORATES relations added; fields as first-class Symbol nodes;
+#      variables/locals extraction; new relation kinds; Symbol.fields/locals attrs
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
