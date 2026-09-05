@@ -101,6 +101,11 @@ class Symbol:
     visibility: str | None = None  # "public", "private", "protected", "package"
     static_: bool = False
     final_: bool = False
+    constructor: bool = False  # Is this a constructor/initializer?
+    getter: bool = False  # Is this a getter method (property or get_* pattern)?
+    setter: bool = False  # Is this a setter method (property or set_* pattern)?
+    override: bool = False  # Does this override a parent method?
+    interface_default: bool = False  # Java: default method in interface?
     locals: list[dict[str, Any]] = field(default_factory=list)  # Method-level variables: [{name, type, resolved_type_symbol_id, line, kind}]
     fields: list[dict[str, Any]] = field(default_factory=list)  # Class-level fields/attributes: [{name, type, resolved_type_symbol_id}]
 
