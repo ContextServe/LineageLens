@@ -78,6 +78,82 @@ def get_cached_graph(project: Path) -> Any:
     return load_index(project).graph
 
 
+def _is_valid_type_name(name: str) -> bool:
+    """Check if type name is properly formatted.
+
+    Allows:
+    - Simple names: ClassName
+    - Qualified names: pkg.ClassName, pkg.sub.ClassName
+    - Generic types: List<String>, Map<String, Integer>
+    """
+    if not name:
+        return False
+
+    # Remove allowed special chars and check if result is alphanumeric + dots
+    cleaned = (
+        name.replace(".", "")
+        .replace("[", "")
+        .replace("]", "")
+        .replace("<", "")
+        .replace(">", "")
+        .replace(",", "")
+        .replace(" ", "")
+    )
+
+    return cleaned.replace("_", "").isalnum()
+
+
+def _type_matches(graph: Any, field_type: str, search_type: str, include_subtypes: bool) -> bool:
+    """Check if field_type matches search_type (exact or subtype).
+
+    Args:
+        graph: CodeGraph instance
+        field_type: Type of the field (from Symbol.fields)
+        search_type: Type to search for
+        include_subtypes: If true, also match subtypes via MRO
+
+    Returns:
+        True if the types match according to criteria
+    """
+    # Exact match
+    if field_type == search_type:
+        return True
+
+    # Subtype match (if enabled)
+    if include_subtypes:
+        return _is_subtype_of(graph, field_type, search_type)
+
+    return False
+
+
+def _is_subtype_of(graph: Any, candidate: str, parent: str) -> bool:
+    """Check if candidate is a subtype of parent (recursive MRO walk).
+
+    Args:
+        graph: CodeGraph instance
+        candidate: Type to check
+        parent: Parent type to check against
+
+    Returns:
+        True if candidate is a subclass of parent
+    """
+    if candidate == parent:
+        return True
+
+    candidate_sym = graph.symbols.get(candidate)
+    if not candidate_sym:
+        return False
+
+    # Check base classes
+    for base_name in candidate_sym.bases:
+        # Try to resolve base class to symbol ID
+        base_sym = graph.symbols.get(base_name)
+        if base_sym and _is_subtype_of(graph, base_sym.id, parent):
+            return True
+
+    return False
+
+
 def create_mcp_server() -> MCPServer:
     """Create and configure the MCP server."""
     server = MCPServer("lineagelens")
@@ -570,6 +646,91 @@ def create_mcp_server() -> MCPServer:
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    @server.tool()
+    async def list_fields_by_type(
+        type_name: str, include_subtypes: bool = False, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Find all class fields of a given type across the codebase.
+
+        Scans all class symbols and their fields to find matches for the specified type.
+        Useful for finding all places where a particular type is used as a field.
+
+        Args:
+            type_name: Fully qualified type name (e.g., "java.lang.String", "models.User")
+            include_subtypes: If true, also include fields of subtypes (requires MRO traversal)
+
+        Returns:
+            Dictionary with:
+            - count: Number of matching fields found
+            - fields: List of field metadata dicts, each containing:
+              - field_id: Full identifier (class.fieldname)
+              - field_name: Short field name
+              - class_id: ID of containing class
+              - class_name: Short class name
+              - type: Field type
+              - visibility: "public", "private", "protected", or "unknown"
+              - static: Boolean
+              - line: Line number in source file
+              - file: File path relative to project root
+              - description: Field docstring or None
+        """
+        try:
+            graph = get_cached_graph(PROJECT_PATH)
+
+            # Validate type_name format
+            if not type_name or not _is_valid_type_name(type_name):
+                return {"error": f"Invalid type name format: {type_name}"}
+
+            results = []
+
+            # Find all classes and check their fields
+            for symbol in graph.symbols.values():
+                if symbol.kind != "class":
+                    continue
+
+                # Check each field declared in the class
+                for field_dict in symbol.fields:
+                    field_type = field_dict.get("type", "unknown")
+
+                    # Match by exact type or subtype
+                    if _type_matches(graph, field_type, type_name, include_subtypes):
+                        field_name = field_dict.get("name", "unknown")
+                        field_id = f"{symbol.id}.{field_name}"
+
+                        # Try to get the actual field symbol for additional metadata
+                        field_symbol = graph.symbols.get(field_id)
+
+                        visibility = "unknown"
+                        is_static = False
+                        if field_symbol:
+                            visibility = field_symbol.visibility or "unknown"
+                            is_static = field_symbol.static_
+
+                        results.append({
+                            "field_id": field_id,
+                            "field_name": field_name,
+                            "class_id": symbol.id,
+                            "class_name": symbol.name,
+                            "type": field_type,
+                            "visibility": visibility,
+                            "static": is_static,
+                            "line": field_dict.get("line", 0),
+                            "file": symbol.file,
+                            "description": field_symbol.description if field_symbol else None,
+                        })
+
+            return {
+                "count": len(results),
+                "type_name": type_name,
+                "include_subtypes": include_subtypes,
+                "fields": results,
+            }
+        except GraphNotFoundError as e:
+            return {"error": str(e)}
+        except Exception as e:
+            logger.error(f"Error in list_fields_by_type: {e}", exc_info=True)
+            return {"error": str(e)}
 
     return server
 
