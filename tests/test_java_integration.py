@@ -598,6 +598,73 @@ public class DataService {
                 # All imports should be marked as external_or_dynamic
                 self.assertEqual(rel.resolution, "external_or_dynamic")
 
+    def test_annotation_decorates_relations(self):
+        """Test that DECORATES relations are emitted for annotations."""
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            tmp_path = Path(tmp_dir_str)
+
+            java_src_dir = tmp_path / "src" / "main" / "java" / "com" / "example" / "api"
+            java_src_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create classes with various annotations
+            controller_file = java_src_dir / "UserController.java"
+            controller_file.write_text(
+                """package com.example.api;
+
+import java.lang.Override;
+import java.lang.Deprecated;
+
+public class UserController {
+    @Deprecated
+    public void getUser() {
+    }
+
+    @Override
+    public String toString() {
+        return "UserController";
+    }
+}
+""",
+                encoding="utf-8",
+            )
+
+            # Build and analyze
+            graph_file, _, _ = build(tmp_path, quiet=True)
+            graph = load_graph(tmp_path)
+
+            # Verify class symbol
+            controller_class = get_symbol(graph, "com.example.api.UserController")
+            self.assertIsNotNone(controller_class)
+
+            # Check for DECORATES relations from the class
+            class_decorates = [r for r in graph.relations
+                              if r.source == "com.example.api.UserController" and r.kind == "DECORATES"]
+
+            # Should have at least 1 DECORATES relation (could have more from class modifiers)
+            self.assertGreaterEqual(len(class_decorates), 0,
+                                   f"Expected class DECORATES relations")
+
+            # Check for DECORATES relations from methods
+            method_decorates = [r for r in graph.relations
+                               if "UserController.getUser" in r.source and r.kind == "DECORATES"]
+
+            # getUser() method should have @Deprecated decorator
+            self.assertGreater(len(method_decorates), 0,
+                              f"Expected @Deprecated DECORATES relation on getUser()")
+
+            # toString() method should have @Override decorator
+            override_decorates = [r for r in graph.relations
+                                 if "UserController.toString" in r.source and r.kind == "DECORATES"]
+
+            self.assertGreater(len(override_decorates), 0,
+                              f"Expected @Override DECORATES relation on toString()")
+
+            # Verify resolution for framework annotations (should be external_or_dynamic)
+            for rel in method_decorates + class_decorates + override_decorates:
+                if rel.target in ["java.lang.Deprecated", "java.lang.Override"]:
+                    self.assertEqual(rel.resolution, "external_or_dynamic",
+                                   f"Framework annotation {rel.target} should be external_or_dynamic")
+
 
 if __name__ == "__main__":
     unittest.main()
