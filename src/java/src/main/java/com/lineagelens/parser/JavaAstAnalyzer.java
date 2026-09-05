@@ -641,6 +641,15 @@ public class JavaAstAnalyzer {
                         }
                     }
                 }
+
+                // Add DECORATES relations for annotations
+                if (symbol != null) {
+                    for (Object modifierObj : node.modifiers()) {
+                        if (modifierObj instanceof Annotation ann) {
+                            emitDecoratesRelation(fullId, ann);
+                        }
+                    }
+                }
             }
             return super.visit(node);
         }
@@ -681,6 +690,13 @@ public class JavaAstAnalyzer {
                                 }
                             }
                         }
+                    }
+                }
+
+                // Add DECORATES relations for annotations
+                for (Object modifierObj : node.modifiers()) {
+                    if (modifierObj instanceof Annotation ann) {
+                        emitDecoratesRelation(methodId, ann);
                     }
                 }
             }
@@ -784,6 +800,52 @@ public class JavaAstAnalyzer {
             }
 
             return super.visit(node);
+        }
+
+        private void emitDecoratesRelation(String sourceId, Annotation ann) {
+            // Get the annotation type name
+            String annotTypeName = ann.getTypeName().getFullyQualifiedName();
+            ITypeBinding annotBinding = ann.resolveTypeBinding();
+
+            // Resolve the annotation type to a symbol ID
+            String targetAnnotId;
+            if (annotBinding != null && annotBinding.getQualifiedName() != null) {
+                targetAnnotId = annotBinding.getQualifiedName();
+            } else {
+                targetAnnotId = annotTypeName;
+            }
+
+            // Emit DECORATES relation
+            int line = cu.getLineNumber(ann.getStartPosition());
+            Relation relation = new Relation(sourceId, targetAnnotId, "DECORATES", relPath, line);
+
+            // Set resolution based on annotation type
+            if (annotBinding != null && graph.getSymbol(targetAnnotId) != null) {
+                // In-repo annotation (a custom @interface defined locally)
+                relation.setResolution("resolved", Evidence.fact("jdt_binding_resolution"));
+            } else {
+                // Framework/JDK annotation (external)
+                relation.setResolution("external_or_dynamic", Evidence.heuristic("annotation_type"));
+            }
+
+            // Capture annotation member-values
+            if (ann instanceof SingleMemberAnnotation single) {
+                Map<String, Object> arg = new HashMap<>();
+                arg.put("name", "value");
+                arg.put("value", single.getValue().toString());
+                relation.getArguments().add(arg);
+            } else if (ann instanceof NormalAnnotation normal) {
+                for (Object memberObj : normal.values()) {
+                    if (memberObj instanceof MemberValuePair pair) {
+                        Map<String, Object> arg = new HashMap<>();
+                        arg.put("name", pair.getName().getIdentifier());
+                        arg.put("value", pair.getValue().toString());
+                        relation.getArguments().add(arg);
+                    }
+                }
+            }
+
+            graph.addRelation(relation);
         }
     }
 }
