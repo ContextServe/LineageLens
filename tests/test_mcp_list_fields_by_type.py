@@ -73,14 +73,15 @@ public class User {
             )
 
             # Build and analyze
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Find all field symbols and verify they exist
             field_symbols = []
-            for sym_id, symbol in graph.symbols.items():
+            for _sym_id, symbol in graph.symbols.items():
                 if symbol.kind == "field":
                     field_symbols.append(symbol)
+
 
             # Should find at least name and age as field symbols
             self.assertGreaterEqual(len(field_symbols), 2)
@@ -107,7 +108,7 @@ public class Simple {
                 encoding="utf-8",
             )
 
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Search for a type that doesn't exist
@@ -154,7 +155,7 @@ public class Order {
                 encoding="utf-8",
             )
 
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Find all field symbols with custom type
@@ -201,7 +202,7 @@ public class Dog extends Animal {
                 encoding="utf-8",
             )
 
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Check if Dog is subtype of Animal

@@ -100,7 +100,7 @@ class SCIPProtobufIngestor:
                     if not (occ.symbol_roles & scip_pb2.SymbolRole.Definition):
                         target_symbol_uri = occ.symbol
                         if target_symbol_uri in symbol_location_map:
-                            target_file, target_line = symbol_location_map[target_symbol_uri]
+                            target_file, _target_line = symbol_location_map[target_symbol_uri]
                             target_info = parse_scip_symbol_uri(target_symbol_uri)
                             
                             source_line = occ.range[0] + 1

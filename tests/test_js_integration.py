@@ -52,7 +52,8 @@ export class UserController {
             )
 
             # Run LineageLens build on the JS/TS project
-            graph_file, report_file, report = build(tmp_path, quiet=True)
+            graph_file, _report_file, _report = build(tmp_path, quiet=True)
+
 
             self.assertTrue(graph_file.exists())
             self.assertEqual(graph_file.name, "graph.json")
