@@ -19,7 +19,7 @@ This specification introduces a **Hybrid Architecture** combining:
 ## 2. Key Requirements & Architectural Principles
 
 1. **Non-Breaking & Backward Compatible:**
-   - The existing compiler-based AST generation (`java_bridge.py`, `js_bridge.py`, native Python `ast`) remains **100% active and untouched** as the default engine.
+   - The existing compiler-based AST generation (`java_bridge.py`, `js_bridge.py`, native Python `ast`) remains **100% active and untouched** as the default engine (`engine: compiler`).
    
 2. **Feature Flag Controlled:**
    - Added `analysis.engine` in `lineagelens.yaml` and `--engine` flag to the CLI (`lineagelens analyze`).
@@ -109,7 +109,31 @@ lineagelens analyze . --engine compiler # Default
 
 ---
 
-## 6. Verification & Testing Strategy
+## 4. Configuration Specification (`lineagelens.yaml`)
+
+```yaml
+source_roots: [src]
+test_roots: [tests]
+
+analysis:
+  # Selected engine: "compiler" (default), "tree-sitter", "scip", or "hybrid"
+  engine: hybrid
+
+  scip:
+    index_file: "index.scip"
+    auto_index: false              # Automatically run scip indexers if tool is on PATH
+    indexers:
+      java: "scip-java index"
+      typescript: "scip-typescript index"
+      python: "scip-python index"
+
+  tree_sitter:
+    languages: [python, java, javascript, typescript, go, rust]
+```
+
+---
+
+## 5. Verification & Testing Strategy
 
 1. **Backward Compatibility Tests:**
    - Verify `lineagelens analyze . --engine compiler` produces identical output to the existing analyzer.
@@ -126,3 +150,14 @@ lineagelens analyze . --engine compiler # Default
 4. **Hybrid Engine Integration Tests:**
    - Run `--engine hybrid` on sample multi-language project fixtures.
    - Assert heuristic edges from Tree-sitter are successfully upgraded to compiler facts when present in SCIP.
+
+---
+
+## 6. Review Checklist & Next Steps
+
+- [x] Branch created from `main`: `feature/scip-tree-sitter-hybrid`
+- [x] Canonical spec created at `docs/specs/spec_scip_treesitter_hybrid.md`
+- [x] Old compiler-based AST generation preserved (`java_bridge.py`, `js_bridge.py`, Python `ast`)
+- [x] Feature flag specified (`analysis.engine` in config / `--engine` CLI option)
+- [ ] User review and sign-off on `docs/specs/spec_scip_treesitter_hybrid.md`
+- [ ] Create `implementation_plan.md` upon approval
