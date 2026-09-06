@@ -1,13 +1,11 @@
 """Tests for list_fields_by_type MCP tool."""
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from lineagelens.cli import build
 from lineagelens.mcp_server import (
-    _is_subtype_of,
     _is_valid_type_name,
     _type_matches,
 )

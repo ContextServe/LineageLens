@@ -1,6 +1,7 @@
 """Unit tests for SCIPProtobufIngestor and parse_scip_symbol_uri."""
 
 from pathlib import Path
+
 from lineagelens.scip_ingestor import SCIPProtobufIngestor, parse_scip_symbol_uri
 
 

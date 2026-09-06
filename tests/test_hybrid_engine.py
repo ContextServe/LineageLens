@@ -1,10 +1,11 @@
 """Integration tests for hybrid engine, config parsing, and CLI dispatcher."""
 
 from pathlib import Path
+
 from lineagelens.analyzer import analyze
-from lineagelens.config import ProjectConfig, AnalysisConfig
-from lineagelens.model import CodeGraph, Evidence, Relation, Symbol
+from lineagelens.config import AnalysisConfig, ProjectConfig
 from lineagelens.hybrid_merger import HybridGraphMerger
+from lineagelens.model import CodeGraph, Evidence, Relation, Symbol
 
 
 def test_hybrid_graph_merger_evidence_upgrade(tmp_path: Path):

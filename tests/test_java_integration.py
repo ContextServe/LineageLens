@@ -9,9 +9,7 @@ from pathlib import Path
 
 from lineagelens.cli import build
 from lineagelens.model import SCHEMA_VERSION
-
 from lineagelens.queries import (
-    find_duplicate_names,
     get_codebase_metrics,
     get_symbol,
     impact_analysis,
@@ -646,7 +644,7 @@ public class UserController {
 
             # Should have at least 1 DECORATES relation (could have more from class modifiers)
             self.assertGreaterEqual(len(class_decorates), 0,
-                                   f"Expected class DECORATES relations")
+                                   "Expected class DECORATES relations")
 
             # Check for DECORATES relations from methods
             method_decorates = [r for r in graph.relations
@@ -654,14 +652,14 @@ public class UserController {
 
             # getUser() method should have @Deprecated decorator
             self.assertGreater(len(method_decorates), 0,
-                              f"Expected @Deprecated DECORATES relation on getUser()")
+                              "Expected @Deprecated DECORATES relation on getUser()")
 
             # toString() method should have @Override decorator
             override_decorates = [r for r in graph.relations
                                  if "UserController.toString" in r.source and r.kind == "DECORATES"]
 
             self.assertGreater(len(override_decorates), 0,
-                              f"Expected @Override DECORATES relation on toString()")
+                              "Expected @Override DECORATES relation on toString()")
 
             # Verify resolution for framework annotations (should be external_or_dynamic)
             for rel in method_decorates + class_decorates + override_decorates:
