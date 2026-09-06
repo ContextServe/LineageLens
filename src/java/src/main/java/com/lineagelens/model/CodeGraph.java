@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 public class CodeGraph {
-    public static final int SCHEMA_VERSION = 2;
+    public static final int SCHEMA_VERSION = 3;
 
     @JsonProperty("schema_version")
     private int schemaVersion = SCHEMA_VERSION;
