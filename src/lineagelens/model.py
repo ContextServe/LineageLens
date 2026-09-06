@@ -142,6 +142,7 @@ class CodeGraph:
     symbols: dict[str, Symbol] = field(default_factory=dict)
     containers: dict[str, Container] = field(default_factory=dict)
     relations: list[Relation] = field(default_factory=list)
+    ontology_version: str = "1.0"  # Track which ontology version this graph conforms to
 
     def add_symbol(self, symbol: Symbol) -> None:
         self.symbols[symbol.id] = symbol
@@ -162,6 +163,7 @@ class CodeGraph:
             symbols.append(payload)
         return {
             "schema_version": SCHEMA_VERSION,
+            "ontology_version": self.ontology_version,
             "project_root": self.project_root,
             "symbols": symbols,
             "containers": [asdict(item) for item in self.containers.values()],
