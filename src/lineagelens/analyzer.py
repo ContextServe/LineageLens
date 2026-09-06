@@ -16,6 +16,7 @@ from pathlib import Path
 from . import entrypoints
 from .config import ProjectConfig
 from .model import CodeGraph, Container, Evidence, Relation, ResiliencySignal, Symbol
+from .registry_formats import parse_registries
 from .report import AnalysisReport, FileFailure, SymbolWarning
 from .resolve_jedi import JediResolver
 
@@ -1382,6 +1383,73 @@ def iter_python(root: Path, paths: Iterable[str]) -> Iterable[Path]:
             yield from sorted(directory.rglob("*.py"))
 
 
+def extract_provides_relations(graph: CodeGraph, root: Path) -> None:
+    """Extract PROVIDES relations from service registry files.
+
+    Modifies graph.relations in-place, adding PROVIDES relations discovered from
+    META-INF/services/*, META-INF/dubbo/internal/*, etc.
+
+    Args:
+        graph: CodeGraph to modify
+        root: Project root directory for scanning registries
+    """
+    try:
+        providers = parse_registries(root)
+    except Exception as e:
+        logger.warning(f"Failed to extract service registries: {e}")
+        return
+
+    # Build index for fast symbol lookup
+    symbol_by_fqn: dict[str, str] = {}  # FQN -> symbol_id
+    for symbol in graph.symbols.values():
+        symbol_by_fqn[symbol.id] = symbol.id
+
+    for provider_info in providers:
+        interface_fqn = provider_info["interface_fqn"]
+        provider_class = provider_info["provider_class"]
+        registry_file = provider_info["registry_file"]
+        registry_format = provider_info["registry_format"]
+
+        # Resolve interface symbol
+        interface_sym = graph.symbols.get(interface_fqn)
+        if not interface_sym:
+            # Interface not in graph (likely external library)
+            continue
+
+        # Try to resolve provider class
+        # First try exact match
+        provider_sym = graph.symbols.get(provider_class)
+        if not provider_sym:
+            # Try name inference: look for class with matching short name
+            short_name = provider_class.split(".")[-1]
+            for sym in graph.symbols.values():
+                if sym.kind == "class" and sym.name == short_name:
+                    provider_sym = sym
+                    resolution = "resolved_via_inference"
+                    break
+            else:
+                # Provider class not found
+                continue
+        else:
+            resolution = "resolved"
+
+        # Create PROVIDES relation
+        try:
+            rel = Relation(
+                source=provider_sym.id,
+                target=interface_sym.id,
+                kind="PROVIDES",
+                file=registry_file,  # Registry file, not source file
+                line=0,  # Registry files don't have line numbers
+                evidence="deterministic_fact",  # Read from literal file
+                resolution=resolution,
+                arguments={"registry_file": registry_file, "registry_format": registry_format},
+            )
+            graph.relations.append(rel)
+        except Exception as e:
+            logger.warning(f"Failed to create PROVIDES relation {provider_class}->{interface_fqn}: {e}")
+
+
 def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph, AnalysisReport]:
     """Analyze a Python project and return (CodeGraph, AnalysisReport).
 
@@ -1492,6 +1560,7 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
     entrypoints.mark_project_roots(graph, root, config)
     emit_overrides(graph, config)
     emit_fixture_uses(graph, config)
+    extract_provides_relations(graph, root)
 
     if jedi_resolver is not None and jedi_resolver.budget_exhausted:
         report.warnings.append(
