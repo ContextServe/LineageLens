@@ -154,9 +154,102 @@ def _is_subtype_of(graph: Any, candidate: str, parent: str) -> bool:
     return False
 
 
+def _get_ontology_instructions() -> str:
+    """Get the ontology primer for the MCP server.
+
+    This provides Claude agents with essential context about the code graph schema,
+    relation kinds, evidence tiers, and query routing patterns. Sent during MCP
+    initialization handshake so agents understand tool semantics without reverse-engineering.
+
+    Returns:
+        Ontology primer as a formatted string
+    """
+    return """# LineageLens Code Graph Ontology
+
+## Relation Kinds
+
+The code graph tracks five types of relations between symbols:
+
+- **CALLS**: Direct invocation (method call, function call, constructor call)
+- **INHERITS**: Class inheritance (extends) or interface implementation (implements)
+- **OVERRIDES**: Method override in a subclass (dynamic dispatch target)
+- **DECORATES**: Annotation/decorator applied to a symbol
+- **PROVIDES**: SPI or service-provider registration (META-INF/services/*, META-INF/dubbo/internal/*)
+
+When querying with `get_callers()` or `get_callees()`, results include all relation kinds above.
+Filter by `relation.kind` to isolate specific patterns (e.g., kind="CALLS" to exclude INHERITS/DECORATES).
+
+## Evidence Tiers & Resolution Status
+
+Each relation has two metadata fields describing how certain the analysis is:
+
+### Evidence Tier
+- **deterministic_fact**: From literal syntax (observed directly, not inferred)
+- **deterministic_heuristic**: From name/signature matching (e.g., polymorphic override detection)
+
+### Resolution Status
+- **resolved**: Symbol found directly in the graph
+- **resolved_via_inference**: Symbol matched via name or type heuristic (e.g., interface implementation)
+- **external_or_dynamic**: Analysis hit a limit. The symbol may exist but static analysis cannot see it.
+  - Examples: reflection-based dispatch, SPI/plugin loading, runtime registration, config-driven routes
+  - When you see this, DO NOT conclude "this is unknowable" — check for alternative relation chains
+
+## Query Routing Guide
+
+Use this table to pick the right tool for your intent:
+
+| Intent | Tool(s) | Notes |
+|--------|---------|-------|
+| "Find all callers of function X" | `get_callers(X)` then filter `kind="CALLS"` | Includes INHERITS, DECORATES |
+| "Find all implementations of interface I" | `get_callers(I)` then filter `kind="INHERITS"` | Complement with `list_implementations(I)` (Issue #38) |
+| "Find all providers of service S" | `list_providers(S)` (Issue #38) | Extracts PROVIDES from SPI registries |
+| "Trace all paths through X" | `get_lineage(X, direction="both")` | Includes all relation kinds |
+| "What changes if X changes" | `get_impact(X)` | Returns backward transitive closure |
+| "Does A depend on B" | `get_module_dependencies()` then check module graph | Module-level dependency view |
+| "Find dead code" | `list_dead_code()` | Computed over all reachable edge kinds |
+
+## Known Limitations (Built-in to Static Analysis)
+
+1. **SPI & Service Registries**: META-INF/services/* and META-INF/dubbo/internal/* files register providers but are not Java source. Parser does not yet extract PROVIDES relations from these files (Issue #39 will fix this).
+
+2. **Reflection-based Dispatch**: When code uses `getMethod()`, `newInstance()`, or similar reflection APIs, the target is invisible to static analysis. Check for `resolution="external_or_dynamic"` to detect.
+
+3. **Config-driven Routes**: Spring `@Bean` factories, Dubbo configuration, or YAML routing rules may specify classes/methods not visible via code references.
+
+4. **Method Body Internals**: If a method body is a single-liner or short call, the graph may not expand internal transitive chains. Use `get_lineage()` to traverse more deeply.
+
+## Agent Decision Rules
+
+When reasoning about code impact or completeness:
+
+1. **Never assume completeness** if any relation has `resolution="external_or_dynamic"`.
+   - Example: "The data model didn't change, so consumers don't change" fails if consumers have internal logic changes → Check via `get_lineage(X)` for callers.
+
+2. **Prefer verification over speculation**.
+   - When unsure whether a symbol is used, check reachability with `get_reachability(symbol_id)` before assuming it's dead.
+   - When predicting file changes, prefer to name files in the graph over guessing new files.
+
+3. **Use relation kind filtering** to avoid over-generalizing.
+   - "Who calls X?" requires `kind="CALLS"`.
+   - "Who implements interface X?" requires `kind="INHERITS"`.
+   - Not filtering is the most common source of spurious connections.
+
+4. **When analysis hits a limit** (`resolution="external_or_dynamic"`):
+   - Do NOT conclude "I don't know"; instead, list alternative mechanisms
+   - Ask the human to verify or check logs/configs
+   - Mark high-risk for code review
+
+## Ontology Version
+
+This ontology describes **schema version 1.0** with relation kinds: CALLS, INHERITS, OVERRIDES, DECORATES.
+PROVIDES extraction (Issue #39) will extend schema version 1.1.
+Use `trigger_analysis()` to refresh the graph when new analyzers are available.
+"""
+
+
 def create_mcp_server() -> MCPServer:
     """Create and configure the MCP server."""
-    server = MCPServer("lineagelens")
+    server = MCPServer("lineagelens", instructions=_get_ontology_instructions())
 
     @server.tool()
     async def get_symbol(symbol_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -207,13 +300,22 @@ def create_mcp_server() -> MCPServer:
 
     @server.tool()
     async def get_callers(symbol_id: str, **kwargs: Any) -> dict[str, Any]:
-        """Find all symbols that call this one.
+        """Find all symbols that reference this one (all relation kinds).
+
+        Returns relations of all kinds: CALLS (direct invocation), INHERITS (implementation
+        of interface), DECORATES (annotation), OVERRIDES (method override), and PROVIDES
+        (SPI registration). Filter by relation.kind to isolate specific patterns.
+
+        IMPORTANT: SPI/service-provider dispatch from META-INF/services/* and
+        META-INF/dubbo/internal/* is not yet extracted into PROVIDES relations (see
+        Issue #39). When resolution=="external_or_dynamic", the symbol may have dynamic
+        providers invisible to static analysis.
 
         Args:
             symbol_id: Symbol ID
 
         Returns:
-            List of relations where this symbol is the target
+            List of relations where this symbol is the target, grouped by kind
         """
         try:
             graph = get_cached_graph(PROJECT_PATH)
@@ -224,13 +326,17 @@ def create_mcp_server() -> MCPServer:
 
     @server.tool()
     async def get_callees(symbol_id: str, **kwargs: Any) -> dict[str, Any]:
-        """Find all symbols this one calls.
+        """Find all symbols this one references (direct calls, base classes, etc.).
+
+        Returns relations of multiple kinds: CALLS (direct invocation), INHERITS (extends/implements),
+        OVERRIDES (overridden methods). Filter by relation.kind to isolate specific patterns
+        (e.g., kind="CALLS" for actual function calls).
 
         Args:
             symbol_id: Symbol ID
 
         Returns:
-            List of relations where this symbol is the source
+            List of relations where this symbol is the source, grouped by kind
         """
         try:
             graph = get_cached_graph(PROJECT_PATH)
@@ -269,12 +375,19 @@ def create_mcp_server() -> MCPServer:
     async def get_impact(symbol_id: str, max_depth: int = 10, **kwargs: Any) -> dict[str, Any]:
         """Analyze impact of changes to a symbol (backward transitive closure).
 
+        Computes all symbols that depend on this one (transitively), over all relation kinds.
+        Helps identify blast radius when modifying a symbol.
+
+        IMPORTANT: This traversal uses static analysis only. Reflection-based consumers
+        (resolution=="external_or_dynamic") are not included. Before deleting or breaking
+        a symbol, also check for dynamic callers via `get_reachability()`.
+
         Args:
             symbol_id: Symbol ID
             max_depth: Maximum traversal depth
 
         Returns:
-            Symbols affected by changes to this one
+            Symbols affected by changes to this one, including entry points that would break
         """
         try:
             graph = get_cached_graph(PROJECT_PATH)
