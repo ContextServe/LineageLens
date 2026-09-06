@@ -8,8 +8,8 @@ import unittest
 from pathlib import Path
 
 from lineagelens.cli import build
+from lineagelens.model import SCHEMA_VERSION
 from lineagelens.queries import (
-    find_duplicate_names,
     get_codebase_metrics,
     get_symbol,
     impact_analysis,
@@ -53,15 +53,17 @@ public class OrderService {
             )
 
             # Run LineageLens build on the Java project
-            graph_file, report_file, report = build(tmp_path, quiet=True)
+            graph_file, _report_file, _report = build(tmp_path, quiet=True)
+
 
             self.assertTrue(graph_file.exists())
             self.assertEqual(graph_file.name, "graph.json")
 
             # Verify JSON structure
             raw = json.loads(graph_file.read_text(encoding="utf-8"))
-            self.assertEqual(raw["schema_version"], 2)
+            self.assertEqual(raw["schema_version"], SCHEMA_VERSION)
             self.assertGreater(len(raw["symbols"]), 0)
+
 
             # Load graph using LineageLens query engine
             graph = load_graph(tmp_path)
@@ -145,8 +147,9 @@ public class Main {
             graph_file, _, _ = build(tmp_path, quiet=True)
 
             # Load and verify graph
-            raw = json.loads(graph_file.read_text(encoding="utf-8"))
+            _raw = json.loads(graph_file.read_text(encoding="utf-8"))
             graph = load_graph(tmp_path)
+
 
             # Verify both classes exist
             calc_sym = get_symbol(graph, "com.example.calc.Calculator")
@@ -239,8 +242,9 @@ public class ServiceImpl implements Service {
             graph_file, _, _ = build(tmp_path, quiet=True)
 
             # Load and verify graph
-            raw = json.loads(graph_file.read_text(encoding="utf-8"))
+            _raw = json.loads(graph_file.read_text(encoding="utf-8"))
             graph = load_graph(tmp_path)
+
 
             # Verify both modules' symbols exist
             service_iface = get_symbol(graph, "com.example.api.Service")
@@ -288,7 +292,8 @@ public class SimpleClass {
 
             # Load and verify
             raw = json.loads(graph_file.read_text(encoding="utf-8"))
-            self.assertEqual(raw["schema_version"], 2)
+            self.assertEqual(raw["schema_version"], SCHEMA_VERSION)
+
 
             graph = load_graph(tmp_path)
 
@@ -342,7 +347,7 @@ public class Person {
             )
 
             # Build and analyze
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Verify class symbol
@@ -408,7 +413,7 @@ public enum Status {
             )
 
             # Build and analyze
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Verify enum symbol
@@ -472,7 +477,7 @@ public class Impl {
             )
 
             # Build and analyze
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Verify Provider interface exists
@@ -517,7 +522,7 @@ public class Container {
             )
 
             # Build and analyze
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Verify Container class
@@ -570,7 +575,7 @@ public class DataService {
             )
 
             # Build and analyze
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Verify class symbol
@@ -629,7 +634,7 @@ public class UserController {
             )
 
             # Build and analyze
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Verify class symbol
@@ -642,7 +647,7 @@ public class UserController {
 
             # Should have at least 1 DECORATES relation (could have more from class modifiers)
             self.assertGreaterEqual(len(class_decorates), 0,
-                                   f"Expected class DECORATES relations")
+                                   "Expected class DECORATES relations")
 
             # Check for DECORATES relations from methods
             method_decorates = [r for r in graph.relations
@@ -650,14 +655,14 @@ public class UserController {
 
             # getUser() method should have @Deprecated decorator
             self.assertGreater(len(method_decorates), 0,
-                              f"Expected @Deprecated DECORATES relation on getUser()")
+                              "Expected @Deprecated DECORATES relation on getUser()")
 
             # toString() method should have @Override decorator
             override_decorates = [r for r in graph.relations
                                  if "UserController.toString" in r.source and r.kind == "DECORATES"]
 
             self.assertGreater(len(override_decorates), 0,
-                              f"Expected @Override DECORATES relation on toString()")
+                              "Expected @Override DECORATES relation on toString()")
 
             # Verify resolution for framework annotations (should be external_or_dynamic)
             for rel in method_decorates + class_decorates + override_decorates:
@@ -706,7 +711,7 @@ public class BlocksTest {
             )
 
             # Build and analyze
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Get the method with nested blocks
@@ -715,7 +720,7 @@ public class BlocksTest {
             self.assertGreater(len(method_sym.locals), 0, "Should capture variables from all nested blocks")
 
             # Verify variables are captured
-            local_names = {l["name"] for l in method_sym.locals}
+            local_names = {loc["name"] for loc in method_sym.locals}
             self.assertIn("x", local_names, "Top-level local 'x' should be captured")
             self.assertIn("y", local_names, "Local 'y' in if block should be captured")
             self.assertIn("i", local_names, "Loop variable 'i' should be captured")
@@ -727,7 +732,7 @@ public class BlocksTest {
             # Check simple loop method
             simple_loop_sym = get_symbol(graph, "com.example.blocks.BlocksTest.simpleLoop")
             self.assertIsNotNone(simple_loop_sym)
-            simple_loop_locals = {l["name"] for l in simple_loop_sym.locals}
+            simple_loop_locals = {loc["name"] for loc in simple_loop_sym.locals}
             self.assertIn("j", simple_loop_locals, "Loop variable 'j' should be captured")
             self.assertIn("item", simple_loop_locals, "Local 'item' in for block should be captured")
 
@@ -768,7 +773,7 @@ public class Calculator {
             )
 
             # Build and analyze
-            graph_file, _, _ = build(tmp_path, quiet=True)
+            _graph_file, _, _ = build(tmp_path, quiet=True)
             graph = load_graph(tmp_path)
 
             # Verify class symbol
@@ -791,7 +796,7 @@ public class Calculator {
             self.assertIn("result", local_names, "Local variable 'result' should be captured")
 
             # Verify type information
-            sum_local = next((l for l in compute_method.locals if l["name"] == "sum"), None)
+            sum_local = next((loc for loc in compute_method.locals if loc["name"] == "sum"), None)
             self.assertIsNotNone(sum_local)
             self.assertIn("int", sum_local["type"], f"sum should have int type, got {sum_local['type']}")
 
@@ -808,7 +813,8 @@ public class Calculator {
             self.assertIn("count", local_names_2, "Local variable 'count' should be captured")
 
             # Verify type information for generic type
-            items_local = next((l for l in process_method.locals if l["name"] == "items"), None)
+            items_local = next((loc for loc in process_method.locals if loc["name"] == "items"), None)
+
             self.assertIsNotNone(items_local)
             # Type should be either java.util.ArrayList or java.util.List
             self.assertTrue(

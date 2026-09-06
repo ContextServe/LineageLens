@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from lineagelens.cli import build
+from lineagelens.model import SCHEMA_VERSION
 from lineagelens.queries import (
     get_codebase_metrics,
     get_symbol,
@@ -51,15 +52,17 @@ export class UserController {
             )
 
             # Run LineageLens build on the JS/TS project
-            graph_file, report_file, report = build(tmp_path, quiet=True)
+            graph_file, _report_file, _report = build(tmp_path, quiet=True)
+
 
             self.assertTrue(graph_file.exists())
             self.assertEqual(graph_file.name, "graph.json")
 
             # Verify JSON structure
             raw = json.loads(graph_file.read_text(encoding="utf-8"))
-            self.assertEqual(raw["schema_version"], 2)
+            self.assertEqual(raw["schema_version"], SCHEMA_VERSION)
             self.assertGreater(len(raw["symbols"]), 0)
+
 
             # Load graph using LineageLens query engine
             graph = load_graph(tmp_path)

@@ -23,7 +23,7 @@ class User:
         return self.name
 """)
 
-        graph, report = analyze(root, ProjectConfig(source_roots=("src",)))
+        graph, _report = analyze(root, ProjectConfig(source_roots=("src",)))
 
         # Constructor check
         init_method = graph.symbols.get("app.models.User.__init__")
@@ -55,7 +55,7 @@ class User:
         return self._active
 """)
 
-        graph, report = analyze(root, ProjectConfig(source_roots=("src",)))
+        graph, _report = analyze(root, ProjectConfig(source_roots=("src",)))
 
         # Getter detection (get_* pattern)
         get_name = graph.symbols.get("app.models.User.get_name")
@@ -88,7 +88,7 @@ class Service:
         pass
 """)
 
-        graph, report = analyze(root, ProjectConfig(source_roots=("src",)))
+        graph, _report = analyze(root, ProjectConfig(source_roots=("src",)))
 
         execute = graph.symbols.get("app.service.Service.execute")
         assert execute is not None
@@ -124,7 +124,7 @@ class Service:
         pass
 """)
 
-        graph, report = analyze(root, ProjectConfig(source_roots=("src",)))
+        graph, _report = analyze(root, ProjectConfig(source_roots=("src",)))
 
         # Method starting with get_ should be getter
         get_value = graph.symbols.get("app.service.Service.get_value_and_store")

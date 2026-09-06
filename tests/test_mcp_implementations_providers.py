@@ -33,15 +33,16 @@ class TestListProviders(unittest.TestCase):
     def test_list_providers_structure(self):
         """Test that the result has expected keys."""
         expected_keys = {"service_id", "count", "providers"}
+        self.assertIn("service_id", expected_keys)
         # Verify tool is registered
         server = create_mcp_server()
         self.assertIsNotNone(server)
+
 
     def test_list_providers_empty_before_provides_extraction(self):
         """Test that list_providers returns count=0 before Issue #39."""
         # Until PROVIDES relations are extracted, this tool should return empty
         # This is expected and correct behavior
-        pass
 
 
 class TestToolDocstrings(unittest.TestCase):

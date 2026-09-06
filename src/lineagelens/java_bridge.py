@@ -8,7 +8,6 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -39,7 +38,7 @@ def ensure_jar_built() -> Path:
     cmd = [str(gradlew), "shadowJar"] if gradlew.exists() else ["gradle", "shadowJar"]
 
     try:
-        res = subprocess.run(cmd, cwd=JAVA_DIR, capture_output=True, text=True, check=True)
+        subprocess.run(cmd, cwd=JAVA_DIR, capture_output=True, text=True, check=True)
         logger.info("Successfully built lineagelens-java.jar")
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         raise RuntimeError(

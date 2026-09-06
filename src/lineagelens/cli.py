@@ -117,7 +117,7 @@ def write_artifacts(
 
 
 def build(
-    project: Path, quiet: bool = False, jedi: bool | None = None
+    project: Path, quiet: bool = False, jedi: bool | None = None, engine: str | None = None
 ) -> tuple[Path, Path, AnalysisReport]:
     """Analyze a project and write graph.json + report.json.
 
@@ -129,9 +129,11 @@ def build(
     from .js_bridge import run_js_analysis
 
     config = ProjectConfig.load(project)
+    if engine is not None:
+        config = replace(config, analysis=replace(config.analysis, engine=engine))
 
-    # Check if target project is JS/TS
-    if is_js_project(project) or getattr(config, "language", None) in ("javascript", "typescript", "js", "ts"):
+    # Check if target project is JS/TS and using default compiler engine
+    if config.analysis.engine == "compiler" and (is_js_project(project) or getattr(config, "language", None) in ("javascript", "typescript", "js", "ts")):
         graph_file = run_js_analysis(project)
         report_file = report_path(project, config)
         report = AnalysisReport(
@@ -148,8 +150,8 @@ def build(
             print(f"✓ JavaScript/TypeScript analysis complete. Graph written to {graph_file}")
         return graph_file, report_file, report
 
-    # Check if target project is Java
-    if is_java_project(project) or getattr(config, "language", None) == "java":
+    # Check if target project is Java and using default compiler engine
+    if config.analysis.engine == "compiler" and (is_java_project(project) or getattr(config, "language", None) == "java"):
         graph_file = run_java_analysis(project)
         report_file = report_path(project, config)
         report = AnalysisReport(
@@ -171,6 +173,7 @@ def build(
     graph, report = analyze(project, config)
     graph_file, report_file = write_artifacts(project, config, graph, report, quiet=quiet)
     return graph_file, report_file, report
+
 
 
 def run_check(project: Path, args: Any) -> int:
@@ -222,7 +225,14 @@ def main() -> None:
 
     analyze_cmd = commands.add_parser("analyze", help="Analyze Python code and build graph")
     analyze_cmd.add_argument("project", type=Path, help="Project directory")
+    analyze_cmd.add_argument(
+        "--engine",
+        choices=["compiler", "tree-sitter", "scip", "hybrid"],
+        default=None,
+        help="AST analysis engine (default: compiler or value from lineagelens.yaml)",
+    )
     analyze_cmd.add_argument("--strict", action="store_true", help="Exit with nonzero code if any failures occur")
+
     analyze_cmd.add_argument(
         "--no-jedi",
         action="store_true",
@@ -352,7 +362,9 @@ def main() -> None:
         project,
         quiet=getattr(args, "quiet", False),
         jedi=False if getattr(args, "no_jedi", False) else None,
+        engine=getattr(args, "engine", None),
     )
+
 
     if args.command == "serve":
         # Check if frontend is available (provide guidance if not, but don't block)

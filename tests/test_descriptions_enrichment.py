@@ -51,16 +51,15 @@ class Config:
     retries: int
 """)
 
-        graph, report = analyze(root, ProjectConfig(source_roots=("src",)))
+        graph, _report = analyze(root, ProjectConfig(source_roots=("src",)))
 
         # Verify analysis completes
         assert graph is not None
         # Field descriptions are only from source, never generated
         for symbol in graph.symbols.values():
-            if symbol.kind == "field":
-                if symbol.description:
-                    # Any description must be from explicit source comment/docstring
-                    assert isinstance(symbol.description, str)
+            if symbol.kind == "field" and symbol.description:
+                # Any description must be from explicit source comment/docstring
+                assert isinstance(symbol.description, str)
 
 
 def test_methods_and_classes_still_have_descriptions():
@@ -79,7 +78,8 @@ class UserService:
         return None
 """)
 
-        graph, report = analyze(root, ProjectConfig(source_roots=("src",)))
+        graph, _report = analyze(root, ProjectConfig(source_roots=("src",)))
+
 
         # Classes should have descriptions
         user_service = graph.symbols.get("app.service.UserService")
