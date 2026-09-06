@@ -28,6 +28,10 @@ dependencies = [
 web = ["fastapi>=0.110", "strawberry-graphql[fastapi]>=0.235", "uvicorn>=0.29", "pydantic>=2.0"]
 mcp = ["mcp>=1.0"]
 llm = ["httpx>=0.27"]
+treesitter = ["tree-sitter>=0.21.0"]
+scip = ["protobuf>=4.25.0"]
+hybrid = ["tree-sitter>=0.21.0", "protobuf>=4.25.0"]
+
 # ruff is pinned to a minor range, not just a floor. Its default rule set
 # widened between releases, which turned CI lint into a moving target that
 # failed on code nobody had touched. [tool.ruff.lint] now selects rules
