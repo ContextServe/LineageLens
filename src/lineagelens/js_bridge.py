@@ -6,7 +6,6 @@ Locates node and executes lineagelens-js dist/cli.js.
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 from pathlib import Path

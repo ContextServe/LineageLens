@@ -5,9 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lineagelens.model import CodeGraph, Symbol
-from lineagelens.ontology import ONTOLOGY_VERSIONS, current_ontology_version, get_ontology_version
-from lineagelens.queries import load_graph
+from lineagelens.model import CodeGraph
+from lineagelens.ontology import (
+    ONTOLOGY_VERSIONS,
+    current_ontology_version,
+    get_ontology_version,
+)
 
 
 class TestOntologyVersioning(unittest.TestCase):

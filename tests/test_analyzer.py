@@ -129,7 +129,7 @@ def standalone_func(x):
         assert "result" in local_names, "Local variable 'result' should be captured"
 
         # Verify type information (complex expressions may infer as unknown)
-        sum_val_local = next((l for l in compute_method.locals if l["name"] == "sum_val"), None)
+        sum_val_local = next((loc for loc in compute_method.locals if loc["name"] == "sum_val"), None)
         assert sum_val_local is not None
         # Type inference for complex expressions may result in "unknown", which is acceptable
         assert sum_val_local["type"] in ("int", "unknown"), f"sum_val type should be int or unknown, got {sum_val_local['type']}"
@@ -145,7 +145,7 @@ def standalone_func(x):
         assert "count" in local_names_2, "Local variable 'count' should be captured"
 
         # Verify type annotation was captured
-        items_local = next((l for l in process_method.locals if l["name"] == "items"), None)
+        items_local = next((loc for loc in process_method.locals if loc["name"] == "items"), None)
         assert items_local is not None
         assert "list" in items_local["type"], f"items should have list type, got {items_local['type']}"
 
@@ -154,12 +154,12 @@ def standalone_func(x):
         assert standalone_func is not None
         assert len(standalone_func.locals) > 0, "standalone_func() should have extracted local variables"
 
-        standalone_locals = {l["name"] for l in standalone_func.locals}
+        standalone_locals = {loc["name"] for loc in standalone_func.locals}
         assert "y" in standalone_locals, "Local variable 'y' should be captured"
         assert "z" in standalone_locals, "Local variable 'z' should be captured"
 
         # Check that z has type annotation
-        z_local = next((l for l in standalone_func.locals if l["name"] == "z"), None)
+        z_local = next((loc for loc in standalone_func.locals if loc["name"] == "z"), None)
         assert z_local is not None
         assert z_local["type"] == "str", f"z should be str, got {z_local['type']}"
 
@@ -190,14 +190,15 @@ def with_class():
 
         # Check outer function
         outer_func = graph.symbols["app.scope_test.outer"]
-        outer_locals = {l["name"] for l in outer_func.locals}
+        outer_locals = {loc["name"] for loc in outer_func.locals}
         assert "x" in outer_locals, "Outer local 'x' should be extracted"
         assert "z" in outer_locals, "Outer local 'z' should be extracted"
         assert "y" not in outer_locals, "Inner local 'y' should NOT be in outer's locals (scope violation)"
 
         # Check with_class function
         with_class_func = graph.symbols["app.scope_test.with_class"]
-        with_class_locals = {l["name"] for l in with_class_func.locals}
+        with_class_locals = {loc["name"] for loc in with_class_func.locals}
         assert "a" in with_class_locals, "Local 'a' should be extracted"
         assert "c" in with_class_locals, "Local 'c' should be extracted"
         assert "b" not in with_class_locals, "Class attribute 'b' should NOT be in with_class's locals (scope violation)"
+

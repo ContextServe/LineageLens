@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from lineagelens.model import SCHEMA_VERSION, CodeGraph
+from lineagelens.model import SCHEMA_VERSION
 from lineagelens.queries import GraphNotFoundError, load_graph
 
 
