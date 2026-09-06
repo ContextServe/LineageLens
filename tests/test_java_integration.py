@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 
 from lineagelens.cli import build
+from lineagelens.model import SCHEMA_VERSION
+
 from lineagelens.queries import (
     find_duplicate_names,
     get_codebase_metrics,
@@ -60,8 +62,9 @@ public class OrderService {
 
             # Verify JSON structure
             raw = json.loads(graph_file.read_text(encoding="utf-8"))
-            self.assertEqual(raw["schema_version"], 2)
+            self.assertEqual(raw["schema_version"], SCHEMA_VERSION)
             self.assertGreater(len(raw["symbols"]), 0)
+
 
             # Load graph using LineageLens query engine
             graph = load_graph(tmp_path)
@@ -288,7 +291,8 @@ public class SimpleClass {
 
             # Load and verify
             raw = json.loads(graph_file.read_text(encoding="utf-8"))
-            self.assertEqual(raw["schema_version"], 2)
+            self.assertEqual(raw["schema_version"], SCHEMA_VERSION)
+
 
             graph = load_graph(tmp_path)
 
