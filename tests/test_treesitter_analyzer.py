@@ -1,7 +1,8 @@
 """Unit tests for TreeSitterAnalyzer engine."""
 
 from pathlib import Path
-from lineagelens.config import ProjectConfig, AnalysisConfig
+
+from lineagelens.config import AnalysisConfig, ProjectConfig
 from lineagelens.treesitter_analyzer import TreeSitterAnalyzer
 
 

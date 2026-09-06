@@ -41,7 +41,6 @@ class TestListProviders(unittest.TestCase):
         """Test that list_providers returns count=0 before Issue #39."""
         # Until PROVIDES relations are extracted, this tool should return empty
         # This is expected and correct behavior
-        pass
 
 
 class TestToolDocstrings(unittest.TestCase):

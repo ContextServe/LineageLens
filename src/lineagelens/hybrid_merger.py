@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+
 from lineagelens.model import CodeGraph, Evidence, Relation
 
 logger = logging.getLogger(__name__)

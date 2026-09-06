@@ -131,7 +131,7 @@ class AnalysisConfig:
     #   "tree-sitter"  Universal zero-dependency syntactic AST parser
     #   "scip"         Compiler-verified facts from SCIP protobuf index (index.scip)
     #   "hybrid"       Tree-sitter base syntactic graph + SCIP compiler fact enrichment
-    engine: Literal["compiler", "tree-sitter", "scip", "hybrid"] = "compiler"
+    engine: Literal[compiler, tree-sitter, scip, hybrid] = "compiler"
 
     # SCIP protobuf index path relative to project root
     scip_index_file: str = "index.scip"
