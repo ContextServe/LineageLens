@@ -1412,8 +1412,14 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
         containers_found=0,
     )
 
-    # Phase 1: Parse files and collect definitions
+    # Engine Dispatcher (tree-sitter, scip, hybrid)
+    engine = getattr(config.analysis, "engine", "compiler")
+    if engine != "compiler":
+        return _analyze_with_engine(root, config, engine, report)
+
+    # Phase 1: Parse files and collect definitions (Legacy Compiler Engine)
     for path in iter_python(root, [*config.source_roots, *config.test_roots, *config.script_roots]):
+
         try:
             text = path.read_text(encoding="utf-8")
             tree = ast.parse(text, filename=str(path))
@@ -1514,3 +1520,44 @@ def analyze(root: Path, config: ProjectConfig | None = None) -> tuple[CodeGraph,
     report.finished_at = datetime.now(timezone.utc).isoformat()
 
     return graph, report
+
+
+def _analyze_with_engine(
+    root: Path, config: ProjectConfig, engine: str, report: AnalysisReport
+) -> tuple[CodeGraph, AnalysisReport]:
+    """Execute analysis using tree-sitter, scip, or hybrid engines."""
+    from .hybrid_merger import HybridGraphMerger
+    from .scip_ingestor import SCIPProtobufIngestor
+    from .treesitter_analyzer import TreeSitterAnalyzer
+
+    scip_path = root / getattr(config.analysis, "scip_index_file", "index.scip")
+
+    if engine == "tree-sitter":
+        ts_analyzer = TreeSitterAnalyzer(config)
+        graph = ts_analyzer.analyze_project(root)
+    elif engine == "scip":
+        scip_ingestor = SCIPProtobufIngestor(root)
+        graph = scip_ingestor.ingest(scip_path)
+    elif engine == "hybrid":
+        ts_analyzer = TreeSitterAnalyzer(config)
+        base_graph = ts_analyzer.analyze_project(root)
+
+        if scip_path.exists():
+            scip_ingestor = SCIPProtobufIngestor(root)
+            scip_graph = scip_ingestor.ingest(scip_path)
+            graph = HybridGraphMerger.merge(base_graph, scip_graph)
+        else:
+            logger.info(f"Hybrid engine: {scip_path} not found. Operating on Tree-sitter base graph.")
+            graph = base_graph
+    else:
+        logger.warning(f"Unknown engine '{engine}'. Falling back to Tree-sitter.")
+        ts_analyzer = TreeSitterAnalyzer(config)
+        graph = ts_analyzer.analyze_project(root)
+
+    report.symbols_found = len(graph.symbols)
+    report.relations_found = len(graph.relations)
+    report.containers_found = len(graph.containers)
+    report.finished_at = datetime.now(timezone.utc).isoformat()
+
+    return graph, report
+

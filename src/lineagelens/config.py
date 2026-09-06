@@ -126,6 +126,20 @@ class AnalysisConfig:
     # pathological repos, not a tuning knob.
     jedi_max_calls: int | None = None
 
+    # AST & Code Intelligence Analysis Engine.
+    #   "compiler"     Native compiler bridges (Python ast, Java JDT, TS Compiler API) - Default
+    #   "tree-sitter"  Universal zero-dependency syntactic AST parser
+    #   "scip"         Compiler-verified facts from SCIP protobuf index (index.scip)
+    #   "hybrid"       Tree-sitter base syntactic graph + SCIP compiler fact enrichment
+    engine: Literal["compiler", "tree-sitter", "scip", "hybrid"] = "compiler"
+
+    # SCIP protobuf index path relative to project root
+    scip_index_file: str = "index.scip"
+
+    # Auto-generate SCIP index if scip tool is found on PATH
+    auto_generate_scip: bool = False
+
+
 
 @dataclass(frozen=True)
 class ProjectConfig:
@@ -180,6 +194,9 @@ class ProjectConfig:
         entry_rules.update(
             {key: bool(value) for key, value in (raw.get("entry_point_rules", {}) or {}).items()}
         )
+        engine = str(raw.get("engine", defaults.engine)).lower()
+        if engine not in {"compiler", "tree-sitter", "scip", "hybrid"}:
+            engine = defaults.engine
         return AnalysisConfig(
             entry_point_rules=entry_rules,
             risk_rules=tuple(rules) or defaults.risk_rules,
@@ -188,7 +205,11 @@ class ProjectConfig:
             module_scope_roots=str(raw.get("module_scope_roots", defaults.module_scope_roots)),
             jedi=bool(raw.get("jedi", defaults.jedi)),
             jedi_max_calls=int(max_calls) if max_calls is not None else None,
+            engine=engine,  # type: ignore[arg-type]
+            scip_index_file=str(raw.get("scip_index_file", defaults.scip_index_file)),
+            auto_generate_scip=bool(raw.get("auto_generate_scip", defaults.auto_generate_scip)),
         )
+
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
