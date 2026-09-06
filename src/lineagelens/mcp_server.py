@@ -402,6 +402,99 @@ def create_mcp_server() -> MCPServer:
             return {"error": str(e)}
 
     @server.tool()
+    async def list_implementations(interface_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Find all classes that implement a given interface.
+
+        Filters results from get_callers() by relation.kind=="INHERITS" to show only
+        direct implementers of the interface. Useful for understanding extension points
+        and finding all implementations of a plugin interface or SPI.
+
+        Args:
+            interface_id: Symbol ID of the interface (e.g., 'java.io.Serializable')
+
+        Returns:
+            Dictionary with:
+            - interface_id: The queried interface
+            - count: Number of implementing classes
+            - implementations: List of implementing class symbols with metadata
+        """
+        try:
+            graph = get_cached_graph(PROJECT_PATH)
+            index = get_cached_index(PROJECT_PATH)
+
+            # Get all symbols that reference this interface
+            all_relations = query_get_callers(graph, interface_id, index)
+
+            # Filter to INHERITS relations only
+            implementations = []
+            seen_ids = set()
+            for rel in all_relations:
+                if rel.kind == "INHERITS" and rel.source not in seen_ids:
+                    seen_ids.add(rel.source)
+                    sym = graph.symbols.get(rel.source)
+                    if sym:
+                        implementations.append(asdict(sym))
+
+            return {
+                "interface_id": interface_id,
+                "count": len(implementations),
+                "implementations": implementations,
+            }
+        except GraphNotFoundError as e:
+            return {"error": str(e)}
+
+    @server.tool()
+    async def list_providers(service_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Find all providers of an SPI or service interface.
+
+        Filters results from get_callers() by relation.kind=="PROVIDES" to show only
+        providers registered via service-provider interface (SPI) mechanisms.
+
+        IMPORTANT: PROVIDES relations are extracted from service registry files
+        (META-INF/services/*, META-INF/dubbo/internal/*, etc.). Until Issue #39
+        is implemented, this tool will return empty results as PROVIDES relations
+        are not yet available in the graph.
+
+        Args:
+            service_id: Symbol ID of the service interface
+                       (e.g., 'org.apache.dubbo.rpc.Protocol')
+
+        Returns:
+            Dictionary with:
+            - service_id: The queried service
+            - count: Number of registered providers
+            - providers: List of provider symbols with registry_source metadata
+        """
+        try:
+            graph = get_cached_graph(PROJECT_PATH)
+            index = get_cached_index(PROJECT_PATH)
+
+            # Get all symbols that provide this service
+            all_relations = query_get_callers(graph, service_id, index)
+
+            # Filter to PROVIDES relations only
+            providers = []
+            seen_ids = set()
+            for rel in all_relations:
+                if rel.kind == "PROVIDES" and rel.source not in seen_ids:
+                    seen_ids.add(rel.source)
+                    sym = graph.symbols.get(rel.source)
+                    if sym:
+                        provider_data = asdict(sym)
+                        # Include the registry source if available in the relation arguments
+                        if hasattr(rel, 'arguments') and rel.arguments:
+                            provider_data["registry_source"] = rel.arguments.get("registry_file")
+                        providers.append(provider_data)
+
+            return {
+                "service_id": service_id,
+                "count": len(providers),
+                "providers": providers,
+            }
+        except GraphNotFoundError as e:
+            return {"error": str(e)}
+
+    @server.tool()
     async def get_module_overview(module: str, **kwargs: Any) -> dict[str, Any]:
         """Get high-level overview of a module.
 
