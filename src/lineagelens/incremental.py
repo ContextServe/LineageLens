@@ -7,10 +7,9 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .analyzer import analyze
 from .config import ProjectConfig
 from .db import SQLiteIndexDB
-from .model import CodeGraph, Relation, Symbol
+from .model import CodeGraph
 from .treesitter_analyzer import EXTENSION_LANG_MAP, TreeSitterAnalyzer
 
 if TYPE_CHECKING:

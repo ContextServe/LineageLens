@@ -1,9 +1,9 @@
 """Unit tests for LineageLensWatcher and DebouncedEventHandler."""
 
-import time
 import tempfile
-from pathlib import Path
+import time
 import unittest
+from pathlib import Path
 
 from lineagelens.watcher import LineageLensWatcher
 

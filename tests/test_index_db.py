@@ -1,8 +1,8 @@
 """Unit tests for SQLiteIndexDB storage engine."""
 
 import tempfile
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from lineagelens.db import SQLiteIndexDB
 from lineagelens.model import CodeGraph, Evidence, Relation, Symbol

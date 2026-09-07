@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-logger = logging.getLogger(__name__)
-
 from .config import ProjectConfig
 from .model import (
     SCHEMA_VERSION,
@@ -25,6 +23,8 @@ from .model import (
     Symbol,
 )
 from .report import AnalysisReport, FileFailure, SymbolWarning
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .index import GraphIndex

@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from .model import SCHEMA_VERSION, CodeGraph, Container, Evidence, Relation, ResiliencySignal, Symbol
+from .model import (
+    SCHEMA_VERSION,
+    CodeGraph,
+    Container,
+    Evidence,
+    Relation,
+    ResiliencySignal,
+    Symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -381,10 +391,8 @@ class SQLiteIndexDB:
             for row in conn.execute("SELECT * FROM containers"):
                 children_list = []
                 if row["children"]:
-                    try:
+                    with contextlib.suppress(Exception):
                         children_list = json.loads(row["children"])
-                    except Exception:
-                        pass
                 c = Container(
                     id=row["id"],
                     name=row["name"],

@@ -100,7 +100,7 @@ class SCIPProtobufIngestor:
                         if file_p.exists():
                             try:
                                 source_lines = file_p.read_text(errors="replace").splitlines()
-                                if any(PRAGMA.search(l) for l in source_lines[max(0, line-3):min(len(source_lines), line+2)]):
+                                if any(PRAGMA.search(line_content) for line_content in source_lines[max(0, line - 3) : min(len(source_lines), line + 2)]):
                                     sym_obj.mark_entry_point("pragma_keep")
                             except Exception:
                                 pass
