@@ -432,10 +432,10 @@ for TOOL in lineagelens codegraph graphify baseline; do
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "codegraph" ]; then
+    # Note: CodeGraph MCP server has issues, so we use CLI via Bash instead
+    # Allow codegraph query/explore commands via Bash
     claude -p "$PROMPT" \
-      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
-      --strict-mcp-config \
-      --allowedTools "mcp__codegraph__*" \
+      --allowedTools "Read,Glob,Grep,Bash(codegraph *)" \
       --model claude-sonnet-4-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
@@ -490,10 +490,10 @@ for TOOL in lineagelens codegraph graphify baseline; do
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "codegraph" ]; then
+    # Note: CodeGraph MCP server has issues, so we use CLI via Bash instead
+    # Allow codegraph query/explore commands via Bash
     claude -p "$PROMPT" \
-      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
-      --strict-mcp-config \
-      --allowedTools "mcp__codegraph__*" \
+      --allowedTools "Read,Glob,Grep,Bash(codegraph *)" \
       --model claude-sonnet-4-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
