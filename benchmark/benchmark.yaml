@@ -6,17 +6,25 @@ repo:
 
 language: python           # python | java | js  (authoritative — the developer sets it)
 
-work_dir: /tmp/ll-bench    # where the 2 clones + results are created
-mcp_dir: mcptest
-nonmcp_dir: nonmcp_test
+# Which arms (code-graph tools) to benchmark
+arms: [lineagelens, codegraph, graphify, baseline]
+
+work_dir: /tmp/ll-bench    # where the clones + results are created
+
+# Generalized clone directory mapping (optional; defaults to clone_{arm_name})
+clone_dirs:
+  lineagelens: mcptest
+  codegraph: cgtest
+  graphify: gftest
+  baseline: nonmcp_test
 
 source_roots: []           # optional; for non-src/-layout repos (e.g., langchain's
-                           # libs/langchain/langchain/...) — written into mcptest's
-                           # lineagelens.yaml before analyze, avoids a silent empty graph
+                           # libs/langchain/langchain/...) — written into lineagelens.yaml
+                           # before analyze, avoids a silent empty graph
                            # Example: ["libs/langchain/langchain"]
 
 model: claude-sonnet-4-5
-budget_usd: 3.00           # -> --max-budget-usd on both claude calls
+budget_usd: 3.00           # -> --max-budget-usd on all claude calls
 timeout_seconds: 900
 
-mcp_tool_prefix: mcp__lineagelens   # set once after the one-time spike
+mcp_tool_prefix: mcp__lineagelens
