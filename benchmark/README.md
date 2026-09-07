@@ -480,10 +480,21 @@ cd $TEST_DIR
 # Clone Apache Dubbo
 git clone https://github.com/apache/dubbo repo
 cd repo
-git checkout HEAD
 
 REPO_PATH="$(pwd)"
 echo "Repo at: $REPO_PATH"
+```
+
+### STEP 1.5: Checkout PR Base Commit
+
+```bash
+cd $REPO_PATH
+
+# PR #16416: Fix Triple gRPC decoder handoff
+# Base commit: 3a3043227f5571d25eb2889de5bca22f2914843b
+git checkout 3a3043227f5571d25eb2889de5bca22f2914843b
+
+echo "✓ Checked out at PR base commit"
 ```
 
 ### STEP 2: Build ALL Graphs
@@ -507,18 +518,6 @@ echo "✓ CodeGraph index ready"
 echo "=== Building Graphify graph ==="
 graphify extract . --code-only
 echo "✓ Graphify graph ready"
-```
-
-### STEP 1.5: Checkout PR Base Commit (Dubbo)
-
-```bash
-cd $REPO_PATH
-
-# PR #16416: Fix Triple gRPC decoder handoff
-# Base commit: 3a3043227f5571d25eb2889de5bca22f2914843b
-git checkout 3a3043227f5571d25eb2889de5bca22f2914843b
-
-echo "Checked out at base commit"
 ```
 
 ### STEP 3a: PR-Replication Test (Dubbo PR #16416)
