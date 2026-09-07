@@ -24,6 +24,7 @@ from common import (
     prepare_clones,
     resolve_pr,
     run_arm_setup,
+    run_cmd,
     capture_tool_versions,
 )
 from prompts import render_prompt
@@ -221,22 +222,51 @@ def main():
     # Setup each arm
     log("Running setup for all arms", "INFO", section=True)
     for arm in arms_list:
-        # Special: patch LineageLens source_roots if provided
+        # Special handling for LineageLens with source_roots patching
         if arm.name == "lineagelens" and config.get("source_roots"):
-            log(f"Patching lineagelens.yaml with source_roots: {config['source_roots']}")
-            config_file = clones[arm.name] / "lineagelens.yaml"
-            with open(config_file, "r") as f:
-                ll_config = yaml.safe_load(f)
-            if ll_config is None:
-                ll_config = {}
-            ll_config["source_roots"] = config["source_roots"]
-            with open(config_file, "w") as f:
-                yaml.dump(ll_config, f)
+            log(f"Setting up LineageLens with source_roots: {config['source_roots']}")
+            clone_path = clones[arm.name]
 
-        success = run_arm_setup(arm, clones[arm.name], config)
-        if not success:
-            log(f"Setup failed for arm {arm.name}", "ERROR")
-            sys.exit(1)
+            # Step 1: lineagelens init
+            try:
+                run_cmd(["lineagelens", "init", "."], cwd=str(clone_path), timeout=900)
+            except Exception as e:
+                log(f"lineagelens init failed: {e}", "ERROR")
+                sys.exit(1)
+
+            # Step 2: patch lineagelens.yaml
+            config_file = clone_path / "lineagelens.yaml"
+            if config_file.exists():
+                with open(config_file, "r") as f:
+                    ll_config = yaml.safe_load(f)
+                if ll_config is None:
+                    ll_config = {}
+                ll_config["source_roots"] = config["source_roots"]
+                with open(config_file, "w") as f:
+                    yaml.dump(ll_config, f)
+                log(f"Patched lineagelens.yaml with source_roots")
+
+            # Step 3: lineagelens analyze (with patched config)
+            analyze_timeout = max(config.get("timeout_seconds", 900) * 2, 1200)
+            try:
+                run_cmd(["lineagelens", "analyze", ".", "--quiet"], cwd=str(clone_path), timeout=analyze_timeout)
+            except Exception as e:
+                log(f"lineagelens analyze failed: {e}", "ERROR")
+                sys.exit(1)
+
+            # Step 4: validate the graph
+            from arms import validate_lineagelens_graph
+            if not validate_lineagelens_graph(clone_path):
+                log(f"LineageLens graph validation failed (empty or too small)", "ERROR")
+                sys.exit(1)
+
+            log(f"LineageLens setup complete")
+        else:
+            # Standard setup for all other arms
+            success = run_arm_setup(arm, clones[arm.name], config)
+            if not success:
+                log(f"Setup failed for arm {arm.name}", "ERROR")
+                sys.exit(1)
 
     # Get ground truth (files changed in PR)
     log("Determining ground truth (files changed in PR)", "INFO", section=True)
