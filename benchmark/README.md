@@ -129,7 +129,7 @@ for TOOL in lineagelens codegraph graphify baseline; do
   
   elif [ "$TOOL" = "codegraph" ]; then
     claude -p "$PROMPT" \
-      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp","--path","."]}}}' \
+      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
       --strict-mcp-config \
       --allowedTools "mcp__codegraph__*" \
       --model claude-sonnet-4-5 \
@@ -433,7 +433,7 @@ for TOOL in lineagelens codegraph graphify baseline; do
   
   elif [ "$TOOL" = "codegraph" ]; then
     claude -p "$PROMPT" \
-      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp","--path","."]}}}' \
+      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
       --strict-mcp-config \
       --allowedTools "mcp__codegraph__*" \
       --model claude-sonnet-4-5 \
@@ -491,7 +491,7 @@ for TOOL in lineagelens codegraph graphify baseline; do
   
   elif [ "$TOOL" = "codegraph" ]; then
     claude -p "$PROMPT" \
-      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp","--path","."]}}}' \
+      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
       --strict-mcp-config \
       --allowedTools "mcp__codegraph__*" \
       --model claude-sonnet-4-5 \
