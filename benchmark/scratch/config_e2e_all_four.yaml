@@ -1,0 +1,25 @@
+# E2E Test: All four tools (LineageLens vs CodeGraph vs Graphify vs Baseline)
+# Full comparison benchmark
+# WARNING: Requires CodeGraph and Graphify to be installed
+# Install: npm i -g @colbymchenry/codegraph && uv tool install graphifyy
+
+repo:
+  url: https://github.com/langchain-ai/langchain
+  pr: 39809
+
+language: python
+arms: [lineagelens, codegraph, graphify, baseline]
+
+work_dir: /tmp/scratch_e2e_all_four
+
+clone_dirs:
+  lineagelens: ll_clone
+  codegraph: cg_clone
+  graphify: gf_clone
+  baseline: baseline_clone
+
+source_roots: ["libs/langchain/langchain"]
+
+model: claude-sonnet-4-5
+budget_usd: 3.00
+timeout_seconds: 900

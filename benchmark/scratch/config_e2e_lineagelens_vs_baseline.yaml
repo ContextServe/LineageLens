@@ -1,0 +1,21 @@
+# E2E Test: LineageLens vs Baseline (file exploration)
+# Small repo, small PR, quick test (~5-10 min)
+
+repo:
+  url: https://github.com/langchain-ai/langchain
+  pr: 39809
+
+language: python
+arms: [lineagelens, baseline]
+
+work_dir: /tmp/scratch_e2e_lineagelens_baseline
+
+clone_dirs:
+  lineagelens: ll_clone
+  baseline: baseline_clone
+
+source_roots: ["libs/langchain/langchain"]
+
+model: claude-sonnet-4-5
+budget_usd: 2.00
+timeout_seconds: 900

@@ -195,8 +195,10 @@ def main():
             log(f"{'='*80}", "INFO")
             log(f"Prompt (first 500 chars):\n{prompts[arm.name][:500]}\n...", "INFO")
 
-            mcp_config = build_mcp_config(arm, clones[arm.name])
-            cmd = build_claude_command(arm, prompts[arm.name], clones[arm.name], config, mcp_config)
+            # Use dummy clone path for dry-run (won't be used, just for command construction)
+            dummy_clone_path = Path(config["work_dir"]) / "dummy"
+            mcp_config = build_mcp_config(arm, dummy_clone_path)
+            cmd = build_claude_command(arm, prompts[arm.name], dummy_clone_path, config, mcp_config)
             log(f"Claude command:\n{' '.join(cmd)}\n", "INFO")
 
         log("Dry-run complete; no clones or API calls made.", "INFO")
