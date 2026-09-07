@@ -442,10 +442,10 @@ for TOOL in lineagelens codegraph graphify baseline; do
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "graphify" ]; then
+    # Note: Graphify MCP server has issues, so we use CLI via Bash instead
+    # Allow graphify cli commands via Bash
     claude -p "$PROMPT" \
-      --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$REPO_PATH'/graphify-out/graph.json"]}}}' \
-      --strict-mcp-config \
-      --allowedTools "mcp__graphify__*" \
+      --allowedTools "Read,Glob,Grep,Bash(graphify *)" \
       --model claude-sonnet-4-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
@@ -500,10 +500,10 @@ for TOOL in lineagelens codegraph graphify baseline; do
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "graphify" ]; then
+    # Note: Graphify MCP server has issues, so we use CLI via Bash instead
+    # Allow graphify cli commands via Bash
     claude -p "$PROMPT" \
-      --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$REPO_PATH'/graphify-out/graph.json"]}}}' \
-      --strict-mcp-config \
-      --allowedTools "mcp__graphify__*" \
+      --allowedTools "Read,Glob,Grep,Bash(graphify *)" \
       --model claude-sonnet-4-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
