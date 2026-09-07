@@ -343,3 +343,31 @@ def test_implicit_dunder_list_covers_the_common_protocols():
         assert name in IMPLICIT_DUNDERS
     assert "process" not in IMPLICIT_DUNDERS
     assert "run" not in IMPLICIT_DUNDERS
+
+
+def test_inner_closure_functions_are_kept_when_enclosing_function_is_reachable(tmp_path):
+    """Inner functions defined inside a reachable function are part of its runtime scope."""
+    root = project(
+        tmp_path,
+        {
+            "src/pkg/__init__.py": "",
+            "src/pkg/mod.py": (
+                "def outer():\n"
+                "    def inner_helper():\n"
+                "        return 42\n"
+                "    return inner_helper()\n"
+                "\n"
+                "def main():\n"
+                "    return outer()\n"
+            ),
+            "pyproject.toml": (
+                '[project]\nname = "p"\nversion = "0"\n\n'
+                '[project.scripts]\np = "pkg.mod:main"\n'
+            ),
+        },
+    )
+    result = verdicts(root)
+    assert result.explain("pkg.mod.outer").verdict == "alive"
+    assert result.explain("pkg.mod.outer.inner_helper").verdict == "alive"
+    assert result.explain("pkg.mod.outer.inner_helper").rescue.name in ("inner_scope_definition", "static_call")
+
