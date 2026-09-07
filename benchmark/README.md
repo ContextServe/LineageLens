@@ -18,32 +18,68 @@ Both suites share:
 
 ## Quick Start
 
-### Suite A: PR-Replication
+### Running the Complete Benchmark Suite
+
+Compare LineageLens vs. CodeGraph vs. Graphify vs. Baseline on real GitHub PRs:
 
 ```bash
-# 1. Configure
-cp benchmark.yaml my_benchmark.yaml  # then edit
+# Prerequisites
+pip install lineagelens
+npm i -g @colbymchenry/codegraph      # for CodeGraph (optional)
+uv tool install graphifyy              # for Graphify (optional)
 
-# 2. Dry-run (free, no clones or API calls)
-python benchmark/run_pr_benchmark.py --config my_benchmark.yaml --dry-run
+# Run Suite A: PR-Replication Benchmark
+python benchmark/run_pr_benchmark.py --config benchmark/benchmark.yaml
 
-# 3. Run
-python benchmark/run_pr_benchmark.py --config my_benchmark.yaml
+# Results at: /tmp/ll-bench/results/summary.md
+cat /tmp/ll-bench/results/summary.md
 ```
 
-Output: `/tmp/ll-bench/results/summary.md` and `summary.json`
+This will:
+1. Clone LangChain PR #39809 at its base commit
+2. Build code graphs for each enabled tool
+3. Run Claude with each tool's MCP interface
+4. Score predictions (file-list) against hidden ground truth
+5. Generate comparison report (cost, tokens, F1 score)
 
-### Suite B: Architecture-Q&A
+### Suite A: PR-Replication (Detailed)
+
+Compares tools on **real PR file-list prediction**.
 
 ```bash
-# 1. Configure
-# arch_benchmark.yaml is pre-filled; customize as needed
+# 1. Dry-run (free, validates setup)
+python benchmark/run_pr_benchmark.py --config benchmark/benchmark.yaml --dry-run
 
-# 2. Run
+# 2. Full run (clones repo, runs Claude with all arms)
+python benchmark/run_pr_benchmark.py --config benchmark/benchmark.yaml
+
+# 3. View results
+cat /tmp/ll-bench/results/summary.md      # markdown report
+cat /tmp/ll-bench/results/summary.json    # raw metrics
+```
+
+**Metrics:** Cost, tokens, time, tool calls, F1 (precision/recall) for file identification
+
+**Default config:** LangChain PR #39809 (Anthropic chat models)  
+**Enabled arms:** lineagelens, codegraph, graphify, baseline
+
+### Suite B: Architecture-Q&A (Advanced)
+
+Measures **efficiency** (tool calls, tokens, cost, time) across repeated runs.
+
+```bash
+# Run architecture-Q&A suite
 python benchmark/run_arch_benchmark.py --config benchmark/arch_benchmark.yaml
+
+# Results at: /tmp/ll-arch-bench/results/summary.md
+cat /tmp/ll-arch-bench/results/summary.md
 ```
 
-Output: `/tmp/ll-arch-bench/results/summary.md` and `summary.json`
+**Metrics:** Medians of tool calls, duration, tokens, cost across 4 runs per arm per repo
+
+**Default repos:** Apache Dubbo, LangChain  
+**Default arms:** lineagelens, codegraph, graphify, baseline  
+**Note:** Requires CodeGraph and Graphify installed for full comparison
 
 ## Configuration
 
@@ -172,21 +208,48 @@ Prior versions of `prompt_mcp.md` referenced non-existent tool names (`query_cod
 
 ## Troubleshooting
 
-**"Graph has only X symbols (expected >20)"**
-- Your `source_roots` config is wrong (e.g., pointing to wrong directory layout)
-- Fix: Edit `benchmark.yaml`, set `source_roots: ["libs/langchain/langchain"]` for langchain
+### MCP Tools Not Being Called (0 tool calls)
 
-**"codegraph init" or "graphify extract" fails**
-- Tool may not be installed (`npm i -g @colbymchenry/codegraph`, `uv tool install graphifyy`)
-- Or tool CLI flags changed
+**Symptom:** LineageLens/CodeGraph/Graphify shows `Tool calls: 0` but runs in 0.2-1 second
 
-**Claude calls timeout**
+**Causes & Fixes:**
+1. **MCP server not starting** — check if the tool's MCP binary is installed
+   - LineageLens: `lineagelens-mcp` (installed with `pip install lineagelens`)
+   - CodeGraph: `codegraph serve --mcp` (installed with `npm i -g @colbymchenry/codegraph`)
+   - Graphify: `python -m graphify.serve` (installed with `uv tool install graphifyy`)
+
+2. **Graph is empty/too small** — tool's indexing failed
+   - Check: `ls -la <clone_dir>/.lineagelens/graph.json` (should be >1KB)
+   - Or: `ls -la <clone_dir>/.codegraph/` (should have index files)
+   - Fix: Re-run setup with `--verbose` flag to see indexing errors
+
+3. **Wrong `source_roots` path** — analyzer scans wrong directory
+   - Fix: Edit `benchmark.yaml`, use correct path (e.g., `["libs/langchain/langchain_classic"]`)
+   - Check: `cd <clone_dir> && lineagelens analyze . --verbose` to see what's being scanned
+
+### Graph Has Only X Symbols (Expected >20)
+
+- Your `source_roots` config is wrong
+- Fix: Edit `benchmark.yaml` and use the actual package directory
+- For LangChain: `source_roots: ["libs/langchain/langchain_classic"]`
+
+### CodeGraph/Graphify Installation Fails
+
+- CodeGraph: `npm i -g @colbymchenry/codegraph`
+- Graphify: `uv tool install graphifyy`
+- Ensure Node 18+ (for CodeGraph) and Python 3.9+ (for Graphify)
+
+### Claude Calls Timeout
+
 - Increase `timeout_seconds` in config (default 900 sec = 15 min)
 - Or reduce `budget_usd` to force smaller responses
+- Or test locally with a smaller repo first
 
-**"BLOCKED: Benchmark contamination detected"** (Suite B only)
-- Claude tried to invoke a competitor's CLI via Bash (should never happen)
-- Check if prompt is accidentally leaking tool names or suggesting Bash exploration
+### "BLOCKED: Benchmark contamination detected" (Suite B only)
+
+- Claude tried to invoke a competitor's CLI via Bash (anti-cheating layer detected it)
+- Check if prompt accidentally mentions competitor tool names
+- This is expected behavior — contamination detection is working
 
 ## References
 
