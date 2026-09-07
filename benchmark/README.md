@@ -16,11 +16,9 @@ Both suites share:
 - **Registry-driven prompts** (`prompts.py` + templates) — tool-specific hints rendered from the registry, no hand-typed prose
 - **Generalized reporting** (`report.py`) — N-column tables for both suites
 
-## Quick Start
+## Quick Start (Automated)
 
 ### Running the Complete Benchmark Suite
-
-Compare LineageLens vs. CodeGraph vs. Graphify vs. Baseline on real GitHub PRs:
 
 ```bash
 # Prerequisites
@@ -35,51 +33,158 @@ python benchmark/run_pr_benchmark.py --config benchmark/benchmark.yaml
 cat /tmp/ll-bench/results/summary.md
 ```
 
-This will:
-1. Clone LangChain PR #39809 at its base commit
-2. Build code graphs for each enabled tool
-3. Run Claude with each tool's MCP interface
-4. Score predictions (file-list) against hidden ground truth
-5. Generate comparison report (cost, tokens, F1 score)
+---
 
-### Suite A: PR-Replication (Detailed)
+## Manual Instructions (Step-by-Step)
 
-Compares tools on **real PR file-list prediction**.
+### Suite A: PR-Replication Benchmark (Manual)
+
+Compare LineageLens vs. Baseline on LangChain PR #39809:
 
 ```bash
-# 1. Dry-run (free, validates setup)
-python benchmark/run_pr_benchmark.py --config benchmark/benchmark.yaml --dry-run
+# 1. Clone and checkout PR base commit
+WORK_DIR="/tmp/manual-bench"
+mkdir -p $WORK_DIR
+cd $WORK_DIR
 
-# 2. Full run (clones repo, runs Claude with all arms)
-python benchmark/run_pr_benchmark.py --config benchmark/benchmark.yaml
+git clone https://github.com/langchain-ai/langchain ll_clone
+cd ll_clone
+git checkout a2024abe50a1db8dba3884a2a45c91989e6b561e  # PR base commit
 
-# 3. View results
-cat /tmp/ll-bench/results/summary.md      # markdown report
-cat /tmp/ll-bench/results/summary.json    # raw metrics
+# 2. Build LineageLens graph
+lineagelens init .
+# Edit lineagelens.yaml to set source_roots:
+sed -i '' 's/source_roots: \[\]/source_roots: ["libs\/langchain\/langchain_classic"]/' lineagelens.yaml
+lineagelens analyze . --quiet
+
+# Verify graph was built
+ls -lh .lineagelens/graph.json
+python3 -c "import json; g=json.load(open('.lineagelens/graph.json')); print(f'Symbols: {len(g.get(\"symbols\", []))}')"
+
+# 3. Test LineageLens MCP tools
+cd $WORK_DIR/ll_clone
+claude -p "Using the available code graph tools, list the main frameworks used in libs/langchain/langchain_classic/" \
+  --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$WORK_DIR'/ll_clone"}}}}' \
+  --strict-mcp-config \
+  --allowedTools "mcp__lineagelens__*" \
+  --disallowedTools "mcp__lineagelens__trigger_analysis" \
+  --model claude-sonnet-4-5 \
+  --max-budget-usd 1.0
+
+# 4. Test baseline tools (file exploration)
+claude -p "Using Read, Glob, and Grep tools only, identify which files in libs/langchain/langchain_classic define chat models." \
+  --allowedTools "Read,Glob,Grep,Bash(find *)" \
+  --model claude-sonnet-4-5 \
+  --max-budget-usd 1.0
 ```
 
-**Metrics:** Cost, tokens, time, tool calls, F1 (precision/recall) for file identification
+### Suite B: Architecture-Q&A (Manual)
 
-**Default config:** LangChain PR #39809 (Anthropic chat models)  
-**Enabled arms:** lineagelens, codegraph, graphify, baseline
-
-### Suite B: Architecture-Q&A (Advanced)
-
-Measures **efficiency** (tool calls, tokens, cost, time) across repeated runs.
+Analyze Apache Dubbo architecture:
 
 ```bash
-# Run architecture-Q&A suite
-python benchmark/run_arch_benchmark.py --config benchmark/arch_benchmark.yaml
+# 1. Clone and checkout Dubbo
+WORK_DIR="/tmp/manual-arch-bench"
+mkdir -p $WORK_DIR
+cd $WORK_DIR
 
-# Results at: /tmp/ll-arch-bench/results/summary.md
-cat /tmp/ll-arch-bench/results/summary.md
+git clone https://github.com/apache/dubbo dubbo_clone
+cd dubbo_clone
+git checkout HEAD
+
+# 2. Build LineageLens graph for Dubbo
+lineagelens init .
+# Configure for Java (if needed, edit lineagelens.yaml)
+lineagelens analyze . --quiet
+
+# Verify graph
+python3 -c "import json; g=json.load(open('.lineagelens/graph.json')); print(f'Symbols: {len(g.get(\"symbols\", []))}')"
+
+# 3. Ask architecture question with MCP tools
+cd $WORK_DIR/dubbo_clone
+claude -p "How does Dubbo's service registration flow from provider startup to registry write? Trace the complete call chain." \
+  --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$WORK_DIR'/dubbo_clone"}}}}' \
+  --strict-mcp-config \
+  --allowedTools "mcp__lineagelens__*" \
+  --disallowedTools "mcp__lineagelens__trigger_analysis" \
+  --model claude-sonnet-4-5 \
+  --max-budget-usd 2.0
+
+# 4. Same question with baseline tools
+claude -p "How does Dubbo's service registration flow from provider startup to registry write? Use Read, Glob, Grep to trace it." \
+  --allowedTools "Read,Glob,Grep,Bash(find *)" \
+  --model claude-sonnet-4-5 \
+  --max-budget-usd 2.0
 ```
 
-**Metrics:** Medians of tool calls, duration, tokens, cost across 4 runs per arm per repo
+### Comparing Tools: CodeGraph
 
-**Default repos:** Apache Dubbo, LangChain  
-**Default arms:** lineagelens, codegraph, graphify, baseline  
-**Note:** Requires CodeGraph and Graphify installed for full comparison
+```bash
+# 1. Install CodeGraph
+npm i -g @colbymchenry/codegraph
+
+# 2. Setup CodeGraph on LangChain
+WORK_DIR="/tmp/manual-bench"
+cd $WORK_DIR/ll_clone
+codegraph init
+# This builds .codegraph/ index
+
+# 3. Test CodeGraph MCP tools
+cd $WORK_DIR/ll_clone
+claude -p "Using the available code graph, identify which files import ChatOpenAI." \
+  --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
+  --strict-mcp-config \
+  --allowedTools "mcp__codegraph__*" \
+  --model claude-sonnet-4-5 \
+  --max-budget-usd 1.0
+```
+
+### Comparing Tools: Graphify
+
+```bash
+# 1. Install Graphify
+uv tool install graphifyy
+
+# 2. Build Graphify graph on LangChain
+WORK_DIR="/tmp/manual-bench"
+cd $WORK_DIR/ll_clone
+graphify extract . --code-only
+# This builds graphify-out/graph.json
+
+# 3. Start Graphify MCP server
+python -m graphify.serve $WORK_DIR/ll_clone/graphify-out/graph.json &
+
+# 4. Test Graphify MCP tools
+claude -p "Using the code graph, which files define chat model classes?" \
+  --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$WORK_DIR'/ll_clone/graphify-out/graph.json"]}}}' \
+  --strict-mcp-config \
+  --allowedTools "mcp__graphify__*" \
+  --model claude-sonnet-4-5 \
+  --max-budget-usd 1.0
+
+# 5. Stop server
+pkill -f "graphify.serve"
+```
+
+---
+
+## Interpreting Results
+
+After running any test, look at Claude's response for:
+
+1. **Tool Calls Made** — How many times did Claude invoke MCP tools vs. file tools?
+   - MCP tools: should be dozens for complex questions
+   - File tools (Read/Glob/Grep): baseline approach
+
+2. **Token Usage** — Input/output token count (visible in Claude output)
+   - MCP approach should use fewer tokens overall
+   - File exploration uses more tokens for raw source
+
+3. **Cost** — Shown in Claude output (tokens × model rate)
+   - Compare cost between tools
+
+4. **Quality** — Did Claude identify the correct files/concepts?
+   - Check against what you know about the codebase
 
 ## Configuration
 
