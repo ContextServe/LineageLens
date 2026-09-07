@@ -536,8 +536,10 @@ for TOOL in lineagelens codegraph graphify baseline; do
   OUTFILE="$TEST_OUT/dubbo-pr-${TOOL}.jsonl"
   echo "=== Running $TOOL (PR-replication) ==="
   
+  PROMPT="Dubbo PR #16416: Fix Triple gRPC decoder handoff. The lazy method discovery listener creates a temporary GrpcStreamingDecoder, which loses buffered bytes from subsequent messages. The fix reuses the existing StreamingDecoder and makes the close callback a no-op. Which files would need to change? List them in '## Files I would change' section."
+  
   if [ "$TOOL" = "lineagelens" ]; then
-    claude -p "Dubbo PR #16416: Fix Triple gRPC decoder handoff. The issue: lazy method discovery listener creates temporary GrpcStreamingDecoder, losing buffered bytes. Fix: reuse existing StreamingDecoder, make close callback a no-op. Which files would change? List in '## Files I would change'." \
+    claude -p "$PROMPT" \
       --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$REPO_PATH'"}}}}' \
       --strict-mcp-config \
       --allowedTools "mcp__lineagelens__*" \
@@ -548,7 +550,7 @@ for TOOL in lineagelens codegraph graphify baseline; do
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "codegraph" ]; then
-    claude -p "Dubbo PR #16416: Fix Triple gRPC decoder handoff. Issue: temporary GrpcStreamingDecoder loses buffered bytes. Solution: reuse StreamingDecoder, make close a no-op. Which files change?" \
+    claude -p "$PROMPT" \
       --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
       --strict-mcp-config \
       --allowedTools "mcp__codegraph__*" \
@@ -558,7 +560,7 @@ for TOOL in lineagelens codegraph graphify baseline; do
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "graphify" ]; then
-    claude -p "Dubbo PR #16416: Fix Triple gRPC decoder handoff. Issue: temporary GrpcStreamingDecoder loses buffered bytes. Solution: reuse StreamingDecoder, make close a no-op. Which files change?" \
+    claude -p "$PROMPT" \
       --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$REPO_PATH'/graphify-out/graph.json"]}}}' \
       --strict-mcp-config \
       --allowedTools "mcp__graphify__*" \
@@ -568,7 +570,7 @@ for TOOL in lineagelens codegraph graphify baseline; do
       --verbose > "$OUTFILE"
   
   else
-    claude -p "Dubbo PR #16416: Fix Triple gRPC decoder handoff. Issue: temporary GrpcStreamingDecoder loses buffered bytes. Solution: reuse StreamingDecoder, make close a no-op. Use Read/Glob/Grep. Which files?" \
+    claude -p "$PROMPT" \
       --allowedTools "Read,Glob,Grep,Bash(find *)" \
       --model claude-sonnet-4-5 \
       --max-budget-usd 3.0 \
@@ -592,8 +594,10 @@ for TOOL in lineagelens codegraph graphify baseline; do
   OUTFILE="$TEST_OUT/dubbo-arch-${TOOL}.jsonl"
   echo "=== Running $TOOL (architecture question) ==="
   
+  PROMPT="Dubbo Service Registration Architecture: Trace the complete call chain from provider startup to registry write. How does a service flow through the startup process, through export, and finally to registry operations? Describe the key classes, methods, and flow."
+  
   if [ "$TOOL" = "lineagelens" ]; then
-    claude -p "Trace Dubbo's service registration: How does a service flow from provider startup to registry write? Show call chain." \
+    claude -p "$PROMPT" \
       --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$REPO_PATH'"}}}}' \
       --strict-mcp-config \
       --allowedTools "mcp__lineagelens__*" \
@@ -604,7 +608,7 @@ for TOOL in lineagelens codegraph graphify baseline; do
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "codegraph" ]; then
-    claude -p "Trace Dubbo's service registration: How does a service flow from provider startup to registry write? Show call chain." \
+    claude -p "$PROMPT" \
       --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
       --strict-mcp-config \
       --allowedTools "mcp__codegraph__*" \
@@ -614,7 +618,7 @@ for TOOL in lineagelens codegraph graphify baseline; do
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "graphify" ]; then
-    claude -p "Trace Dubbo's service registration: How does a service flow from provider startup to registry write? Show call chain." \
+    claude -p "$PROMPT" \
       --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$REPO_PATH'/graphify-out/graph.json"]}}}' \
       --strict-mcp-config \
       --allowedTools "mcp__graphify__*" \
@@ -624,7 +628,7 @@ for TOOL in lineagelens codegraph graphify baseline; do
       --verbose > "$OUTFILE"
   
   else
-    claude -p "Trace Dubbo's service registration: How does a service flow from provider startup to registry write? Use Read, Glob, Grep." \
+    claude -p "$PROMPT" \
       --allowedTools "Read,Glob,Grep,Bash(find *)" \
       --model claude-sonnet-4-5 \
       --max-budget-usd 3.0 \
