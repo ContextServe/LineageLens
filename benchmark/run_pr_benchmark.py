@@ -241,13 +241,23 @@ def main():
                     ll_config = yaml.safe_load(f)
                 if ll_config is None:
                     ll_config = {}
+                log(f"Original source_roots: {ll_config.get('source_roots', [])}")
                 ll_config["source_roots"] = config["source_roots"]
                 with open(config_file, "w") as f:
                     yaml.dump(ll_config, f)
-                log(f"Patched lineagelens.yaml with source_roots")
+                log(f"Patched lineagelens.yaml with source_roots: {config['source_roots']}")
+
+                # Verify the patch
+                with open(config_file, "r") as f:
+                    verify_config = yaml.safe_load(f)
+                log(f"Verified source_roots in file: {verify_config.get('source_roots', [])}")
+            else:
+                log(f"lineagelens.yaml not found at {config_file}", "ERROR")
+                sys.exit(1)
 
             # Step 3: lineagelens analyze (with patched config)
             analyze_timeout = max(config.get("timeout_seconds", 900) * 2, 1200)
+            log(f"Running lineagelens analyze (timeout: {analyze_timeout}s)")
             try:
                 run_cmd(["lineagelens", "analyze", ".", "--quiet"], cwd=str(clone_path), timeout=analyze_timeout)
             except Exception as e:
