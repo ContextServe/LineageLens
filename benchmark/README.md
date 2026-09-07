@@ -35,156 +35,737 @@ cat /tmp/ll-bench/results/summary.md
 
 ---
 
-## Manual Instructions (Step-by-Step)
+## Manual Benchmark Test (Step-by-Step)
 
-### Suite A: PR-Replication Benchmark (Manual)
+**Goal:** Run a single PR question against LineageLens, CodeGraph, Graphify, and Baseline sequentially. Record all metrics (tool calls, tokens, duration, cost) after each run.
 
-Compare LineageLens vs. Baseline on LangChain PR #39809:
+All output files go to **`$TEST_OUT`** directory.
+
+### STEP 0: Create Isolated Test Directory
 
 ```bash
-# 1. Clone and checkout PR base commit
-WORK_DIR="/tmp/manual-bench"
-mkdir -p $WORK_DIR
-cd $WORK_DIR
+# Define test directory — all work and outputs here
+TEST_DIR="/tmp/ll-bench-manual-test1"
+rm -rf $TEST_DIR
+mkdir -p $TEST_DIR
+cd $TEST_DIR
 
-git clone https://github.com/langchain-ai/langchain ll_clone
-cd ll_clone
-git checkout a2024abe50a1db8dba3884a2a45c91989e6b561e  # PR base commit
+# All output files go to TEST_OUT
+TEST_OUT="$TEST_DIR/results"
+mkdir -p $TEST_OUT
 
-# 2. Build LineageLens graph
+echo "Test directory: $TEST_DIR"
+echo "Outputs saved to: $TEST_OUT"
+```
+
+### STEP 1: Clone Repo (Do Once)
+
+```bash
+cd $TEST_DIR
+
+# Clone LangChain at PR base commit
+git clone https://github.com/langchain-ai/langchain repo
+cd repo
+git checkout a2024abe50a1db8dba3884a2a45c91989e6b561e
+
+# Save absolute path for later
+REPO_PATH="$(pwd)"
+echo "Repo at: $REPO_PATH"
+```
+
+### STEP 2: Build ALL Graphs (Do Once Each)
+
+```bash
+cd $REPO_PATH
+
+# Build LineageLens graph
+echo "=== Building LineageLens graph ==="
 lineagelens init .
-# Edit lineagelens.yaml to set source_roots:
 sed -i '' 's/source_roots: \[\]/source_roots: ["libs\/langchain\/langchain_classic"]/' lineagelens.yaml
 lineagelens analyze . --quiet
+echo "✓ LineageLens graph ready at .lineagelens/graph.json"
 
-# Verify graph was built
-ls -lh .lineagelens/graph.json
-python3 -c "import json; g=json.load(open('.lineagelens/graph.json')); print(f'Symbols: {len(g.get(\"symbols\", []))}')"
-
-# 3. Test LineageLens MCP tools
-cd $WORK_DIR/ll_clone
-claude -p "Using the available code graph tools, list the main frameworks used in libs/langchain/langchain_classic/" \
-  --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$WORK_DIR'/ll_clone"}}}}' \
-  --strict-mcp-config \
-  --allowedTools "mcp__lineagelens__*" \
-  --disallowedTools "mcp__lineagelens__trigger_analysis" \
-  --model claude-sonnet-4-5 \
-  --max-budget-usd 1.0
-
-# 4. Test baseline tools (file exploration)
-claude -p "Using Read, Glob, and Grep tools only, identify which files in libs/langchain/langchain_classic define chat models." \
-  --allowedTools "Read,Glob,Grep,Bash(find *)" \
-  --model claude-sonnet-4-5 \
-  --max-budget-usd 1.0
-```
-
-### Suite B: Architecture-Q&A (Manual)
-
-Analyze Apache Dubbo architecture:
-
-```bash
-# 1. Clone and checkout Dubbo
-WORK_DIR="/tmp/manual-arch-bench"
-mkdir -p $WORK_DIR
-cd $WORK_DIR
-
-git clone https://github.com/apache/dubbo dubbo_clone
-cd dubbo_clone
-git checkout HEAD
-
-# 2. Build LineageLens graph for Dubbo
-lineagelens init .
-# Configure for Java (if needed, edit lineagelens.yaml)
-lineagelens analyze . --quiet
-
-# Verify graph
-python3 -c "import json; g=json.load(open('.lineagelens/graph.json')); print(f'Symbols: {len(g.get(\"symbols\", []))}')"
-
-# 3. Ask architecture question with MCP tools
-cd $WORK_DIR/dubbo_clone
-claude -p "How does Dubbo's service registration flow from provider startup to registry write? Trace the complete call chain." \
-  --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$WORK_DIR'/dubbo_clone"}}}}' \
-  --strict-mcp-config \
-  --allowedTools "mcp__lineagelens__*" \
-  --disallowedTools "mcp__lineagelens__trigger_analysis" \
-  --model claude-sonnet-4-5 \
-  --max-budget-usd 2.0
-
-# 4. Same question with baseline tools
-claude -p "How does Dubbo's service registration flow from provider startup to registry write? Use Read, Glob, Grep to trace it." \
-  --allowedTools "Read,Glob,Grep,Bash(find *)" \
-  --model claude-sonnet-4-5 \
-  --max-budget-usd 2.0
-```
-
-### Comparing Tools: CodeGraph
-
-```bash
-# 1. Install CodeGraph
-npm i -g @colbymchenry/codegraph
-
-# 2. Setup CodeGraph on LangChain
-WORK_DIR="/tmp/manual-bench"
-cd $WORK_DIR/ll_clone
+# Build CodeGraph index
+echo "=== Building CodeGraph index ==="
 codegraph init
-# This builds .codegraph/ index
+echo "✓ CodeGraph index ready at .codegraph/"
 
-# 3. Test CodeGraph MCP tools
-cd $WORK_DIR/ll_clone
-claude -p "Using the available code graph, identify which files import ChatOpenAI." \
+# Build Graphify graph
+echo "=== Building Graphify graph ==="
+graphify extract . --code-only
+echo "✓ Graphify graph ready at graphify-out/graph.json"
+```
+
+### STEP 3: Define Question & Run Against Each Tool
+
+**Question:** "What files would need to change to implement the feature described in PR #39809?"
+
+**PR Context:** 
+- Title: "feat(anthropic): surface gateway response metadata"
+- Body: "The LangSmith gateway returns resolved provider and model metadata in response headers. This PR propagates the gateway metadata for tracing purposes."
+
+**Run each tool one at a time:**
+
+#### A) LineageLens MCP
+
+```bash
+cd $REPO_PATH
+
+# Define output file in TEST_OUT
+TEST_OUT=/tmp/ll-bench-manual-test1/results
+OUTFILE="$TEST_OUT/lineagelens-mcp.jsonl"
+
+echo "=== TEST 1: LineageLens MCP ==="
+echo "Output: $OUTFILE"
+echo ""
+
+claude -p "PR: feat(anthropic): surface gateway response metadata. The LangSmith gateway returns provider/model metadata in response headers. Propagate this metadata for tracing. What files would need to change?" \
+  --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$REPO_PATH'"}}}}' \
+  --strict-mcp-config \
+  --allowedTools "mcp__lineagelens__*" \
+  --disallowedTools "mcp__lineagelens__trigger_analysis" \
+  --model claude-sonnet-4-5 \
+  --max-budget-usd 2.0 \
+  --output-format stream-json \
+  --verbose > "$OUTFILE"
+
+echo ""
+echo "=== RESULTS: LineageLens MCP ==="
+python3 << EOF
+import json
+with open('$OUTFILE') as f:
+    lines = f.readlines()
+    for line in lines:
+        obj = json.loads(line)
+        if obj.get('type') == 'assistant':
+            calls = obj.get('message', {}).get('content', [])
+            tool_calls = [c for c in calls if c.get('type') == 'tool_use']
+            print(f"Tool calls made: {len(tool_calls)}")
+            for tc in tool_calls[:5]:
+                print(f"  - {tc.get('name')}")
+            if len(tool_calls) > 5:
+                print(f"  ... and {len(tool_calls)-5} more")
+        elif obj.get('type') == 'result':
+            print(f"Cost (USD): {obj.get('total_cost_usd')}")
+            usage = obj.get('usage', {})
+            print(f"Tokens in: {usage.get('input_tokens')}")
+            print(f"Tokens out: {usage.get('output_tokens')}")
+            print(f"Duration (approx): (see full log)")
+EOF
+```
+
+#### B) CodeGraph MCP
+
+```bash
+cd $REPO_PATH
+TEST_OUT=/tmp/ll-bench-manual-test1/results
+OUTFILE="$TEST_OUT/codegraph-mcp.jsonl"
+
+echo "=== TEST 2: CodeGraph MCP ==="
+echo "Output: $OUTFILE"
+echo ""
+
+claude -p "PR: feat(anthropic): surface gateway response metadata. The LangSmith gateway returns provider/model metadata in response headers. Propagate this metadata for tracing. What files would need to change?" \
   --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
   --strict-mcp-config \
   --allowedTools "mcp__codegraph__*" \
   --model claude-sonnet-4-5 \
-  --max-budget-usd 1.0
+  --max-budget-usd 2.0 \
+  --output-format stream-json \
+  --verbose > "$OUTFILE"
+
+echo ""
+echo "=== RESULTS: CodeGraph MCP ==="
+python3 << EOF
+import json
+with open('$OUTFILE') as f:
+    lines = f.readlines()
+    for line in lines:
+        obj = json.loads(line)
+        if obj.get('type') == 'assistant':
+            calls = obj.get('message', {}).get('content', [])
+            tool_calls = [c for c in calls if c.get('type') == 'tool_use']
+            print(f"Tool calls made: {len(tool_calls)}")
+        elif obj.get('type') == 'result':
+            print(f"Cost (USD): {obj.get('total_cost_usd')}")
+            usage = obj.get('usage', {})
+            print(f"Tokens in: {usage.get('input_tokens')}")
+            print(f"Tokens out: {usage.get('output_tokens')}")
+EOF
 ```
 
-### Comparing Tools: Graphify
+#### C) Graphify MCP
 
 ```bash
-# 1. Install Graphify
-uv tool install graphifyy
+cd $REPO_PATH
+TEST_OUT=/tmp/ll-bench-manual-test1/results
+OUTFILE="$TEST_OUT/graphify-mcp.jsonl"
 
-# 2. Build Graphify graph on LangChain
-WORK_DIR="/tmp/manual-bench"
-cd $WORK_DIR/ll_clone
-graphify extract . --code-only
-# This builds graphify-out/graph.json
+echo "=== TEST 3: Graphify MCP ==="
+echo "Output: $OUTFILE"
+echo ""
 
-# 3. Start Graphify MCP server
-python -m graphify.serve $WORK_DIR/ll_clone/graphify-out/graph.json &
-
-# 4. Test Graphify MCP tools
-claude -p "Using the code graph, which files define chat model classes?" \
-  --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$WORK_DIR'/ll_clone/graphify-out/graph.json"]}}}' \
+claude -p "PR: feat(anthropic): surface gateway response metadata. The LangSmith gateway returns provider/model metadata in response headers. Propagate this metadata for tracing. What files would need to change?" \
+  --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$REPO_PATH'/graphify-out/graph.json"]}}}' \
   --strict-mcp-config \
   --allowedTools "mcp__graphify__*" \
   --model claude-sonnet-4-5 \
-  --max-budget-usd 1.0
+  --max-budget-usd 2.0 \
+  --output-format stream-json \
+  --verbose > "$OUTFILE"
 
-# 5. Stop server
-pkill -f "graphify.serve"
+echo ""
+echo "=== RESULTS: Graphify MCP ==="
+python3 << EOF
+import json
+with open('$OUTFILE') as f:
+    lines = f.readlines()
+    for line in lines:
+        obj = json.loads(line)
+        if obj.get('type') == 'assistant':
+            calls = obj.get('message', {}).get('content', [])
+            tool_calls = [c for c in calls if c.get('type') == 'tool_use']
+            print(f"Tool calls made: {len(tool_calls)}")
+        elif obj.get('type') == 'result':
+            print(f"Cost (USD): {obj.get('total_cost_usd')}")
+            usage = obj.get('usage', {})
+            print(f"Tokens in: {usage.get('input_tokens')}")
+            print(f"Tokens out: {usage.get('output_tokens')}")
+EOF
+```
+
+#### D) Baseline (File Exploration Only)
+
+```bash
+cd $REPO_PATH
+TEST_OUT=/tmp/ll-bench-manual-test1/results
+OUTFILE="$TEST_OUT/baseline.jsonl"
+
+echo "=== TEST 4: Baseline (Read/Glob/Grep) ==="
+echo "Output: $OUTFILE"
+echo ""
+
+claude -p "PR: feat(anthropic): surface gateway response metadata. The LangSmith gateway returns provider/model metadata in response headers. Propagate this metadata for tracing. What files would need to change? Use only Read, Glob, Grep tools to explore the codebase." \
+  --allowedTools "Read,Glob,Grep,Bash(find *)" \
+  --model claude-sonnet-4-5 \
+  --max-budget-usd 2.0 \
+  --output-format stream-json \
+  --verbose > "$OUTFILE"
+
+echo ""
+echo "=== RESULTS: Baseline ==="
+python3 << EOF
+import json
+with open('$OUTFILE') as f:
+    lines = f.readlines()
+    for line in lines:
+        obj = json.loads(line)
+        if obj.get('type') == 'assistant':
+            calls = obj.get('message', {}).get('content', [])
+            tool_calls = [c for c in calls if c.get('type') == 'tool_use']
+            print(f"Tool calls made: {len(tool_calls)}")
+            tool_types = {}
+            for tc in tool_calls:
+                t = tc.get('name', 'unknown')
+                tool_types[t] = tool_types.get(t, 0) + 1
+            for t, count in sorted(tool_types.items()):
+                print(f"  - {t}: {count}")
+        elif obj.get('type') == 'result':
+            print(f"Cost (USD): {obj.get('total_cost_usd')}")
+            usage = obj.get('usage', {})
+            print(f"Tokens in: {usage.get('input_tokens')}")
+            print(f"Tokens out: {usage.get('output_tokens')}")
+EOF
+```
+
+### STEP 4: Collect & Analyze All Results
+
+After all 4 tests complete, extract metrics AND analyze quality:
+
+```bash
+TEST_OUT=/tmp/ll-bench/ll-bench-manual-test1/results
+
+echo "=== COMPREHENSIVE BENCHMARK ANALYSIS ==="
+python3 << "EOFPYTHON"
+import json
+import re
+
+# Ground truth files changed in PR #39809
+GROUND_TRUTH = {
+    'libs/partners/anthropic/langchain_anthropic/chat_models.py',
+    'libs/partners/anthropic/tests/unit_tests/test_chat_models.py',
+    'libs/partners/anthropic/uv.lock',
+}
+
+TEST_OUT = "$TEST_OUT"
+
+tools = [
+    ('lineagelens-mcp', 'LineageLens'),
+    ('codegraph-mcp', 'CodeGraph'),
+    ('graphify-mcp', 'Graphify'),
+    ('baseline', 'Baseline'),
+]
+
+results = {}
+
+def extract_files_from_response(response_text):
+    """Extract file paths from '## Files I would change' section."""
+    files = set()
+    if '## Files I would change' in response_text:
+        section = response_text.split('## Files I would change')[1]
+        # Split at next ## or end of text
+        if '##' in section[1:]:
+            section = section[:section.index('\n##')]
+        # Find all file paths (lines with .py, .lock, etc)
+        lines = section.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line and ('/' in line or line.endswith(('.py', '.lock', '.ts', '.js', '.java', '.txt'))):
+                # Remove markdown formatting
+                line = line.lstrip('- * >')
+                if line and not line.startswith('**'):
+                    files.add(line)
+    return files
+
+def calculate_f1(predicted, ground_truth):
+    """Calculate precision, recall, F1."""
+    tp = len(predicted & ground_truth)
+    fp = len(predicted - ground_truth)
+    fn = len(ground_truth - predicted)
+    
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    
+    return precision, recall, f1
+
+# Parse each tool's output
+for fname, label in tools:
+    try:
+        outfile = f'{TEST_OUT}/{fname}.jsonl'
+        with open(outfile) as f:
+            lines = f.readlines()
+            tool_calls = 0
+            tokens_in = 0
+            tokens_out = 0
+            cost = 0
+            response_text = ''
+            
+            for line in lines:
+                if line.strip():
+                    obj = json.loads(line)
+                    if obj.get('type') == 'assistant':
+                        calls = obj.get('message', {}).get('content', [])
+                        tool_calls = len([c for c in calls if c.get('type') == 'tool_use'])
+                    elif obj.get('type') == 'result':
+                        usage = obj.get('usage', {})
+                        tokens_in = usage.get('input_tokens', 0)
+                        tokens_out = usage.get('output_tokens', 0)
+                        cost = obj.get('total_cost_usd', 0)
+                        response_text = obj.get('result', '')
+            
+            # Extract files identified
+            identified_files = extract_files_from_response(response_text)
+            precision, recall, f1 = calculate_f1(identified_files, GROUND_TRUTH)
+            
+            results[label] = {
+                'tool_calls': tool_calls,
+                'tokens_in': tokens_in,
+                'tokens_out': tokens_out,
+                'cost': cost,
+                'files_identified': identified_files,
+                'precision': precision,
+                'recall': recall,
+                'f1': f1,
+                'response_preview': response_text[:300],
+            }
+    except Exception as e:
+        results[label] = {'error': str(e)}
+
+# Print EFFICIENCY table (tool calls, tokens, cost)
+print("\n" + "="*90)
+print("EFFICIENCY METRICS")
+print("="*90)
+print("| Tool       | Tool Calls | Tokens In | Tokens Out | Cost (USD) |")
+print("|------------|-----------|-----------|-----------|-----------|")
+for label, data in results.items():
+    if 'error' not in data:
+        print(f"| {label:10} | {data['tool_calls']:9} | {data['tokens_in']:9} | {data['tokens_out']:10} | ${data['cost']:8.4f} |")
+    else:
+        print(f"| {label:10} | ERROR: {data['error'][:30]}")
+
+# Print QUALITY table (F1, precision, recall)
+print("\n" + "="*90)
+print("QUALITY METRICS (vs Ground Truth)")
+print("="*90)
+print(f"Ground truth files: {len(GROUND_TRUTH)}")
+for f in sorted(GROUND_TRUTH):
+    print(f"  - {f}")
+print("\n| Tool       | Files Found | Precision | Recall | F1 Score |")
+print("|------------|-------------|-----------|--------|----------|")
+for label, data in results.items():
+    if 'error' not in data:
+        print(f"| {label:10} | {len(data['files_identified']):11} | {data['precision']:.2%} | {data['recall']:.2%} | {data['f1']:.3f}   |")
+        if data['files_identified']:
+            print(f"            Files: {', '.join(sorted(list(data['files_identified'])[:2]))}")
+    else:
+        print(f"| {label:10} | ERROR")
+
+# Print EFFICIENCY WINNER
+print("\n" + "="*90)
+print("ANALYSIS")
+print("="*90)
+sorted_by_cost = sorted(results.items(), key=lambda x: x[1].get('cost', float('inf')))
+sorted_by_f1 = sorted(results.items(), key=lambda x: x[1].get('f1', 0), reverse=True)
+
+if sorted_by_cost[0][1].get('cost'):
+    print(f"✓ Cheapest: {sorted_by_cost[0][0]} (${sorted_by_cost[0][1]['cost']:.4f})")
+if sorted_by_f1[0][1].get('f1'):
+    print(f"✓ Best Quality (F1): {sorted_by_f1[0][0]} (F1={sorted_by_f1[0][1]['f1']:.3f})")
+
+# Best efficiency = quality-per-dollar
+print("\n✓ Quality-per-Dollar (F1 / Cost):")
+for label, data in sorted(results.items()):
+    if 'error' not in data and data['cost'] > 0:
+        efficiency = data['f1'] / data['cost']
+        print(f"  {label:12}: {efficiency:.2f} (F1={data['f1']:.3f} / ${data['cost']:.4f})")
+
+print(f"\nAll outputs saved to: {TEST_OUT}")
+print("ls -lh results:")
+import os
+for f in sorted(os.listdir(TEST_OUT)):
+    path = os.path.join(TEST_OUT, f)
+    size = os.path.getsize(path)
+    print(f"  {f:30} {size:10} bytes")
+EOFPYTHON
+```
+
+### Expected Output
+
+A table like:
+
+| Tool | Tool Calls | Tokens In | Tokens Out | Cost (USD) |
+|------|-----------|-----------|-----------|-----------|
+| LineageLens | 12 | 2500 | 850 | $0.15 |
+| CodeGraph | 8 | 2400 | 820 | $0.14 |
+| Graphify | 15 | 2600 | 890 | $0.16 |
+| Baseline | 28 | 4200 | 1200 | $0.22 |
+
+---
+
+## Benchmark Test 2: Apache Dubbo (Java)
+
+**Goal:** Same methodology, but on a Java project (Apache Dubbo). Tests tools on both PR-replication and architecture questions.
+
+### STEP 0: Create Isolated Test Directory
+
+```bash
+TEST_DIR="/tmp/ll-bench-dubbo-test1"
+rm -rf $TEST_DIR
+mkdir -p $TEST_DIR
+cd $TEST_DIR
+
+TEST_OUT="$TEST_DIR/results"
+mkdir -p $TEST_OUT
+
+echo "Test directory: $TEST_DIR"
+echo "Outputs saved to: $TEST_OUT"
+```
+
+### STEP 1: Clone Dubbo Repo
+
+```bash
+cd $TEST_DIR
+
+# Clone Apache Dubbo
+git clone https://github.com/apache/dubbo repo
+cd repo
+git checkout HEAD
+
+REPO_PATH="$(pwd)"
+echo "Repo at: $REPO_PATH"
+```
+
+### STEP 2: Build ALL Graphs
+
+```bash
+cd $REPO_PATH
+
+# Build LineageLens graph (Java project)
+echo "=== Building LineageLens graph ==="
+lineagelens init .
+# For Dubbo, source roots are typically the main source directory
+lineagelens analyze . --quiet
+echo "✓ LineageLens graph ready"
+
+# Build CodeGraph index
+echo "=== Building CodeGraph index ==="
+codegraph init
+echo "✓ CodeGraph index ready"
+
+# Build Graphify graph
+echo "=== Building Graphify graph ==="
+graphify extract . --code-only
+echo "✓ Graphify graph ready"
+```
+
+### STEP 1.5: Checkout PR Base Commit (Dubbo)
+
+```bash
+cd $REPO_PATH
+
+# PR #16416: Fix Triple gRPC decoder handoff
+# Base commit: 3a3043227f5571d25eb2889de5bca22f2914843b
+git checkout 3a3043227f5571d25eb2889de5bca22f2914843b
+
+echo "Checked out at base commit"
+```
+
+### STEP 3a: PR-Replication Test (Dubbo PR #16416)
+
+**PR #16416:** "Fix Triple gRPC decoder handoff"
+
+**Context:** This PR fixes the gRPC no-stub method discovery path for Triple streaming requests. The lazy method discovery listener now reuses the stream's existing `StreamingDecoder` instead of creating a temporary one.
+
+**Question:** "What files would need to change to implement this gRPC streaming decoder fix?"
+
+```bash
+cd $REPO_PATH
+TEST_OUT=/tmp/ll-bench-dubbo-test1/results
+
+for TOOL in lineagelens codegraph graphify baseline; do
+  OUTFILE="$TEST_OUT/dubbo-pr-${TOOL}.jsonl"
+  echo "=== Running $TOOL (PR-replication) ==="
+  
+  if [ "$TOOL" = "lineagelens" ]; then
+    claude -p "Dubbo PR #16416: Fix Triple gRPC decoder handoff. The issue: lazy method discovery listener creates temporary GrpcStreamingDecoder, losing buffered bytes. Fix: reuse existing StreamingDecoder, make close callback a no-op. Which files would change? List in '## Files I would change'." \
+      --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$REPO_PATH'"}}}}' \
+      --strict-mcp-config \
+      --allowedTools "mcp__lineagelens__*" \
+      --disallowedTools "mcp__lineagelens__trigger_analysis" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 3.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  
+  elif [ "$TOOL" = "codegraph" ]; then
+    claude -p "Dubbo PR #16416: Fix Triple gRPC decoder handoff. Issue: temporary GrpcStreamingDecoder loses buffered bytes. Solution: reuse StreamingDecoder, make close a no-op. Which files change?" \
+      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
+      --strict-mcp-config \
+      --allowedTools "mcp__codegraph__*" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 3.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  
+  elif [ "$TOOL" = "graphify" ]; then
+    claude -p "Dubbo PR #16416: Fix Triple gRPC decoder handoff. Issue: temporary GrpcStreamingDecoder loses buffered bytes. Solution: reuse StreamingDecoder, make close a no-op. Which files change?" \
+      --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$REPO_PATH'/graphify-out/graph.json"]}}}' \
+      --strict-mcp-config \
+      --allowedTools "mcp__graphify__*" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 3.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  
+  else
+    claude -p "Dubbo PR #16416: Fix Triple gRPC decoder handoff. Issue: temporary GrpcStreamingDecoder loses buffered bytes. Solution: reuse StreamingDecoder, make close a no-op. Use Read/Glob/Grep. Which files?" \
+      --allowedTools "Read,Glob,Grep,Bash(find *)" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 3.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  fi
+  
+  echo "✓ Saved to $OUTFILE"
+done
+```
+
+### STEP 3b: Architecture Question Test (Dubbo)
+
+**Question:** "How does Dubbo's service registration flow from provider startup to registry write? Trace the complete call chain from service export to registry operations."
+
+```bash
+cd $REPO_PATH
+TEST_OUT=/tmp/ll-bench-dubbo-test1/results
+
+for TOOL in lineagelens codegraph graphify baseline; do
+  OUTFILE="$TEST_OUT/dubbo-arch-${TOOL}.jsonl"
+  echo "=== Running $TOOL (architecture question) ==="
+  
+  if [ "$TOOL" = "lineagelens" ]; then
+    claude -p "Trace Dubbo's service registration: How does a service flow from provider startup to registry write? Show call chain." \
+      --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$REPO_PATH'"}}}}' \
+      --strict-mcp-config \
+      --allowedTools "mcp__lineagelens__*" \
+      --disallowedTools "mcp__lineagelens__trigger_analysis" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 3.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  
+  elif [ "$TOOL" = "codegraph" ]; then
+    claude -p "Trace Dubbo's service registration: How does a service flow from provider startup to registry write? Show call chain." \
+      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
+      --strict-mcp-config \
+      --allowedTools "mcp__codegraph__*" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 3.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  
+  elif [ "$TOOL" = "graphify" ]; then
+    claude -p "Trace Dubbo's service registration: How does a service flow from provider startup to registry write? Show call chain." \
+      --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$REPO_PATH'/graphify-out/graph.json"]}}}' \
+      --strict-mcp-config \
+      --allowedTools "mcp__graphify__*" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 3.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  
+  else
+    claude -p "Trace Dubbo's service registration: How does a service flow from provider startup to registry write? Use Read, Glob, Grep." \
+      --allowedTools "Read,Glob,Grep,Bash(find *)" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 3.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  fi
+  
+  echo "✓ Saved to $OUTFILE"
+done
+```
+
+### STEP 4: Analyze Dubbo Results
+
+```bash
+TEST_OUT=/tmp/ll-bench-dubbo-test1/results
+
+python3 << 'EOFPY'
+import json
+import re
+import os
+
+# For PR test, these are the key registry-related files we'd expect to change
+DUBBO_PR_FILES = {
+    'dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/Registry.java',
+    'dubbo-common/src/main/java/org/apache/dubbo/common/utils/StringUtils.java',
+    'dubbo-registry/dubbo-registry-default/src/main/java/org/apache/dubbo/registry/dubbo/DubboRegistry.java',
+}
+
+# Architecture question looks for call chains (just count files mentioned)
+tools = [
+    ('dubbo-pr-lineagelens', 'LineageLens (PR)'),
+    ('dubbo-pr-codegraph', 'CodeGraph (PR)'),
+    ('dubbo-pr-graphify', 'Graphify (PR)'),
+    ('dubbo-pr-baseline', 'Baseline (PR)'),
+    ('dubbo-arch-lineagelens', 'LineageLens (Arch)'),
+    ('dubbo-arch-codegraph', 'CodeGraph (Arch)'),
+    ('dubbo-arch-graphify', 'Graphify (Arch)'),
+    ('dubbo-arch-baseline', 'Baseline (Arch)'),
+]
+
+results = {}
+
+def count_tool_calls(jsonl_content):
+    tool_calls = 0
+    for line in jsonl_content.split('\n'):
+        if line.strip():
+            try:
+                obj = json.loads(line)
+                if obj.get('type') == 'assistant':
+                    calls = obj.get('message', {}).get('content', [])
+                    tool_calls += len([c for c in calls if c.get('type') == 'tool_use'])
+            except:
+                pass
+    return tool_calls
+
+def extract_files(response_text):
+    file_pattern = r'(?:src/main/java/)?org/apache/dubbo/[^\s`\)]+\.java'
+    return set(re.findall(file_pattern, response_text))
+
+for fname, label in tools:
+    try:
+        outfile = f'{TEST_OUT}/{fname}.jsonl'
+        with open(outfile) as f:
+            content = f.read()
+            tool_calls = count_tool_calls(content)
+            tokens_in = 0
+            tokens_out = 0
+            cost = 0
+            response_text = ''
+            
+            for line in content.split('\n'):
+                if line.strip():
+                    try:
+                        obj = json.loads(line)
+                        if obj.get('type') == 'result':
+                            usage = obj.get('usage', {})
+                            tokens_in = usage.get('input_tokens', 0)
+                            tokens_out = usage.get('output_tokens', 0)
+                            cost = obj.get('total_cost_usd', 0)
+                            response_text = obj.get('result', '')
+                    except:
+                        pass
+            
+            files = extract_files(response_text)
+            
+            results[label] = {
+                'tool_calls': tool_calls,
+                'tokens_in': tokens_in,
+                'tokens_out': tokens_out,
+                'cost': cost,
+                'files_found': len(files),
+            }
+            
+    except:
+        results[label] = {'error': 'file not found'}
+
+# Print results
+print("\n" + "="*100)
+print("DUBBO BENCHMARK RESULTS (PR-Replication Test)")
+print("="*100)
+print("| Tool            | Tool Calls | Tokens In | Tokens Out | Cost (USD) | Files Found |")
+print("|-----------------|-----------|-----------|-----------|-----------|------------|")
+for label in ['LineageLens (PR)', 'CodeGraph (PR)', 'Graphify (PR)', 'Baseline (PR)']:
+    data = results[label]
+    if 'error' not in data:
+        print(f"| {label:15} | {data['tool_calls']:9} | {data['tokens_in']:9} | {data['tokens_out']:10} | ${data['cost']:8.4f} | {data['files_found']:10} |")
+
+print("\n" + "="*100)
+print("DUBBO BENCHMARK RESULTS (Architecture Question Test)")
+print("="*100)
+print("| Tool            | Tool Calls | Tokens In | Tokens Out | Cost (USD) | Files Found |")
+print("|-----------------|-----------|-----------|-----------|-----------|------------|")
+for label in ['LineageLens (Arch)', 'CodeGraph (Arch)', 'Graphify (Arch)', 'Baseline (Arch)']:
+    data = results[label]
+    if 'error' not in data:
+        print(f"| {label:15} | {data['tool_calls']:9} | {data['tokens_in']:9} | {data['tokens_out']:10} | ${data['cost']:8.4f} | {data['files_found']:10} |")
+EOFPY
 ```
 
 ---
 
-## Interpreting Results
+## Ground Truth Reference
 
-After running any test, look at Claude's response for:
+**LangChain PR #39809:** 3 files changed
+- `libs/partners/anthropic/langchain_anthropic/chat_models.py`
+- `libs/partners/anthropic/tests/unit_tests/test_chat_models.py`
+- `libs/partners/anthropic/uv.lock`
 
-1. **Tool Calls Made** — How many times did Claude invoke MCP tools vs. file tools?
-   - MCP tools: should be dozens for complex questions
-   - File tools (Read/Glob/Grep): baseline approach
+**Dubbo PR #16416 (gRPC Decoder Fix):** 2 files changed
+- `dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/h12/grpc/GrpcHttp2ServerTransportListener.java`
+- `dubbo-rpc/dubbo-rpc-triple/src/test/java/org/apache/dubbo/rpc/protocol/tri/h12/grpc/GrpcStreamingDecoderTest.java`
 
-2. **Token Usage** — Input/output token count (visible in Claude output)
-   - MCP approach should use fewer tokens overall
-   - File exploration uses more tokens for raw source
+## Files to Compare Against
 
-3. **Cost** — Shown in Claude output (tokens × model rate)
-   - Compare cost between tools
-
-4. **Quality** — Did Claude identify the correct files/concepts?
-   - Check against what you know about the codebase
+Ground truth for PR #39809 (actual files changed):
+```
+libs/partners/anthropic/langchain_anthropic/chat_models.py
+libs/partners/anthropic/tests/unit_tests/test_chat_models.py
+libs/partners/anthropic/uv.lock
+```
 
 ## Configuration
 
