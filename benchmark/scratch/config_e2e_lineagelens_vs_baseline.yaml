@@ -14,7 +14,7 @@ clone_dirs:
   lineagelens: ll_clone
   baseline: baseline_clone
 
-source_roots: ["libs/langchain/langchain"]
+source_roots: ["libs/langchain/langchain_classic"]
 
 model: claude-sonnet-4-5
 budget_usd: 2.00
