@@ -98,184 +98,66 @@ echo "✓ Graphify graph ready at graphify-out/graph.json"
 
 ### STEP 3: Define Question & Run Against Each Tool
 
-**Question:** "What files would need to change to implement the feature described in PR #39809?"
+**PR #39809:** "feat(anthropic): surface gateway response metadata"
 
-**PR Context:** 
-- Title: "feat(anthropic): surface gateway response metadata"
-- Body: "The LangSmith gateway returns resolved provider and model metadata in response headers. This PR propagates the gateway metadata for tracing purposes."
+**Context:** The LangSmith gateway returns resolved provider and model metadata in response headers. This PR propagates the gateway metadata for tracing purposes.
 
-**Run each tool one at a time:**
-
-#### A) LineageLens MCP
-
-```bash
-cd $REPO_PATH
-
-# Define output file in TEST_OUT
-TEST_OUT=/tmp/ll-bench-manual-test1/results
-OUTFILE="$TEST_OUT/lineagelens-mcp.jsonl"
-
-echo "=== TEST 1: LineageLens MCP ==="
-echo "Output: $OUTFILE"
-echo ""
-
-claude -p "PR: feat(anthropic): surface gateway response metadata. The LangSmith gateway returns provider/model metadata in response headers. Propagate this metadata for tracing. What files would need to change?" \
-  --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$REPO_PATH'"}}}}' \
-  --strict-mcp-config \
-  --allowedTools "mcp__lineagelens__*" \
-  --disallowedTools "mcp__lineagelens__trigger_analysis" \
-  --model claude-sonnet-4-5 \
-  --max-budget-usd 2.0 \
-  --output-format stream-json \
-  --verbose > "$OUTFILE"
-
-echo ""
-echo "=== RESULTS: LineageLens MCP ==="
-python3 << EOF
-import json
-with open('$OUTFILE') as f:
-    lines = f.readlines()
-    for line in lines:
-        obj = json.loads(line)
-        if obj.get('type') == 'assistant':
-            calls = obj.get('message', {}).get('content', [])
-            tool_calls = [c for c in calls if c.get('type') == 'tool_use']
-            print(f"Tool calls made: {len(tool_calls)}")
-            for tc in tool_calls[:5]:
-                print(f"  - {tc.get('name')}")
-            if len(tool_calls) > 5:
-                print(f"  ... and {len(tool_calls)-5} more")
-        elif obj.get('type') == 'result':
-            print(f"Cost (USD): {obj.get('total_cost_usd')}")
-            usage = obj.get('usage', {})
-            print(f"Tokens in: {usage.get('input_tokens')}")
-            print(f"Tokens out: {usage.get('output_tokens')}")
-            print(f"Duration (approx): (see full log)")
-EOF
-```
-
-#### B) CodeGraph MCP
+**Question:** "What files would need to change to implement this feature? List them in '## Files I would change' section."
 
 ```bash
 cd $REPO_PATH
 TEST_OUT=/tmp/ll-bench-manual-test1/results
-OUTFILE="$TEST_OUT/codegraph-mcp.jsonl"
 
-echo "=== TEST 2: CodeGraph MCP ==="
-echo "Output: $OUTFILE"
-echo ""
+PROMPT="PR #39809: feat(anthropic): surface gateway response metadata. The LangSmith gateway returns resolved provider and model metadata in response headers. This PR propagates the gateway metadata for tracing purposes. Which files would need to change to implement this? List them in '## Files I would change' section."
 
-claude -p "PR: feat(anthropic): surface gateway response metadata. The LangSmith gateway returns provider/model metadata in response headers. Propagate this metadata for tracing. What files would need to change?" \
-  --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
-  --strict-mcp-config \
-  --allowedTools "mcp__codegraph__*" \
-  --model claude-sonnet-4-5 \
-  --max-budget-usd 2.0 \
-  --output-format stream-json \
-  --verbose > "$OUTFILE"
-
-echo ""
-echo "=== RESULTS: CodeGraph MCP ==="
-python3 << EOF
-import json
-with open('$OUTFILE') as f:
-    lines = f.readlines()
-    for line in lines:
-        obj = json.loads(line)
-        if obj.get('type') == 'assistant':
-            calls = obj.get('message', {}).get('content', [])
-            tool_calls = [c for c in calls if c.get('type') == 'tool_use']
-            print(f"Tool calls made: {len(tool_calls)}")
-        elif obj.get('type') == 'result':
-            print(f"Cost (USD): {obj.get('total_cost_usd')}")
-            usage = obj.get('usage', {})
-            print(f"Tokens in: {usage.get('input_tokens')}")
-            print(f"Tokens out: {usage.get('output_tokens')}")
-EOF
-```
-
-#### C) Graphify MCP
-
-```bash
-cd $REPO_PATH
-TEST_OUT=/tmp/ll-bench-manual-test1/results
-OUTFILE="$TEST_OUT/graphify-mcp.jsonl"
-
-echo "=== TEST 3: Graphify MCP ==="
-echo "Output: $OUTFILE"
-echo ""
-
-claude -p "PR: feat(anthropic): surface gateway response metadata. The LangSmith gateway returns provider/model metadata in response headers. Propagate this metadata for tracing. What files would need to change?" \
-  --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$REPO_PATH'/graphify-out/graph.json"]}}}' \
-  --strict-mcp-config \
-  --allowedTools "mcp__graphify__*" \
-  --model claude-sonnet-4-5 \
-  --max-budget-usd 2.0 \
-  --output-format stream-json \
-  --verbose > "$OUTFILE"
-
-echo ""
-echo "=== RESULTS: Graphify MCP ==="
-python3 << EOF
-import json
-with open('$OUTFILE') as f:
-    lines = f.readlines()
-    for line in lines:
-        obj = json.loads(line)
-        if obj.get('type') == 'assistant':
-            calls = obj.get('message', {}).get('content', [])
-            tool_calls = [c for c in calls if c.get('type') == 'tool_use']
-            print(f"Tool calls made: {len(tool_calls)}")
-        elif obj.get('type') == 'result':
-            print(f"Cost (USD): {obj.get('total_cost_usd')}")
-            usage = obj.get('usage', {})
-            print(f"Tokens in: {usage.get('input_tokens')}")
-            print(f"Tokens out: {usage.get('output_tokens')}")
-EOF
-```
-
-#### D) Baseline (File Exploration Only)
-
-```bash
-cd $REPO_PATH
-TEST_OUT=/tmp/ll-bench-manual-test1/results
-OUTFILE="$TEST_OUT/baseline.jsonl"
-
-echo "=== TEST 4: Baseline (Read/Glob/Grep) ==="
-echo "Output: $OUTFILE"
-echo ""
-
-claude -p "PR: feat(anthropic): surface gateway response metadata. The LangSmith gateway returns provider/model metadata in response headers. Propagate this metadata for tracing. What files would need to change? Use only Read, Glob, Grep tools to explore the codebase." \
-  --allowedTools "Read,Glob,Grep,Bash(find *)" \
-  --model claude-sonnet-4-5 \
-  --max-budget-usd 2.0 \
-  --output-format stream-json \
-  --verbose > "$OUTFILE"
-
-echo ""
-echo "=== RESULTS: Baseline ==="
-python3 << EOF
-import json
-with open('$OUTFILE') as f:
-    lines = f.readlines()
-    for line in lines:
-        obj = json.loads(line)
-        if obj.get('type') == 'assistant':
-            calls = obj.get('message', {}).get('content', [])
-            tool_calls = [c for c in calls if c.get('type') == 'tool_use']
-            print(f"Tool calls made: {len(tool_calls)}")
-            tool_types = {}
-            for tc in tool_calls:
-                t = tc.get('name', 'unknown')
-                tool_types[t] = tool_types.get(t, 0) + 1
-            for t, count in sorted(tool_types.items()):
-                print(f"  - {t}: {count}")
-        elif obj.get('type') == 'result':
-            print(f"Cost (USD): {obj.get('total_cost_usd')}")
-            usage = obj.get('usage', {})
-            print(f"Tokens in: {usage.get('input_tokens')}")
-            print(f"Tokens out: {usage.get('output_tokens')}")
-EOF
+for TOOL in lineagelens codegraph graphify baseline; do
+  OUTFILE="$TEST_OUT/${TOOL}.jsonl"
+  echo "=== TEST: $TOOL ==="
+  echo "Output: $OUTFILE"
+  echo ""
+  
+  if [ "$TOOL" = "lineagelens" ]; then
+    claude -p "$PROMPT" \
+      --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$REPO_PATH'"}}}}' \
+      --strict-mcp-config \
+      --allowedTools "mcp__lineagelens__*" \
+      --disallowedTools "mcp__lineagelens__trigger_analysis" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 2.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  
+  elif [ "$TOOL" = "codegraph" ]; then
+    claude -p "$PROMPT" \
+      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
+      --strict-mcp-config \
+      --allowedTools "mcp__codegraph__*" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 2.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  
+  elif [ "$TOOL" = "graphify" ]; then
+    claude -p "$PROMPT" \
+      --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$REPO_PATH'/graphify-out/graph.json"]}}}' \
+      --strict-mcp-config \
+      --allowedTools "mcp__graphify__*" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 2.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  
+  else
+    claude -p "$PROMPT" \
+      --allowedTools "Read,Glob,Grep,Bash(find *)" \
+      --model claude-sonnet-4-5 \
+      --max-budget-usd 2.0 \
+      --output-format stream-json \
+      --verbose > "$OUTFILE"
+  fi
+  
+  echo "✓ Saved to $OUTFILE"
+done
 ```
 
 ### STEP 4: Collect & Analyze All Results
@@ -300,9 +182,9 @@ GROUND_TRUTH = {
 TEST_OUT = "$TEST_OUT"
 
 tools = [
-    ('lineagelens-mcp', 'LineageLens'),
-    ('codegraph-mcp', 'CodeGraph'),
-    ('graphify-mcp', 'Graphify'),
+    ('lineagelens', 'LineageLens'),
+    ('codegraph', 'CodeGraph'),
+    ('graphify', 'Graphify'),
     ('baseline', 'Baseline'),
 ]
 
