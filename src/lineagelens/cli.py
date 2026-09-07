@@ -105,6 +105,14 @@ def write_artifacts(
     graph_file.parent.mkdir(parents=True, exist_ok=True)
     graph_file.write_text(json.dumps(graph.to_dict(), indent=2), encoding="utf-8")
 
+    db_file = project / config.output.directory / "index.sqlite"
+    try:
+        from .db import SQLiteIndexDB
+        db = SQLiteIndexDB(db_file)
+        db.save_code_graph(graph)
+    except Exception as e:
+        print(f"⚠️  Could not populate index.sqlite: {e}")
+
     report_file = report_path(project, config)
     report_file.parent.mkdir(parents=True, exist_ok=True)
     report_file.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
@@ -294,6 +302,16 @@ def main() -> None:
         "--force", action="store_true", help="Append to a hook LineageLens did not create"
     )
 
+    watch_cmd = commands.add_parser("watch", help="Run background watcher daemon to update index on file save")
+    watch_cmd.add_argument("project", type=Path, nargs="?", default=Path("."), help="Project directory")
+    watch_cmd.add_argument("--daemon", action="store_true", help="Run as detached background daemon")
+    watch_cmd.add_argument("--stop", action="store_true", help="Stop running background daemon")
+    watch_cmd.add_argument("--status", action="store_true", help="Check running status of background watcher daemon")
+
+    sync_cmd = commands.add_parser("sync", help="Incrementally sync a single file into SQLite index")
+    sync_cmd.add_argument("file", type=str, help="Relative path to file to sync")
+    sync_cmd.add_argument("project", type=Path, nargs="?", default=Path("."), help="Project directory")
+
     args = parser.parse_args()
     project = args.project.resolve()
 
@@ -302,6 +320,40 @@ def main() -> None:
         parser.error(f"Project directory does not exist: {project}")
     if not project.is_dir():
         parser.error(f"Not a directory: {project}")
+
+    if args.command == "watch":
+        from .watcher import LineageLensWatcher
+        watcher = LineageLensWatcher(project)
+        if args.stop:
+            stopped = watcher.stop()
+            if stopped:
+                print(f"✓ Stopped LineageLens watcher for {project}")
+            else:
+                print("LineageLens watcher is not currently running.")
+            return
+        if args.status:
+            st = watcher.get_status()
+            if st["running"]:
+                print(f"✓ LineageLens watcher active (PID {st['pid']})")
+            else:
+                print("• LineageLens watcher is not running.")
+            return
+
+        print(f"🚀 Starting LineageLens watcher daemon for {project}...")
+        watcher.start(daemon=args.daemon)
+        return
+
+    if args.command == "sync":
+        from .db import DB_NAME, SQLiteIndexDB
+        from .incremental import IncrementalAnalyzer
+        db = SQLiteIndexDB(project / ".lineagelens" / DB_NAME)
+        analyzer = IncrementalAnalyzer()
+        ok = analyzer.sync_file(project, args.file, db)
+        if ok:
+            print(f"✓ Incremental sync complete: {args.file}")
+        else:
+            print(f"• File skipped or failed to sync: {args.file}")
+        return
 
     if args.command == "init":
         destination = project / "lineagelens.yaml"

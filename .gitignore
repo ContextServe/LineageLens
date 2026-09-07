@@ -227,6 +227,7 @@ frontend/node_modules/
 editors/vscode/node_modules/
 editors/vscode/out/
 editors/vscode/*.vsix
+frontend/dist/
 
 # LineageLens output. The graph is a build artifact, not source: it is large,
 # regenerates on every commit, and would churn the diff of every PR. CI publishes

@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react'
 import './App.css'
 import { CytoscapeGraph } from './graph/CytoscapeGraph'
-import { SearchPanel } from './components/SearchPanel'
 import { DetailPanel } from './components/DetailPanel'
 import { Toolbar, type VerdictFilter } from './components/Toolbar'
+import { HUDPanels, type ScopeFilters } from './components/HUDPanels'
 
 interface GraphViewData {
   nodes: Array<{
@@ -20,6 +20,7 @@ interface GraphViewData {
     rescue_tier?: string
     scope?: string
     duplicate_name: boolean
+    lines_of_code?: number
   }>
   edges: Array<{
     id: string
@@ -37,6 +38,15 @@ export function App() {
   const [error, setError] = useState<string | null>(null)
   const [testFilter, setTestFilter] = useState<'all' | 'source' | 'tests'>('all')
   const [verdictFilter, setVerdictFilter] = useState<VerdictFilter>('all')
+
+  const [filters, setFilters] = useState<ScopeFilters>({
+    showModules: true,
+    showClasses: true,
+    showFunctions: true,
+    showExternal: true,
+    sizeByLoc: true,
+    linkKinds: {},
+  })
 
   // Load graph on mount
   useEffect(() => {
@@ -61,20 +71,14 @@ export function App() {
   function getFilteredGraphData(): GraphViewData | null {
     if (!graphData) return null
 
-    // Determine which nodes to keep based on test filter
     const nodesToKeep = new Set<string>()
-    const nodeIsTest = new Map<string, boolean>()
 
     for (const node of graphData.nodes) {
-      nodeIsTest.set(node.id, node.is_test)
-
       const passesTestFilter =
         testFilter === 'all' ||
         (testFilter === 'source' && !node.is_test) ||
         (testFilter === 'tests' && node.is_test)
 
-      // Containers have no verdict of their own, so they survive a verdict filter
-      // in order to keep the compound hierarchy intact around the nodes that match.
       const passesVerdictFilter =
         verdictFilter === 'all' || !node.verdict || node.verdict === verdictFilter
 
@@ -83,7 +87,6 @@ export function App() {
       }
     }
 
-    // Filter nodes and clean up parent refs
     const filteredNodes = graphData.nodes
       .filter(node => nodesToKeep.has(node.id))
       .map(node => ({
@@ -91,7 +94,6 @@ export function App() {
         parent: node.parent && nodesToKeep.has(node.parent) ? node.parent : undefined,
       }))
 
-    // Filter edges: only keep edges where both endpoints exist in filtered nodes
     const filteredEdges = graphData.edges.filter(
       edge => nodesToKeep.has(edge.source) && nodesToKeep.has(edge.target)
     )
@@ -103,7 +105,7 @@ export function App() {
   }
 
   if (loading) {
-    return <div className="app loading">Loading codebase graph...</div>
+    return <div className="app loading">Loading LineageLens graph index...</div>
   }
 
   if (error) {
@@ -116,18 +118,16 @@ export function App() {
     )
   }
 
+  const activeGraph = getFilteredGraphData()
+
   return (
     <div className="app">
       <header>
         <h1>LineageLens</h1>
-        <p>Evidence-labelled Python code lineage</p>
+        <p>Real-Time Code Lineage & Visual Analytics</p>
       </header>
 
       <div className="layout">
-        <aside className="sidebar left">
-          <SearchPanel onSelectSymbol={setSelectedSymbol} />
-        </aside>
-
         <main className="graph-container">
           <Toolbar
             onRefresh={fetchGraph}
@@ -136,12 +136,25 @@ export function App() {
             verdictFilter={verdictFilter}
             onVerdictFilterChange={setVerdictFilter}
           />
-          {graphData && (
-            <CytoscapeGraph
-              data={getFilteredGraphData()!}
-              selectedSymbol={selectedSymbol}
-              onSelectSymbol={setSelectedSymbol}
-            />
+
+          {activeGraph && (
+            <>
+              <HUDPanels
+                nodes={activeGraph.nodes}
+                edges={activeGraph.edges}
+                onSelectSymbol={setSelectedSymbol}
+                filters={filters}
+                onFiltersChange={setFilters}
+                selectedSymbol={selectedSymbol}
+                onClearSelection={() => setSelectedSymbol(null)}
+              />
+              <CytoscapeGraph
+                data={activeGraph}
+                selectedSymbol={selectedSymbol}
+                onSelectSymbol={setSelectedSymbol}
+                filters={filters}
+              />
+            </>
           )}
         </main>
 
@@ -150,7 +163,7 @@ export function App() {
             <DetailPanel symbolId={selectedSymbol} />
           ) : (
             <div className="no-selection">
-              <p>Select a symbol to view details</p>
+              <p>Select a symbol or module to view contract details, risks, and transitive call paths.</p>
             </div>
           )}
         </aside>

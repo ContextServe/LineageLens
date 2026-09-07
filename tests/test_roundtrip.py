@@ -137,6 +137,10 @@ def test_stale_schema_is_rejected(tmp_path):
     graph, report = analyze(root, config)
     graph_file, _ = write_artifacts(root, config, graph, report, quiet=True)
 
+    db_file = root / ".lineagelens" / "index.sqlite"
+    if db_file.exists():
+        db_file.unlink()
+
     payload = json.loads(graph_file.read_text())
     payload["schema_version"] = 1
     graph_file.write_text(json.dumps(payload))
