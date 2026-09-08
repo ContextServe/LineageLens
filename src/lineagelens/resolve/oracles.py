@@ -38,6 +38,7 @@ completeness envelope, so the degradation is never silent.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -47,6 +48,10 @@ from typing import Protocol, runtime_checkable
 from ..core import Evidence, NodeKind, Resolution, ResolvedTarget, Span, UnresolvedRef
 
 logger = logging.getLogger(__name__)
+
+#: Sentinel for "PATH not yet probed". Distinct from None, which means probed
+#: and not found.
+_UNPROBED = object()
 
 
 class OracleAvailability(str):
@@ -215,6 +220,12 @@ class ToolchainOracle(_Base):
     languages: frozenset[str] = frozenset()
     executable: str = ""
     env_var: str = ""
+    #: Memoised result of the PATH lookup. A toolchain does not appear or vanish
+    #: mid-run, and the registry consults ``available()`` once per *reference* --
+    #: profiling an index of 288 files showed 29,818 ``shutil.which`` calls, each
+    #: a directory scan, for 10% of total runtime. Sentinel is a bare object()
+    #: because ``None`` is a meaningful answer here (not found).
+    _located: Path | object | None = _UNPROBED
 
     def available(self) -> str:
         if self._locate() is None:
@@ -226,16 +237,22 @@ class ToolchainOracle(_Base):
         return str(located) if located else "missing"
 
     def _locate(self) -> Path | None:
-        import os
+        if self._located is not _UNPROBED:
+            return self._located  # type: ignore[return-value]
 
+        found: Path | None = None
         if self.env_var:
             root = os.environ.get(self.env_var)
             if root:
                 candidate = Path(root) / "bin" / self.executable
                 if candidate.exists():
-                    return candidate
-        found = shutil.which(self.executable) if self.executable else None
-        return Path(found) if found else None
+                    found = candidate
+        if found is None and self.executable:
+            which = shutil.which(self.executable)
+            found = Path(which) if which else None
+
+        self._located = found
+        return found
 
 
 def default_oracles(project_root: Path) -> list[ResolverOracle]:

@@ -152,9 +152,35 @@ class Resolver:
                                    if phase is None else None)
 
         for observation in observations:
-            result.coverage[observation.file.path] = self._coverage_for(observation, result)
             result.boundaries.extend(observation.boundaries)
             result.contracts.extend(observation.contracts)
+
+        # Bucket by file ONCE before per-file accounting.
+        #
+        # Computing coverage by scanning the global edge list per file is
+        # quadratic, and the cost is invisible at small scale: 141 files x 21k
+        # edges is 3M iterations and finishes instantly, while Apache Dubbo's
+        # 4,308 files x ~460k edges is 2 billion and never finished at all. One
+        # pass to bucket, then O(1) lookup per file.
+        edges_by_file: dict[str | None, list[Edge]] = defaultdict(list)
+        for edge in result.edges:
+            edges_by_file[edge.file_path].append(edge)
+
+        unresolved_by_file: dict[str, int] = defaultdict(int)
+        for ref in result.unresolved:
+            unresolved_by_file[ref.file_path] += 1
+
+        boundaries_by_node: dict[str, int] = defaultdict(int)
+        for boundary in result.boundaries:
+            boundaries_by_node[boundary.node_id] += 1
+
+        for observation in observations:
+            result.coverage[observation.file.path] = self._coverage_for(
+                observation,
+                edges_by_file.get(observation.file.path, ()),
+                unresolved_by_file.get(observation.file.path, 0),
+                boundaries_by_node,
+            )
 
         return result
 
@@ -494,36 +520,38 @@ class Resolver:
 
     # ---- accounting -------------------------------------------------------
 
-    def _coverage_for(self, observation: Observation, result: ResolveResult) -> Coverage:
+    def _coverage_for(
+        self,
+        observation: Observation,
+        file_edges: Sequence[Edge],
+        unresolved: int,
+        boundaries_by_node: dict[str, int],
+    ) -> Coverage:
         """Per-file reference accounting (§10.6).
 
         The totals must balance: every observed reference became an edge or an
         ``unresolved_refs`` row. ``Coverage.__post_init__`` and a CHECK
         constraint both enforce it, which turns "no silent drops" into a
         checked property rather than a claim.
-        """
-        path = observation.file.path
-        node_ids = {n.id for n in observation.nodes}
 
+        Takes pre-bucketed inputs rather than the whole result: see the comment
+        in :meth:`resolve`.
+        """
         exact = inferred = 0
-        for edge in result.edges:
-            if edge.file_path != path or edge.kind is EdgeKind.CONTAINS:
-                continue
-            if edge.kind is EdgeKind.PARAM_BINDS:
-                continue  # derived, not an observed reference
+        for edge in file_edges:
+            if edge.kind in (EdgeKind.CONTAINS, EdgeKind.PARAM_BINDS):
+                continue  # derived, not observed references
             if edge.resolution is Resolution.EXACT:
                 exact += 1
             else:
                 inferred += 1
 
-        unresolved = sum(1 for r in result.unresolved if r.file_path == path)
         boundaries = sum(
-            1 for b in result.boundaries
-            if b.node_id in node_ids or b.node_id == observation.file.path
+            boundaries_by_node.get(node.id, 0) for node in observation.nodes
         )
 
         return Coverage(
-            file_path=path,
+            file_path=observation.file.path,
             nodes_found=len(observation.nodes),
             refs_total=exact + inferred + unresolved,
             refs_exact=exact,

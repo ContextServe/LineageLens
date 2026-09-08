@@ -388,17 +388,26 @@ class GraphStore:
         )
 
     def write_coverage(self, coverage: Coverage, file_id: int) -> None:
-        self.conn.execute(
+        self.write_coverages([(coverage, file_id)])
+
+    def write_coverages(self, entries: Sequence[tuple[Coverage, int]]) -> None:
+        """Batch form. One statement rather than one per file."""
+        if not entries:
+            return
+        self.conn.executemany(
             """
             INSERT OR REPLACE INTO coverage (
                 file_id, nodes_found, refs_total, refs_exact, refs_inferred,
                 refs_unresolved, boundaries_count, dataflow_status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                file_id, coverage.nodes_found, coverage.refs_total, coverage.refs_exact,
-                coverage.refs_inferred, coverage.refs_unresolved,
-                coverage.boundaries_count, coverage.dataflow_status.value,
+            sorted(
+                (
+                    file_id, c.nodes_found, c.refs_total, c.refs_exact,
+                    c.refs_inferred, c.refs_unresolved, c.boundaries_count,
+                    c.dataflow_status.value,
+                )
+                for c, file_id in entries
             ),
         )
 
