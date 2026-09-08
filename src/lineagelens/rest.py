@@ -77,6 +77,7 @@ class NodeView(BaseModel):
     rescue_tier: str | None = None
     scope: str = "source"
     duplicate_name: bool = False
+    lines_of_code: int = 1
 
 
 class EdgeView(BaseModel):
@@ -211,6 +212,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             # Defensive: null out parent if it won't exist in rendered nodes
             parent_id = symbol.parent
 
+            loc = (symbol.end_line - symbol.line + 1) if (symbol.end_line and symbol.line) else 1
             node = NodeView(
                 id=symbol.id,
                 label=symbol.name,
@@ -229,6 +231,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
                 ),
                 scope=candidate.scope if candidate else "source",
                 duplicate_name=duplicate_name,
+                lines_of_code=max(1, loc),
             )
             nodes.append(node)
             rendered_node_ids.add(symbol.id)

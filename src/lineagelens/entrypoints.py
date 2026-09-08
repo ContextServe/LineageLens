@@ -27,7 +27,7 @@ from .model import CodeGraph, Symbol
 # `# lineagelens: keep` on the definition line or any of its decorators. The
 # escape hatch of last resort, for code only reachable in ways static analysis
 # cannot see.
-PRAGMA = re.compile(r"#\s*lineagelens:\s*keep\b")
+PRAGMA = re.compile(r"(#|//|/\*)\s*lineagelens:\s*keep\b")
 
 # pytest's own file-naming rules, which are name-based rather than
 # directory-based. Requiring a configured test root missed test files elsewhere.

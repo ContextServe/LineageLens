@@ -310,3 +310,357 @@ input:focus {
   color: #9ca3af;
   line-height: 1.45;
 }
+
+/* ==========================================================================
+   HUD Overlay & Floating Panels
+   ========================================================================== */
+.hud-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.hud-panel {
+  position: absolute;
+  pointer-events: auto;
+  background: rgba(15, 20, 25, 0.92);
+  backdrop-filter: blur(8px);
+  border: 1px solid #29364d;
+  border-radius: 8px;
+  color: #e8eefb;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  transition: all 0.2s ease;
+  max-width: 320px;
+}
+
+.hud-panel .panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  cursor: pointer;
+  border-bottom: 1px solid #29364d;
+  user-select: none;
+}
+
+.hud-panel .panel-header h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #70b8ff;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hud-panel .panel-header .toggle-btn {
+  background: none;
+  border: none;
+  color: #98a7bd;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.hud-panel.collapsed .panel-body {
+  display: none;
+}
+
+.hud-panel .panel-body {
+  padding: 12px;
+}
+
+/* Panel positions */
+.panel-stats {
+  top: 14px;
+  right: 14px;
+}
+
+.panel-display {
+  bottom: 14px;
+  left: 14px;
+  min-width: 220px;
+}
+
+.panel-massive {
+  bottom: 14px;
+  right: 14px;
+}
+
+.panel-unlinked {
+  top: 70px;
+  right: 14px;
+}
+
+/* Statistics Grid */
+.grid-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.stat-item {
+  background: #182337;
+  padding: 8px;
+  border-radius: 6px;
+  text-align: center;
+  border: 1px solid #29364d;
+}
+
+.stat-item .stat-num {
+  display: block;
+  font-size: 18px;
+  font-weight: bold;
+  color: #bcd7ff;
+}
+
+.stat-item .stat-lbl {
+  font-size: 10px;
+  color: #98a7bd;
+  text-transform: uppercase;
+}
+
+.stat-item.danger .stat-num { color: #ef4444; }
+.stat-item.warning .stat-num { color: #f59e0b; }
+
+/* Search Bar */
+.hud-search-bar {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 380px;
+  pointer-events: auto;
+  z-index: 101;
+}
+
+.search-input-wrapper {
+  position: relative;
+}
+
+.hud-input {
+  width: 100%;
+  padding: 10px 36px 10px 14px;
+  background: rgba(15, 20, 25, 0.95);
+  border: 2px solid #3a4a68;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 13px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+
+.hud-input:focus {
+  border-color: #3b82f6;
+  outline: none;
+}
+
+.clear-btn {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: #98a7bd;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.selected-badge {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
+  padding: 6px 12px;
+  background: rgba(59, 130, 246, 0.2);
+  border: 1px solid #3b82f6;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.btn-clear-target {
+  background: #374151;
+  color: #fff;
+  border: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.search-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  background: #0f1419;
+  border: 1px solid #3a4a68;
+  border-radius: 6px;
+  list-style: none;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+
+.search-dropdown li {
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  border-bottom: 1px solid #182337;
+}
+
+.search-dropdown li:hover {
+  background: #182337;
+}
+
+.kind-tag {
+  font-size: 9px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  font-weight: bold;
+}
+
+.kind-function, .kind-method { background: #3b82f6; color: #fff; }
+.kind-class { background: #10b981; color: #fff; }
+.kind-module { background: #8b5cf6; color: #fff; }
+
+.symbol-id {
+  flex: 1;
+  font-size: 12px;
+  color: #e8eefb;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loc-tag {
+  font-size: 10px;
+  color: #98a7bd;
+}
+
+/* Item List Drawers */
+.threshold-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.num-input {
+  width: 60px;
+  padding: 4px 6px;
+  background: #182337;
+  border: 1px solid #3a4a68;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 11px;
+  margin: 0;
+}
+
+.item-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.item-list li {
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  background: #182337;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+}
+
+.item-list li:hover {
+  background: #1f2d42;
+}
+
+.item-loc {
+  color: #ef4444;
+  font-weight: bold;
+}
+
+.badge {
+  background: #3b82f6;
+  color: #fff;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+}
+
+.tab-buttons {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.tab-buttons button {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 10px;
+  background: #182337;
+  border: 1px solid #29364d;
+  color: #98a7bd;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.tab-buttons button.active {
+  background: #3b82f6;
+  color: #fff;
+  border-color: #3b82f6;
+}
+
+/* Cytoscape Tooltip */
+.cy-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(15, 20, 25, 0.95);
+  border: 1px solid #3b82f6;
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: #fff;
+  font-size: 11px;
+  z-index: 200;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  transition: opacity 0.15s ease;
+}
+
+.tooltip-title {
+  font-weight: bold;
+  margin-bottom: 4px;
+  color: #60a5fa;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  width: auto;
+  margin: 0;
+}
+
+.divider {
+  height: 1px;
+  background: #29364d;
+  margin: 8px 0;
+}
+
