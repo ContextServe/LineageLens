@@ -96,6 +96,18 @@
   type: (_) @type
   declarator: (variable_declarator name: (identifier) @name)) @node.field
 
+; `static final` is a constant, not mutable state. Worth its own kind for
+; planning queries: a constant is a configuration surface, and Dubbo in
+; particular keys most of its SPI wiring off `static final String` names.
+; Ranked above `field` in the engine, so the two patterns matching one
+; declaration merge to the more specific claim.
+(field_declaration
+  (modifiers
+    "static"
+    "final") @modifier
+  type: (_) @type
+  declarator: (variable_declarator name: (identifier) @name)) @node.constant
+
 (local_variable_declaration
   type: (_) @type
   declarator: (variable_declarator name: (identifier) @name)) @node.variable
