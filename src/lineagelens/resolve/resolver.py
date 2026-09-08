@@ -56,7 +56,6 @@ from ..core import (
     BoundaryKind,
     Contract,
     Coverage,
-    DataflowMode,
     DataflowStatus,
     Edge,
     EdgeKind,
@@ -144,22 +143,10 @@ class Resolver:
         oracles: OracleRegistry | None = None,
         adapters: AdapterRegistry | None = None,
         project_root: Path | None = None,
-        dataflow: DataflowMode = DataflowMode.LAZY,
-        eager_dataflow_for: frozenset[str] = frozenset(),
         provenance: str = "tier-a-resolver",
     ) -> None:
         self.index = index
         self.oracles = oracles or OracleRegistry()
-        #: When to compute data-flow edges (§9.2). In LAZY mode the READ/WRITE
-        #: observations are retained as pending rather than resolved, and the
-        #: query layer resolves a slice on demand and persists it -- so cost is
-        #: paid once per body per content hash and amortises toward EAGER.
-        self.dataflow = dataflow
-        #: Files whose data flow to compute even in INCREMENTAL mode: the ones
-        #: whose content hash changed. This is what §9.2 means by incremental --
-        #: eager where the code moved, lazy where it did not -- rather than a
-        #: rebuild strategy, which is a different axis entirely.
-        self.eager_dataflow_for = eager_dataflow_for
         #: WRITE observations per file, for locating a call's assignment target.
         self._writes_by_file: dict[str, list[UnresolvedRef]] = {}
         #: INSTANTIATE observations per file, for recovering the type behind an
@@ -280,14 +267,6 @@ class Resolver:
             if only is not None and ref.ref_kind not in only:
                 continue
             if exclude is not None and ref.ref_kind in exclude:
-                continue
-            if ref.ref_kind in DATA_REFS and self._defer_dataflow(observation):
-                # Deferred, not dropped: retained as pending so the coverage
-                # ledger still accounts for it and the query layer can resolve
-                # this body when a precise query actually needs it (§9.2, §10.1).
-                result.unresolved.append(_as_unresolved(
-                    ref, RefStatus.PENDING, "data flow deferred (dataflow=lazy)"
-                ))
                 continue
             self._resolve_ref(ref, imports, result)
 
@@ -744,14 +723,6 @@ class Resolver:
         )
 
 
-    def _defer_dataflow(self, observation: Observation) -> bool:
-        """Is this file's data flow deferred rather than computed now (§9.2)?"""
-        if self.dataflow is DataflowMode.EAGER:
-            return False
-        if self.dataflow is DataflowMode.INCREMENTAL:
-            return observation.file.path not in self.eager_dataflow_for
-        return True
-
     def _dataflow_status(self, observation: Observation) -> DataflowStatus:
         """Whether this file's data-flow edges exist yet (§9.2).
 
@@ -762,8 +733,6 @@ class Resolver:
         """
         if not any(r.ref_kind in DATA_REFS for r in observation.refs):
             return DataflowStatus.UNSUPPORTED
-        if self._defer_dataflow(observation):
-            return DataflowStatus.LAZY
         return DataflowStatus.COMPUTED
 
 

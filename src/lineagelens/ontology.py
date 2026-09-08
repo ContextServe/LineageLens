@@ -170,7 +170,7 @@ def _project_facts(project: Path) -> dict[str, Any]:
     try:
         with GraphStore.open(project / ".lineagelens" / DB_FILENAME) as store:
             row = store.conn.execute(
-                "SELECT dataflow_mode, built_at, commit_sha, build_digest "
+                "SELECT built_at, commit_sha, build_digest "
                 "FROM graph_meta WHERE id = 1"
             ).fetchone()
             # Only languages something was actually extracted from. A `files`
@@ -197,7 +197,6 @@ def _project_facts(project: Path) -> dict[str, Any]:
                 "languages_skipped": skipped,
                 "counts": store.counts(),
                 "edge_kinds_present": store.edge_kind_counts(),
-                "dataflow_mode": row["dataflow_mode"] if row else None,
                 "built_at": row["built_at"] if row else None,
                 "build_digest": row["build_digest"] if row else None,
             }
@@ -268,8 +267,7 @@ def ontology_instructions(project: Path | None = None) -> str:
         lines.append(
             f"This index: {counts.get('nodes', 0):,} nodes, "
             f"{counts.get('edges', 0):,} edges, "
-            f"{counts.get('unresolved_refs', 0):,} unresolved references, "
-            f"dataflow={project_facts.get('dataflow_mode')}."
+            f"{counts.get('unresolved_refs', 0):,} unresolved references."
         )
         skipped = project_facts.get("languages_skipped") or {}
         if skipped:

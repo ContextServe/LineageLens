@@ -66,6 +66,10 @@ class QueryEngine:
             "       sum(refs_unresolved) u FROM coverage"
         ).fetchone()
         if totals and totals["t"]:
+            # `unresolved` is dominated by genuinely external references --
+            # stdlib and third-party names that are correctly not in the graph --
+            # plus ambiguities recorded with their candidate sets. Nothing here
+            # is "not attempted": data flow is always computed.
             total = totals["t"]
             envelope.refs = {
                 "total": total,
@@ -461,7 +465,7 @@ class QueryEngine:
         self._note_unclaimed(envelope)
         meta = self.store.conn.execute(
             "SELECT schema_version, commit_sha, build_digest, grammar_digest, "
-            "       spec_digest, adapter_digest, dataflow_mode, built_at "
+            "       spec_digest, adapter_digest, built_at "
             "FROM graph_meta WHERE id = 1"
         ).fetchone()
 

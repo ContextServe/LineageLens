@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS coverage (
     refs_inferred    INTEGER NOT NULL,
     refs_unresolved  INTEGER NOT NULL,
     boundaries_count INTEGER NOT NULL,
-    dataflow_status  TEXT NOT NULL,  -- computed|lazy|unsupported
+    dataflow_status  TEXT NOT NULL,  -- computed|unsupported
     -- "zero silent drops" as a checked property rather than a claim (§16.5)
     CHECK (refs_total = refs_exact + refs_inferred + refs_unresolved)
 );
@@ -168,7 +168,6 @@ CREATE TABLE IF NOT EXISTS graph_meta (
     spec_digest      TEXT,           -- extraction spec files
     adapter_digest   TEXT,           -- contract adapter specs
     ontology_digest  TEXT,           -- generated capability matrix (§12)
-    dataflow_mode    TEXT NOT NULL,  -- lazy|eager|incremental
     built_at         TEXT,
     deterministic_ok INTEGER
 );
