@@ -73,7 +73,6 @@ def project(tmp_path_factory):
     store, report = Indexer(
         root,
         dataflow=DataflowMode.EAGER,
-        allow_tier_a_only=frozenset({"typescript", "javascript"}),
     ).run()
     return QueryEngine(store, str(root)), report, root
 

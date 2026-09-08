@@ -105,6 +105,13 @@ def installed_tiers() -> dict[str, dict[str, str]]:
 
     for lang, entry in out.items():
         entry["grammar_version"] = grammar_version(lang) or "n/a"
+        # Tier A is always available once a grammar loads, and it is a real
+        # tier: it resolves declared types, lexical scope and self-receivers,
+        # and records an ambiguity rather than guessing when it cannot. Saying
+        # only "tier B: missing" invited the reading that the language was
+        # unsupported, which is what made the default index skip 25 files.
+        if entry["tier_b"] == "missing":
+            entry["tier_b"] = "none (Tier A resolution)"
     return out
 
 
@@ -166,15 +173,22 @@ def _project_facts(project: Path) -> dict[str, Any]:
                 "SELECT dataflow_mode, built_at, commit_sha, build_digest "
                 "FROM graph_meta WHERE id = 1"
             ).fetchone()
+            # Only languages something was actually extracted from. A `files`
+            # row exists for skipped files too, so selecting every distinct
+            # lang reported a language as present while also reporting it as
+            # skipped -- two contradictory claims in the same output.
             langs = [
                 r["lang"]
-                for r in store.conn.execute("SELECT DISTINCT lang FROM files")
+                for r in store.conn.execute(
+                    "SELECT DISTINCT lang FROM files WHERE parse_status IN "
+                    "('ok', 'partial')"
+                )
             ]
             skipped = {
-                r["lang"]: r["skip_reason"]
+                f"{r['lang']} ({r['n']} files)": r["skip_reason"]
                 for r in store.conn.execute(
-                    "SELECT DISTINCT lang, skip_reason FROM files "
-                    "WHERE skip_reason IS NOT NULL"
+                    "SELECT lang, skip_reason, count(*) n FROM files "
+                    "WHERE skip_reason IS NOT NULL GROUP BY lang, skip_reason"
                 )
             }
             return {
