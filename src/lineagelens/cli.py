@@ -1,447 +1,489 @@
-"""Command-line interface for creating and serving code context."""
+"""Command line interface.
+
+Six commands, replacing the schema-3 surface. Two are gone deliberately:
+
+* ``analyze`` -> ``index``. The old command dispatched on the *repository*
+  language with an early return, so a polyglot repo produced one language and
+  silently discarded the rest. Running it on this repository emitted 39
+  TypeScript symbols and zero Python, overwriting a good graph in place.
+* ``--engine`` is gone entirely. There is no user-selectable engine: extraction
+  is per-file and additive, and the choice a user actually has is a fidelity
+  budget (``--dataflow``), not an analyser.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict, replace
+import logging
+import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
+from .core import SCHEMA_VERSION, DataflowMode, Intent
+from .indexer import Indexer
+from .ontology import capability_matrix
+from .query import QueryEngine
+from .store import DB_FILENAME, GraphNotFound, GraphStore, SchemaMismatch
 
-from . import hooks
-from .analyzer import analyze
-from .config import ProjectConfig
-from .detect_config import detect_config
-from .model import CodeGraph
-from .queries import GraphNotFoundError, load_graph
-from .ratchet import BASELINE_NAME, SEVERITY, Baseline, evaluate, severity_at_or_above
-from .reachability import compute_reachability
-from .report import AnalysisReport
+logger = logging.getLogger(__name__)
 
 
-def _plain(value: Any) -> Any:
-    """Recursively convert tuples (from dataclass asdict) into YAML-friendly lists."""
-    if isinstance(value, dict):
-        return {key: _plain(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_plain(item) for item in value]
-    return value
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="lineagelens",
+        description=(
+            "Deterministic code graph: control flow, data flow and "
+            "cross-service contracts, for humans and coding agents."
+        ),
+    )
+    parser.add_argument("--version", action="version",
+                        version=f"lineagelens schema {SCHEMA_VERSION}")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="log extraction and resolution progress")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    _add_index(commands)
+    _add_query(commands)
+    _add_coverage(commands)
+    _add_verify(commands)
+    _add_ontology(commands)
+    _add_mcp(commands)
+
+    args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    return int(args.handler(args) or 0)
 
 
-def config_template(project: Path | None = None) -> tuple[str, list[str]]:
-    """Generate config template, optionally auto-detecting values.
+# ---------------------------------------------------------------------------
+# index
+# ---------------------------------------------------------------------------
 
-    Args:
-        project: Project directory for auto-detection (if None, uses defaults)
-
-    Returns:
-        (yaml_content, notes) tuple where notes are human-readable detection messages
-    """
-    if project and project.exists():
-        detection = detect_config(project)
-        config_dict = _plain(asdict(ProjectConfig(
-            source_roots=tuple(detection.source_roots),
-            test_roots=tuple(detection.test_roots),
-            frameworks=tuple(detection.frameworks),
-        )))
-        notes = detection.notes
-    else:
-        config_dict = _plain(asdict(ProjectConfig()))
-        notes = []
-
-    yaml_content = yaml.safe_dump(config_dict, sort_keys=False)
-    return yaml_content, notes
-
-
-def graph_path(project: Path, config: ProjectConfig) -> Path:
-    return project / config.output.directory / config.output.filename
-
-
-def report_path(project: Path, config: ProjectConfig) -> Path:
-    return project / config.output.directory / "report.json"
-
-
-def check_frontend_available() -> None:
-    """Check if frontend is available. Provide guidance if not."""
-    from .web import locate_frontend_dist
-
-    dist_dir = locate_frontend_dist()
-    if dist_dir:
-        return  # Frontend is ready
-
-    # Frontend not found — provide guidance
-    print("⚠️  Frontend UI not found.")
-    print()
-    print("To build the frontend locally, run:")
-    print("  cd frontend && npm install && npm run build")
-    print()
-    print("Alternatively, install a released version of lineagelens which includes")
-    print("the prebuilt frontend:")
-    print("  pip install lineagelens[web]  # from PyPI")
-    print()
-    print("For now, the REST API and GraphQL are still available at:")
-    print("  http://127.0.0.1:8717/api/v1")
-    print("  http://127.0.0.1:8717/graphql")
+def _add_index(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "index",
+        help="build the graph for a project (all languages, one graph)",
+    )
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    cmd.add_argument(
+        "--dataflow", choices=[m.value for m in DataflowMode],
+        default=DataflowMode.LAZY.value,
+        help=(
+            "when to compute data-flow edges. lazy (default) defers them per "
+            "function body; eager computes everything up front; incremental "
+            "recomputes only changed files"
+        ),
+    )
+    cmd.add_argument(
+        "--allow-tier-a-only", default="",
+        help=(
+            "comma-separated languages to index without a type resolver. "
+            "Without this, a language with no available resolver is SKIPPED "
+            "rather than approximated by name matching -- see `lineagelens "
+            "ontology` for what is available here. Edges produced this way are "
+            "marked heuristic and reported in every coverage envelope"
+        ),
+    )
+    cmd.add_argument("--force", action="store_true",
+                     help="rebuild even if the index looks current")
+    cmd.add_argument("--json", action="store_true", help="emit the report as JSON")
+    cmd.set_defaults(handler=_run_index)
 
 
-def write_artifacts(
-    project: Path,
-    config: ProjectConfig,
-    graph: CodeGraph,
-    report: AnalysisReport,
-    quiet: bool = False,
-) -> tuple[Path, Path]:
-    """Persist an already-computed graph and report.
-
-    Split out of :func:`build` so that callers holding a graph in memory (the REST
-    and MCP trigger endpoints) can write it without analysing a second time.
-
-    Returns:
-        ``(graph_path, report_path)``
-    """
-    graph_file = graph_path(project, config)
-    graph_file.parent.mkdir(parents=True, exist_ok=True)
-    graph_file.write_text(json.dumps(graph.to_dict(), indent=2), encoding="utf-8")
-
-    db_file = project / config.output.directory / "index.sqlite"
+def _run_index(args: Any) -> int:
+    allow = frozenset(
+        part.strip() for part in args.allow_tier_a_only.split(",") if part.strip()
+    )
+    indexer = Indexer(
+        args.path,
+        dataflow=DataflowMode(args.dataflow),
+        allow_tier_a_only=allow,
+    )
+    store, report = indexer.run()
     try:
-        from .db import SQLiteIndexDB
-        db = SQLiteIndexDB(db_file)
-        db.save_code_graph(graph)
-    except Exception as e:
-        print(f"⚠️  Could not populate index.sqlite: {e}")
-
-    report_file = report_path(project, config)
-    report_file.parent.mkdir(parents=True, exist_ok=True)
-    report_file.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
-
-    if not quiet:
-        for line in report.summary_lines():
-            print(line)
-
-    return graph_file, report_file
-
-
-def build(
-    project: Path, quiet: bool = False, jedi: bool | None = None, engine: str | None = None
-) -> tuple[Path, Path, AnalysisReport]:
-    """Analyze a project and write graph.json + report.json.
-
-    Returns:
-        ``(graph_path, report_path, report)``.
-    """
-    from .detect_config import is_java_project, is_js_project
-    from .java_bridge import run_java_analysis
-    from .js_bridge import run_js_analysis
-
-    config = ProjectConfig.load(project)
-    if engine is not None:
-        config = replace(config, analysis=replace(config.analysis, engine=engine))
-
-    # Check if target project is JS/TS and using default compiler engine
-    if config.analysis.engine == "compiler" and (is_js_project(project) or getattr(config, "language", None) in ("javascript", "typescript", "js", "ts")):
-        graph_file = run_js_analysis(project)
-        report_file = report_path(project, config)
-        report = AnalysisReport(
-            project_root=str(project),
-            started_at="",
-            finished_at="",
-            files_scanned=1,
-            files_skipped=0,
-            symbols_found=0,
-            relations_found=0,
-            containers_found=0,
-        )
-        if not quiet:
-            print(f"✓ JavaScript/TypeScript analysis complete. Graph written to {graph_file}")
-        return graph_file, report_file, report
-
-    # Check if target project is Java and using default compiler engine
-    if config.analysis.engine == "compiler" and (is_java_project(project) or getattr(config, "language", None) == "java"):
-        graph_file = run_java_analysis(project)
-        report_file = report_path(project, config)
-        report = AnalysisReport(
-            project_root=str(project),
-            started_at="",
-            finished_at="",
-            files_scanned=1,
-            files_skipped=0,
-            symbols_found=0,
-            relations_found=0,
-            containers_found=0,
-        )
-        if not quiet:
-            print(f"✓ Java analysis complete. Graph written to {graph_file}")
-        return graph_file, report_file, report
-
-    if jedi is not None and jedi != config.analysis.jedi:
-        config = replace(config, analysis=replace(config.analysis, jedi=jedi))
-    graph, report = analyze(project, config)
-    graph_file, report_file = write_artifacts(project, config, graph, report, quiet=quiet)
-    return graph_file, report_file, report
-
-
-
-def run_check(project: Path, args: Any) -> int:
-    """Compare current dead-code candidates against the baseline. Returns an exit code."""
-    config = ProjectConfig.load(project)
-
-    if args.analyze:
-        graph, report = analyze(project, config)
-        write_artifacts(project, config, graph, report, quiet=True)
-    else:
-        try:
-            graph = load_graph(project)
-        except GraphNotFoundError as e:
-            print(f"✗ {e}")
-            return 1
-
-    candidates = compute_reachability(graph, config).candidates()
-    baseline_path = args.baseline or (project / config.output.directory / BASELINE_NAME)
-
-    if args.update_baseline:
-        considered = severity_at_or_above(args.fail_on)
-        updated = Baseline(
-            entries={c.symbol.id: c.verdict for c in candidates if c.verdict in considered}
-        )
-        updated.save(baseline_path)
-        print(f"✓ Baseline written to {baseline_path} ({len(updated.entries)} entries)")
-        return 0
-
-    result = evaluate(candidates, Baseline.load(baseline_path), fail_on=args.fail_on)
-    for line in result.summary_lines():
-        print(line)
-
-    if result.failed(args.max_new):
-        print(
-            "\n✗ New dead code introduced. Remove it, or -- if it is reached by "
-            "reflection or config-driven dispatch that static analysis cannot see -- "
-            "mark it `# lineagelens: keep` and re-run with --update-baseline."
-        )
-        return 1
+        if args.json:
+            print(json.dumps(report.as_dict(), indent=2))
+        else:
+            _print_index_report(report, store)
+    finally:
+        store.close()
     return 0
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="lineagelens", description="Evidence-labelled Python code lineage for humans and coding agents")
-    commands = parser.add_subparsers(dest="command", required=True, help="Command to run")
+def _print_index_report(report: Any, store: GraphStore) -> None:
+    data = report.as_dict()
+    files = data["files"]
+    graph = data["graph"]
 
-    init_cmd = commands.add_parser("init", help="Initialize lineagelens.yaml")
-    init_cmd.add_argument("project", type=Path, help="Project directory")
-
-    analyze_cmd = commands.add_parser("analyze", help="Analyze Python code and build graph")
-    analyze_cmd.add_argument("project", type=Path, help="Project directory")
-    analyze_cmd.add_argument(
-        "--engine",
-        choices=["compiler", "tree-sitter", "scip", "hybrid"],
-        default=None,
-        help="AST analysis engine (default: compiler or value from lineagelens.yaml)",
+    print(f"indexed {data['project_root']}")
+    print(
+        f"  files     {files['parsed']:,} parsed"
+        + (f", {files['skipped']:,} skipped" if files["skipped"] else "")
+        + (f", {files['failed']:,} failed" if files["failed"] else "")
     )
-    analyze_cmd.add_argument("--strict", action="store_true", help="Exit with nonzero code if any failures occur")
-
-    analyze_cmd.add_argument(
-        "--no-jedi",
-        action="store_true",
-        help="Skip type inference. Faster, resolves fewer dynamic calls (useful on PR-time CI runs)",
+    langs = ", ".join(f"{k} {v:,}" for k, v in data["languages"].items())
+    print(f"  languages {langs or 'none'}")
+    print(f"  services  {data['services']:,}")
+    print(f"  graph     {graph['nodes']:,} nodes, {graph['edges']:,} edges")
+    print(
+        f"  contracts {data['contracts']:,}"
+        f"   unresolved {graph['unresolved_refs']:,}"
+        f"   boundaries {graph['boundaries']:,}"
     )
-    analyze_cmd.add_argument("--quiet", action="store_true", help="Do not print the analysis summary")
+    print(f"  digest    {data['build_digest'][:16]}  ({data['duration_seconds']}s)")
 
-    serve_cmd = commands.add_parser("serve", help="Start local web UI and GraphQL server")
-    serve_cmd.add_argument("project", type=Path, help="Project directory")
+    if data["skipped_reasons"]:
+        print("  skipped:")
+        for reason, count in data["skipped_reasons"].items():
+            print(f"    {reason:20s} {count:,}")
 
-    check_cmd = commands.add_parser(
-        "check",
-        help="Fail on newly introduced dead code (CI ratchet)",
-        description=(
-            "Compare dead-code candidates against a committed baseline and exit 1 only "
-            "on ones that are new. A ratchet is adoptable on day one, where an absolute "
-            "gate would fail every existing codebase and get switched off."
-        ),
+    # A framework nobody wrote an adapter for is a coverage gap, so it is
+    # surfaced as a work list rather than left silent (§8.2).
+    unclaimed = data.get("unclaimed_frameworks") or []
+    if unclaimed:
+        print("\n  frameworks present but unmodelled (no contract adapter):")
+        for entry in unclaimed[:5]:
+            print(
+                f"    {entry['name']:24s} {entry['uses']:>4} uses"
+                f"   e.g. {entry['example']}  {entry.get('sample_key', '')}"
+            )
+        print("    add an adapter under .lineagelens/adapters/ to link these")
+
+
+# ---------------------------------------------------------------------------
+# query
+# ---------------------------------------------------------------------------
+
+def _add_query(commands: Any) -> None:
+    cmd = commands.add_parser("query", help="ask the graph a question")
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+
+    # The shared flags are attached to every primitive as a parent parser, not
+    # only to `query`. argparse consumes options positionally, so declaring
+    # them once on the parent would force `query --json . impact f.py:4` --
+    # nobody writes that, and `query . impact f.py:4 --json` would fail with an
+    # unrecognised-argument error that gives no hint why.
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument("--json", action="store_true", help="emit raw JSON")
+    shared.add_argument("--intent", choices=[i.value for i in Intent],
+                        help="precise (debugging) or plan (surveying)")
+    shared.add_argument("--limit", type=int)
+    shared.add_argument("--max-depth", type=int)
+    shared.add_argument("--kinds", help="comma-separated edge kinds to follow")
+
+    cmd.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    cmd.add_argument("--intent", choices=[i.value for i in Intent],
+                     help=argparse.SUPPRESS)
+    cmd.add_argument("--limit", type=int, help=argparse.SUPPRESS)
+    cmd.add_argument("--max-depth", type=int, help=argparse.SUPPRESS)
+    cmd.add_argument("--kinds", help=argparse.SUPPRESS)
+
+    sub = cmd.add_subparsers(dest="primitive", required=True)
+
+    def add(name: str, help_text: str, *arguments: str) -> Any:
+        parser = sub.add_parser(name, help=help_text, parents=[shared])
+        for argument in arguments:
+            parser.add_argument(argument)
+        return parser
+
+    add("paths", "the call chains between two symbols", "from_symbol", "to_symbol")
+    add("trace", "a call tree rooted at one symbol", "entry")
+    add("callers", "who reaches this symbol, with chains", "symbol")
+    add("callees", "what this symbol reaches, with chains", "symbol")
+    add("impact", "what changing a symbol or file:line affects", "target")
+    add("dataflow", "where a value comes from and goes", "symbol")
+    add("similar", "how this repo already wires a flow like this", "exemplar")
+    add("explain", "why two symbols are believed related", "from_symbol", "to_symbol")
+    add("symbol", "one symbol with signature, docs and source", "symbol")
+    add("search", "ranked search over the graph", "text")
+    add("entrypoints", "symbols exposing a contract")
+    add("contracts", "who exposes and consumes what")
+
+    stack = sub.add_parser("stacktrace", parents=[shared],
+                           help="map a stack trace onto the graph")
+    stack.add_argument("file", nargs="?", help="file containing the trace; "
+                                               "reads stdin when omitted")
+
+    diff = sub.add_parser("diff", parents=[shared],
+                          help="impact of a unified diff")
+    diff.add_argument("file", nargs="?", help="diff file; reads stdin when omitted")
+
+    cmd.set_defaults(handler=_run_query)
+
+
+def _run_query(args: Any) -> int:
+    try:
+        engine = QueryEngine.open(args.path)
+    except (GraphNotFound, SchemaMismatch) as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+
+    kinds = (
+        [k.strip() for k in args.kinds.split(",") if k.strip()]
+        if args.kinds else None
     )
-    check_cmd.add_argument("project", type=Path, help="Project directory")
-    check_cmd.add_argument(
-        "--baseline",
-        type=Path,
-        default=None,
-        help="Baseline file (default: <output dir>/dead-code-baseline.json)",
-    )
-    check_cmd.add_argument(
-        "--update-baseline",
-        action="store_true",
-        help="Rewrite the baseline from the current state and exit 0",
-    )
-    check_cmd.add_argument(
-        "--fail-on",
-        choices=list(SEVERITY),
-        default="dead",
-        help="Least severe verdict that should fail (default: dead)",
-    )
-    check_cmd.add_argument(
-        "--max-new",
-        type=int,
-        default=0,
-        help="Tolerate this many new candidates before failing (default: 0)",
-    )
-    check_cmd.add_argument(
-        "--analyze",
-        action="store_true",
-        help="Re-run the analysis first instead of using the stored graph",
-    )
+    shared = {"intent": args.intent, "limit": args.limit}
+    walk = {**shared, "kinds": kinds, "max_depth": args.max_depth}
+    name = args.primitive
 
-    hook_cmd = commands.add_parser("hook", help="Manage the git hook that keeps the graph current")
-    hook_cmd.add_argument("action", choices=["install", "uninstall", "status"])
-    hook_cmd.add_argument("project", type=Path, nargs="?", default=Path("."), help="Project directory")
-    hook_cmd.add_argument(
-        "--pre-commit",
-        action="store_true",
-        help="Use pre-commit instead of post-commit (adds seconds to every commit)",
-    )
-    hook_cmd.add_argument(
-        "--force", action="store_true", help="Append to a hook LineageLens did not create"
-    )
+    if name == "paths":
+        result = engine.find_paths(args.from_symbol, args.to_symbol, **walk)
+    elif name == "trace":
+        result = engine.trace_flow(args.entry, **walk)
+    elif name == "callers":
+        result = engine.callers_of(args.symbol, **walk)
+    elif name == "callees":
+        result = engine.callees_of(args.symbol, **walk)
+    elif name == "impact":
+        result = engine.impact_of(
+            args.target, intent=args.intent, limit=args.limit,
+            max_depth=args.max_depth,
+        )
+    elif name == "dataflow":
+        result = engine.dataflow_of(
+            args.symbol, intent=args.intent, limit=args.limit,
+            max_depth=args.max_depth,
+        )
+    elif name == "similar":
+        result = engine.similar_flows(args.exemplar, limit=args.limit)
+    elif name == "explain":
+        result = engine.explain(args.from_symbol, args.to_symbol)
+    elif name == "symbol":
+        result = engine.get_node(args.symbol, intent=args.intent)
+    elif name == "search":
+        result = engine.search(args.text, kinds=kinds, **shared)
+    elif name == "entrypoints":
+        result = engine.entry_points(limit=args.limit)
+    elif name == "contracts":
+        result = engine.contract_map(limit=args.limit)
+    elif name == "stacktrace":
+        result = engine.map_stacktrace(_read_input(args.file), limit=args.limit)
+    elif name == "diff":
+        result = engine.impact_of_diff(
+            _read_input(args.file), intent=args.intent, limit=args.limit
+        )
+    else:  # pragma: no cover - argparse rejects anything else
+        print(f"unknown primitive: {name}", file=sys.stderr)
+        return 2
 
-    watch_cmd = commands.add_parser("watch", help="Run background watcher daemon to update index on file save")
-    watch_cmd.add_argument("project", type=Path, nargs="?", default=Path("."), help="Project directory")
-    watch_cmd.add_argument("--daemon", action="store_true", help="Run as detached background daemon")
-    watch_cmd.add_argument("--stop", action="store_true", help="Stop running background daemon")
-    watch_cmd.add_argument("--status", action="store_true", help="Check running status of background watcher daemon")
+    payload = result.as_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        _print_result(payload)
+    engine.store.close()
+    return 1 if payload.get("error") else 0
 
-    sync_cmd = commands.add_parser("sync", help="Incrementally sync a single file into SQLite index")
-    sync_cmd.add_argument("file", type=str, help="Relative path to file to sync")
-    sync_cmd.add_argument("project", type=Path, nargs="?", default=Path("."), help="Project directory")
 
-    args = parser.parse_args()
-    project = args.project.resolve()
+def _read_input(path: str | None) -> str:
+    if path:
+        return Path(path).read_text("utf-8", errors="replace")
+    return sys.stdin.read()
 
-    # Validate project path exists
-    if not project.exists():
-        parser.error(f"Project directory does not exist: {project}")
-    if not project.is_dir():
-        parser.error(f"Not a directory: {project}")
 
-    if args.command == "watch":
-        from .watcher import LineageLensWatcher
-        watcher = LineageLensWatcher(project)
-        if args.stop:
-            stopped = watcher.stop()
-            if stopped:
-                print(f"✓ Stopped LineageLens watcher for {project}")
-            else:
-                print("LineageLens watcher is not currently running.")
-            return
-        if args.status:
-            st = watcher.get_status()
-            if st["running"]:
-                print(f"✓ LineageLens watcher active (PID {st['pid']})")
-            else:
-                print("• LineageLens watcher is not running.")
-            return
-
-        print(f"🚀 Starting LineageLens watcher daemon for {project}...")
-        watcher.start(daemon=args.daemon)
+def _print_result(payload: dict[str, Any]) -> None:
+    """Human-readable rendering. JSON stays the machine contract."""
+    if payload.get("error"):
+        print(f"error: {payload['error']}", file=sys.stderr)
+        if payload.get("remedy"):
+            print(f"  {payload['remedy']}", file=sys.stderr)
         return
 
-    if args.command == "sync":
-        from .db import DB_NAME, SQLiteIndexDB
-        from .incremental import IncrementalAnalyzer
-        db = SQLiteIndexDB(project / ".lineagelens" / DB_NAME)
-        analyzer = IncrementalAnalyzer()
-        ok = analyzer.sync_file(project, args.file, db)
-        if ok:
-            print(f"✓ Incremental sync complete: {args.file}")
+    header = payload["kind"]
+    if payload["total_available"]:
+        header += f"  {payload['returned']} of {payload['total_available']}"
+        if payload["truncated"]:
+            header += " (truncated -- raise --limit)"
+    print(header)
+
+    for item in payload["results"]:
+        print()
+        if isinstance(item, dict) and "chain" in item:
+            print(f"  [{item['length']} hop{'s' if item['length'] != 1 else ''}] "
+                  f"{item['chain']}")
+            for hop in item.get("hops", []):
+                via = f" via {hop['via']}" if hop.get("via") else ""
+                print(f"      {hop['depth']}. {hop['node']}  ({hop['at']}){via}")
         else:
-            print(f"• File skipped or failed to sync: {args.file}")
-        return
+            print(_indent(json.dumps(item, indent=2, default=str), "  "))
 
-    if args.command == "init":
-        destination = project / "lineagelens.yaml"
-        if destination.exists():
-            parser.error(f"{destination} already exists")
-        yaml_content, notes = config_template(project)
-        destination.write_text(yaml_content, encoding="utf-8")
+    coverage = payload.get("coverage", {})
+    if coverage:
+        print()
+        state = "complete" if coverage.get("complete") else "qualified"
+        print(f"  coverage: {state}  (intent={coverage.get('intent')})")
+        for entry in coverage.get("boundary_detail", [])[:5]:
+            print(f"    boundary {entry['kind']}: {entry['detail']}")
+        if coverage.get("degraded"):
+            print(f"    degraded (Tier A only): {', '.join(coverage['degraded'])}")
 
-        # Print summary
-        print(f"✓ Created {destination}\n")
 
-        if notes:
-            print("Auto-detection results:")
-            for note in notes:
-                print(f"  {note}")
+def _indent(text: str, prefix: str) -> str:
+    return "\n".join(prefix + line for line in text.splitlines())
 
-        # Parse the YAML to show what was written
-        config = ProjectConfig.load(project, destination)
-        print("\nConfiguration written:")
-        print(f"  source_roots: {list(config.source_roots)}")
-        print(f"  test_roots: {list(config.test_roots)}")
-        print(f"  frameworks: {list(config.frameworks)}")
 
-        print("\nNext steps:")
-        print("  1. Review the configuration in lineagelens.yaml")
-        print("  2. Run: lineagelens analyze .")
-        print("  3. Optionally run: lineagelens serve . (for web UI)")
+# ---------------------------------------------------------------------------
+# coverage / verify / ontology / mcp
+# ---------------------------------------------------------------------------
 
-        return
-
-    if args.command == "hook":
-        kind = "pre-commit" if args.pre_commit else "post-commit"
-        try:
-            if args.action == "install":
-                path = hooks.install(project, kind=kind, force=args.force)
-                print(f"✓ Installed {kind} hook at {path}")
-                if kind == "pre-commit":
-                    print("  Note: this runs on every commit and will add a few seconds each time.")
-                print("\n  Add .lineagelens/ to .gitignore -- the graph is a build artifact,")
-                print("  not source. Publish it from CI if agents need it centrally.")
-            elif args.action == "uninstall":
-                removed = hooks.uninstall(project, kind=kind)
-                print(f"✓ Removed the managed block from the {kind} hook" if removed
-                      else f"No LineageLens block found in the {kind} hook")
-            else:
-                for name, present in hooks.status(project).items():
-                    print(f"  {name:12s} {'installed' if present else '-'}")
-        except hooks.HookError as e:
-            raise SystemExit(f"✗ {e}") from e
-        return
-
-    if args.command == "check":
-        raise SystemExit(run_check(project, args))
-
-    # analyze and serve commands
-    config = ProjectConfig.load(project)
-    _graph_file, _report_file, analysis_report = build(
-        project,
-        quiet=getattr(args, "quiet", False),
-        jedi=False if getattr(args, "no_jedi", False) else None,
-        engine=getattr(args, "engine", None),
+def _add_coverage(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "coverage", help="what the index does and does not cover"
     )
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    cmd.add_argument("--scope", help="restrict the per-file detail to a path prefix")
+    cmd.add_argument("--json", action="store_true")
+    cmd.set_defaults(handler=_run_coverage)
 
 
-    if args.command == "serve":
-        # Check if frontend is available (provide guidance if not, but don't block)
-        check_frontend_available()
+def _run_coverage(args: Any) -> int:
+    try:
+        engine = QueryEngine.open(args.path)
+    except (GraphNotFound, SchemaMismatch) as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
 
-        try:
-            import uvicorn
+    payload = engine.coverage_report(scope=args.scope).as_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        counts = payload["counts"]
+        print(f"nodes {counts['nodes']:,}   edges {counts['edges']:,}   "
+              f"unresolved {counts['unresolved_refs']:,}   "
+              f"boundaries {counts['boundaries']:,}")
+        print("\nnode kinds:")
+        for kind, count in payload["node_kinds"].items():
+            print(f"  {kind:14s} {count:,}")
+        print("\nedge kinds:")
+        for kind, count in payload["edge_kinds"].items():
+            print(f"  {kind:14s} {count:,}")
+        coverage = payload["coverage"]
+        if coverage.get("refs"):
+            refs = coverage["refs"]
+            print(f"\nreferences: {refs['total']:,} total  "
+                  f"{refs['exact']:.0%} exact  {refs['inferred']:.0%} inferred  "
+                  f"{refs['unresolved']:.0%} unresolved")
+        if coverage.get("files"):
+            print("files: " + "  ".join(
+                f"{k} {v:,}" for k, v in coverage["files"].items()
+            ))
+        if coverage.get("degraded"):
+            print(f"degraded (Tier A only): {', '.join(coverage['degraded'])}")
+    engine.store.close()
+    return 0
 
-            from .web import create_app
-        except ImportError as exc:
-            raise SystemExit("Install LineageLens with `pip install -e '.[web]'` to serve the UI and GraphQL API.") from exc
 
-        print(f"\n🚀 Starting LineageLens server at http://{config.server.host}:{config.server.port}")
-        print("   Press Ctrl+C to stop\n")
-        uvicorn.run(create_app(project, config), host=config.server.host, port=config.server.port)
-
-    # Check for failures if --strict is set
-    if (
-        args.command == "analyze"
-        and args.strict
-        and analysis_report is not None
-        and analysis_report.has_failures()
-    ):
-        raise SystemExit(1)
+def _add_verify(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "verify",
+        help="rebuild twice and confirm the graph is byte-identical (§11)",
+    )
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    cmd.add_argument(
+        "--incremental", action="store_true",
+        help="also confirm an incremental rebuild equals a cold one",
+    )
+    cmd.add_argument("--allow-tier-a-only", default="")
+    cmd.set_defaults(handler=_run_verify)
 
 
-if __name__ == "__main__":
-    main()
+def _run_verify(args: Any) -> int:
+    """Determinism check (§11, §16.24).
+
+    Two independent builds of the same tree must produce the same digest. A
+    grammar upgrade, an unsorted iteration, or a wall-clock value leaking into
+    a stored row would all break this -- which is the point of checking rather
+    than intending.
+    """
+    import tempfile
+
+    allow = frozenset(
+        part.strip() for part in args.allow_tier_a_only.split(",") if part.strip()
+    )
+    digests: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for run in (1, 2):
+            store, report = Indexer(args.path, allow_tier_a_only=allow).run(
+                db_path=Path(tmp) / f"run{run}" / DB_FILENAME
+            )
+            digests.append(report.build_digest)
+            store.close()
+            print(f"  build {run}: {report.build_digest}")
+
+    if digests[0] != digests[1]:
+        print("\nFAIL: two builds of the same tree differ.", file=sys.stderr)
+        print("Something order-dependent or time-dependent reached the store.",
+              file=sys.stderr)
+        return 1
+    print("\nOK: deterministic.")
+
+    if args.incremental:
+        print("\nincremental rebuild not yet implemented; cold builds verified")
+        return 0
+    return 0
+
+
+def _add_ontology(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "ontology", help="what this build can express, measured not declared"
+    )
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    cmd.add_argument("--json", action="store_true")
+    cmd.set_defaults(handler=_run_ontology)
+
+
+def _run_ontology(args: Any) -> int:
+    matrix = capability_matrix(Path(args.path))
+    if args.json:
+        print(json.dumps(matrix, indent=2, default=str))
+        return 0
+
+    print(f"schema {matrix['schema_version']}   "
+          f"{len(matrix['node_kinds'])} node kinds   "
+          f"{len(matrix['relation_kinds'])} relation kinds")
+    if not matrix["generated"]:
+        print("\nconformance matrix not generated; per-language capability is "
+              "reported as 'untested'")
+
+    print(f"\n{'language':12s} {'tier A':22s} {'tier B':22s} capabilities")
+    for lang, entry in matrix["languages"].items():
+        caps = entry.get("capabilities", {})
+        marks = "".join(
+            "y" if caps.get(name) is True else
+            "~" if caps.get(name) == "partial" else
+            "?" if caps.get(name) == "untested" else "n"
+            for name in ("nodes", "calls", "inherits", "implements",
+                         "dataflow", "contracts")
+        )
+        print(f"{lang:12s} {entry['tier_a']:22s} {entry['tier_b']:22s} {marks}")
+    print("            (nodes calls inherits implements dataflow contracts)")
+
+    project = matrix.get("project", {})
+    if project.get("indexed"):
+        print(f"\nthis index: {project['counts']['nodes']:,} nodes, "
+              f"languages {', '.join(project['languages_present'])}")
+        if project.get("languages_skipped"):
+            print("  skipped: " + ", ".join(
+                f"{k} ({v})" for k, v in project["languages_skipped"].items()
+            ))
+    return 0
+
+
+def _add_mcp(commands: Any) -> None:
+    cmd = commands.add_parser("mcp", help="run the MCP server over stdio")
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    cmd.set_defaults(handler=_run_mcp)
+
+
+def _run_mcp(args: Any) -> int:
+    from .mcp.server import create_server
+
+    create_server(Path(args.path)).run()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

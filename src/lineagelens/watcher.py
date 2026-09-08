@@ -1,214 +1,156 @@
-"""Standalone background watcher daemon for LineageLens (lineagelens watch)."""
+"""Watch mode: keep the index current as files change.
+
+Ported to schema 4 rather than deleted. It is small and it is the difference
+between an index that is trustworthy during a working session and one that
+silently goes stale.
+
+Reindexing is a whole-project rebuild rather than a per-file patch. That looks
+wasteful and is not: resolution is global, because a call can target any file,
+so patching one file's nodes without re-resolving its dependents would leave
+edges pointing at symbols that no longer exist. The measured cost is 21s for
+Apache Dubbo's 4,046 files, and a debounce means a burst of saves triggers one
+rebuild.
+"""
 
 from __future__ import annotations
 
 import logging
-import os
-import signal
-import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
 
-from watchdog.events import FileSystemEvent, FileSystemEventHandler
-from watchdog.observers import Observer
-
-from .config import ProjectConfig
-from .db import DB_NAME, SQLiteIndexDB
-from .incremental import IncrementalAnalyzer
-from .treesitter_analyzer import EXTENSION_LANG_MAP
+from .core import DataflowMode
+from .indexer import Indexer
+from .services import IGNORED_DIRS
 
 logger = logging.getLogger(__name__)
 
-PID_FILE_NAME = "watcher.pid"
-DEBOUNCE_INTERVAL_SEC = 0.3  # 300ms debounce window
+#: Seconds of quiet before rebuilding. A formatter-on-save or a branch switch
+#: touches many files at once; without this each one would queue a rebuild.
+DEBOUNCE_SECONDS = 1.5
 
 
-class DebouncedEventHandler(FileSystemEventHandler):
-    """Debounces rapid file modification events before triggering incremental sync."""
+class IndexWatcher:
+    """Rebuilds the index after a burst of file changes settles."""
 
     def __init__(
         self,
-        project_root: Path,
-        incremental_analyzer: IncrementalAnalyzer,
-        db: SQLiteIndexDB,
-        debounce_sec: float = DEBOUNCE_INTERVAL_SEC,
+        project: Path,
+        *,
+        dataflow: DataflowMode = DataflowMode.LAZY,
+        allow_tier_a_only: frozenset[str] = frozenset(),
+        debounce: float = DEBOUNCE_SECONDS,
     ) -> None:
-        super().__init__()
-        self.project_root = project_root
-        self.incremental_analyzer = incremental_analyzer
-        self.db = db
-        self.debounce_sec = debounce_sec
-        self.pending_files: set[str] = set()
-        self.lock = threading.Lock()
-        self.timer: threading.Timer | None = None
+        self.project = Path(project).resolve()
+        self.dataflow = dataflow
+        self.allow_tier_a_only = allow_tier_a_only
+        self.debounce = debounce
+        self._timer: threading.Timer | None = None
+        self._lock = threading.Lock()
+        self._pending: set[str] = set()
 
-    def on_any_event(self, event: FileSystemEvent) -> None:
-        if event.is_directory:
-            return
+    # ---- public API -------------------------------------------------------
 
-        src_path = Path(event.src_path)
-        if self._is_ignored(src_path):
-            return
-
-        ext = src_path.suffix.lower()
-        if ext not in EXTENSION_LANG_MAP and ext != ".py":
-            return
-
+    def run(self) -> int:
+        """Watch until interrupted. Returns a process exit code."""
         try:
-            rel_path = str(src_path.relative_to(self.project_root))
-        except ValueError:
-            return
-
-        with self.lock:
-            self.pending_files.add(rel_path)
-            if self.timer:
-                self.timer.cancel()
-            self.timer = threading.Timer(
-                self.debounce_sec, self._process_pending_files
+            from watchdog.observers import Observer
+        except ImportError:
+            logger.error(
+                "watch mode needs watchdog: pip install 'lineagelens[watch]'"
             )
-            self.timer.start()
+            return 1
 
-    def _is_ignored(self, path: Path) -> bool:
-        parts = path.parts
-        return any(
-            ignored in parts
-            for ignored in (
-                ".git",
-                ".lineagelens",
-                "node_modules",
-                ".venv",
-                "__pycache__",
-                "dist",
-                "coverage",
-            )
-        )
+        handler = _ChangeHandler(self)
+        observer = Observer()
+        observer.schedule(handler, str(self.project), recursive=True)
+        observer.start()
 
-    def _process_pending_files(self) -> None:
-        with self.lock:
-            files_to_sync = list(self.pending_files)
-            self.pending_files.clear()
-            self.timer = None
-
-        for rel_file in files_to_sync:
-            try:
-                self.incremental_analyzer.sync_file(
-                    self.project_root, rel_file, self.db
-                )
-            except Exception as exc:
-                logger.error(f"Error syncing {rel_file}: {exc}")
-
-
-class LineageLensWatcher:
-    """Manages file monitoring observer and daemon lifecycle."""
-
-    def __init__(self, project_root: Path | str, config: ProjectConfig | None = None) -> None:
-        self.project_root = Path(project_root).resolve()
-        config_path = self.project_root / "lineagelens.yaml"
-        if config is not None:
-            self.config = config
-        elif config_path.exists():
-            self.config = ProjectConfig.load(config_path)
-        else:
-            self.config = ProjectConfig()
-        self.lineagelens_dir = self.project_root / ".lineagelens"
-        self.lineagelens_dir.mkdir(parents=True, exist_ok=True)
-        
-        self.pid_file = self.lineagelens_dir / PID_FILE_NAME
-        self.db = SQLiteIndexDB(self.lineagelens_dir / DB_NAME)
-        self.incremental_analyzer = IncrementalAnalyzer(self.config)
-        self.observer = Observer()
-
-    def start(self, daemon: bool = False) -> None:
-        """Start file watcher. If daemon is True, detach as background process."""
-        status = self.get_status()
-        if status["running"]:
-            logger.info(f"Watcher already running (PID {status['pid']})")
-            return
-
-        if daemon:
-            import subprocess
-            cmd = [sys.executable, "-m", "lineagelens.cli", "watch", str(self.project_root)]
-            kwargs: dict[str, Any] = {
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.DEVNULL,
-                "stdin": subprocess.DEVNULL,
-            }
-            if sys.platform != "win32":
-                kwargs["start_new_session"] = True
-            proc = subprocess.Popen(cmd, **kwargs)
-            logger.info(f"Started LineageLens watcher daemon (PID {proc.pid})")
-            return
-
-        # Record current PID
-        self.pid_file.write_text(str(os.getpid()))
-
-        event_handler = DebouncedEventHandler(
-            self.project_root, self.incremental_analyzer, self.db
-        )
-
-        source_roots = [
-            self.project_root / root for root in self.config.source_roots
-        ]
-        if not any(r.exists() for r in source_roots):
-            source_roots = [self.project_root]
-
-        for root in source_roots:
-            if root.exists():
-                self.observer.schedule(event_handler, str(root), recursive=True)
-
-        logger.info(f"LineageLens watcher active on {self.project_root}")
-        self.observer.start()
-
-        if not daemon:
-            try:
-                while self.observer.is_alive():
-                    time.sleep(0.5)
-            except KeyboardInterrupt:
-                self.stop()
-
-    def stop(self) -> bool:
-        """Stop running watcher daemon."""
-        status = self.get_status()
-        if not status["running"]:
-            if self.pid_file.exists():
-                self.pid_file.unlink()
-            logger.info("Watcher is not running.")
-            return False
-
-        pid = status["pid"]
-        if pid == os.getpid():
-            if self.observer.is_alive():
-                self.observer.stop()
-                self.observer.join()
-            if self.pid_file.exists():
-                self.pid_file.unlink()
-            return True
-
+        print(f"watching {self.project} (ctrl-c to stop)")
+        self.reindex(reason="initial")
         try:
-            os.kill(pid, signal.SIGTERM)
-            logger.info(f"Stopped watcher daemon (PID {pid})")
-        except ProcessLookupError:
-            logger.warning(f"Process {pid} not found.")
+            while True:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            print("\nstopping")
         finally:
-            if self.pid_file.exists():
-                self.pid_file.unlink()
-        return True
+            observer.stop()
+            observer.join()
+        return 0
 
-    def get_status(self) -> dict[str, Any]:
-        """Check if watcher process is currently running."""
-        if not self.pid_file.exists():
-            return {"running": False, "pid": None}
+    def note_change(self, path: str) -> None:
+        """Record a change and (re)start the debounce timer."""
+        with self._lock:
+            self._pending.add(path)
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.debounce, self._fire)
+            self._timer.daemon = True
+            self._timer.start()
 
+    def reindex(self, *, reason: str) -> None:
+        store, report = Indexer(
+            self.project,
+            dataflow=self.dataflow,
+            allow_tier_a_only=self.allow_tier_a_only,
+        ).run()
         try:
-            pid = int(self.pid_file.read_text().strip())
-        except ValueError:
-            return {"running": False, "pid": None}
+            print(
+                f"  {reason}: {report.nodes:,} nodes, {report.edges:,} edges, "
+                f"{report.duration_seconds:.1f}s  [{report.build_digest[:12]}]"
+            )
+        finally:
+            store.close()
 
+    # ---- internals --------------------------------------------------------
+
+    def _fire(self) -> None:
+        with self._lock:
+            changed = sorted(self._pending)
+            self._pending.clear()
+            self._timer = None
+        if not changed:
+            return
+        head = ", ".join(Path(p).name for p in changed[:3])
+        suffix = f" (+{len(changed) - 3} more)" if len(changed) > 3 else ""
         try:
-            # Signal 0 checks if process exists without killing it
-            os.kill(pid, 0)
-            return {"running": True, "pid": pid}
-        except (ProcessLookupError, OSError):
-            return {"running": False, "pid": pid}
+            self.reindex(reason=f"{head}{suffix}")
+        except Exception as exc:
+            # A watcher that dies on one bad intermediate save is useless; the
+            # next save retries, and the error is reported rather than hidden.
+            logger.error("reindex failed: %s", exc)
+
+
+def _relevant(path: str, project: Path) -> bool:
+    """Is this a path worth reindexing for?
+
+    Filters the index's own output first: writing ``.lineagelens/graph.sqlite``
+    would otherwise trigger the next rebuild, which triggers the next.
+    """
+    candidate = Path(path)
+    try:
+        relative = candidate.resolve().relative_to(project)
+    except ValueError:
+        return False
+    if any(part in IGNORED_DIRS or part.startswith(".") for part in relative.parts):
+        return False
+
+    from .extract import detect_dialect
+
+    return detect_dialect(candidate) is not None
+
+
+class _ChangeHandler:
+    """watchdog handler. Duck-typed so importing watchdog stays optional."""
+
+    def __init__(self, watcher: IndexWatcher) -> None:
+        self.watcher = watcher
+
+    def dispatch(self, event: object) -> None:
+        if getattr(event, "is_directory", False):
+            return
+        for attribute in ("src_path", "dest_path"):
+            path = getattr(event, attribute, None)
+            if path and _relevant(str(path), self.watcher.project):
+                self.watcher.note_change(str(path))
+                return
