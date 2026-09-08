@@ -1,0 +1,9 @@
+lang = "rust"
+dialects = ["rust"]
+
+implicit_receivers = ["self", "&self", "&mut self"]
+doc_prefixes = ["///", "//!", "//"]
+
+# `new` is an associated function by convention rather than a language
+# construct, but it is near-universal and tooling treats it as such.
+constructor_names = ["new"]

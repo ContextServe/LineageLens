@@ -23,15 +23,37 @@ dependencies = [
   "pydantic>=2.0",
   "watchdog>=3.0.0",
   "tomli>=2.0; python_version<'3.11'",
+
+  # Tier A extraction is not optional (issue #51 §7.1), so tree-sitter and every
+  # grammar is a hard dependency rather than an extra. Previously `tree-sitter`
+  # sat behind an extra and *no grammar package was declared at all*, so
+  # `_get_tree_sitter_parser` returned None for all 12 advertised languages and
+  # every non-Python file silently fell through to a regex line scanner. On
+  # Apache Dubbo that produced 4,297 "classes" matched from `"class " in line`
+  # and five "methods" that were string literals from a switch statement.
+  #
+  # Versions are pinned exactly, not floored. A grammar upgrade changes parse
+  # output, which must invalidate the index rather than silently alter results;
+  # the pinned set's digest is recorded in graph_meta.grammar_digest (§11).
+  # A `>=` floor here would make `--verify-determinism` unenforceable.
+  "tree-sitter==0.26.0",
+  "tree-sitter-python==0.25.0",
+  "tree-sitter-java==0.23.5",
+  "tree-sitter-javascript==0.25.0",
+  "tree-sitter-typescript==0.23.2",
+  "tree-sitter-go==0.25.0",
+  "tree-sitter-rust==0.24.2",
+  "tree-sitter-c-sharp==0.23.5",
 ]
 
 [project.optional-dependencies]
 web = ["fastapi>=0.110", "strawberry-graphql[fastapi]>=0.235", "uvicorn>=0.29", "pydantic>=2.0"]
 mcp = ["mcp>=1.0"]
 llm = ["httpx>=0.27"]
-treesitter = ["tree-sitter>=0.21.0"]
+# SCIP is a Tier B resolver oracle (§7.2), not a graph producer, so it stays
+# optional. The `treesitter` and `hybrid` extras are gone: tree-sitter is now a
+# core dependency and there is no longer a user-selectable engine to combine.
 scip = ["protobuf>=4.25.0"]
-hybrid = ["tree-sitter>=0.21.0", "protobuf>=4.25.0"]
 
 # ruff is pinned to a minor range, not just a floor. Its default rule set
 # widened between releases, which turned CI lint into a moving target that
