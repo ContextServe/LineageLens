@@ -69,7 +69,8 @@
   (call_expression
     function: (member_expression
                 object: (_) @receiver
-                property: (property_identifier) @ref.name))) @ref.decorate
+                property: (property_identifier) @ref.name)
+    arguments: (arguments (_) @ref.arg)?)) @ref.decorate
 
 ; ---------------------------------------------------------------------------
 ; imports and exports

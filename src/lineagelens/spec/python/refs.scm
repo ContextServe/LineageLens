@@ -60,12 +60,21 @@
 
 (decorator (identifier) @ref.name) @ref.decorate
 
-(decorator (call function: (identifier) @ref.name)) @ref.decorate
+; Arguments are captured because a decorator's argument is very often the
+; contract key -- `@router.get("/api/users/{id}")`, `@app.task(name="x")`. A
+; contract adapter (§8.2) reads it from here, and without it every
+; framework-declared route is invisible.
+(decorator
+  (call
+    function: (identifier) @ref.name
+    arguments: (argument_list (_) @ref.arg)?)) @ref.decorate
 
 (decorator
-  (call function: (attribute
-                    object: (_) @receiver
-                    attribute: (identifier) @ref.name))) @ref.decorate
+  (call
+    function: (attribute
+                object: (_) @receiver
+                attribute: (identifier) @ref.name)
+    arguments: (argument_list (_) @ref.arg)?)) @ref.decorate
 
 (decorator (attribute attribute: (identifier) @ref.name)) @ref.decorate
 
