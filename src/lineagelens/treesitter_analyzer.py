@@ -180,22 +180,30 @@ class TreeSitterAnalyzer:
             graph.add_symbol(symbol)
             symbol_created_id = symbol_id
 
-        elif node_type in ("call_expression", "method_invocation", "call"):
-            # Extract call site
-            func_node = node.child_by_field_name("function") or node.child_by_field_name("name") or (node.children[0] if node.children else None)
+        elif node_type in ("call_expression", "method_invocation", "call", "jsx_element", "jsx_self_closing_element"):
+            func_node = None
+            if node_type == "jsx_self_closing_element":
+                func_node = node.child_by_field_name("name")
+            elif node_type == "jsx_element":
+                opening = node.child_by_field_name("open_tag") or (node.children[0] if node.children else None)
+                if opening:
+                    func_node = opening.child_by_field_name("name") or (opening.children[1] if len(opening.children) > 1 else None)
+            else:
+                func_node = node.child_by_field_name("function") or node.child_by_field_name("name") or (node.children[0] if node.children else None)
+
             if func_node and parent_symbol_id:
                 call_target_name = func_node.text.decode("utf-8").split(".")[-1]
-                # Emit a candidate relation (target resolved during resolution pass)
-                graph.add_relation(Relation(
-                    source=parent_symbol_id,
-                    target=call_target_name,  # Unresolved name placeholder
-                    kind="CALLS",
-                    file=rel_file,
-                    line=node.start_point[0] + 1,
-                    evidence=Evidence(tier="deterministic_fact", label="static_ast"),
-                    resolution="unresolved_dynamic_dispatch",
-                    resolution_evidence=Evidence(tier="deterministic_heuristic", label="tree_sitter_ast"),
-                ))
+                if call_target_name and (node_type not in ("jsx_element", "jsx_self_closing_element") or call_target_name[0].isupper()):
+                    graph.add_relation(Relation(
+                        source=parent_symbol_id,
+                        target=call_target_name,
+                        kind="CALLS",
+                        file=rel_file,
+                        line=node.start_point[0] + 1,
+                        evidence=Evidence(tier="deterministic_fact", label="static_ast"),
+                        resolution="unresolved_dynamic_dispatch",
+                        resolution_evidence=Evidence(tier="deterministic_heuristic", label="tree_sitter_ast"),
+                    ))
 
         for child in node.children:
             self._walk_node(child, content, rel_file, module_name, symbol_created_id, graph)
@@ -204,16 +212,21 @@ class TreeSitterAnalyzer:
         self, content: bytes, rel_file: str, lang: str, graph: CodeGraph
     ) -> None:
         """Fallback lightweight Regex/line scanner if language tree-sitter binary is missing."""
+        import re
+
         lines = content.decode("utf-8", errors="replace").splitlines()
         module_name = rel_file.replace("/", ".").rsplit(".", 1)[0]
         
         current_class: str | None = None
+        current_func: str | None = None
 
         for idx, line in enumerate(lines, 1):
             line_str = line.strip()
-            # Simple Python / Java / JS function defs
-            if "class " in line_str:
-                parts = line_str.split()
+            clean_line = re.sub(r"^(export\s+|default\s+|async\s+|public\s+|private\s+|protected\s+)+", "", line_str)
+
+            # Class definitions
+            if "class " in clean_line:
+                parts = clean_line.split()
                 if "class" in parts:
                     class_idx = parts.index("class")
                     if class_idx + 1 < len(parts):
@@ -230,15 +243,18 @@ class TreeSitterAnalyzer:
                                 module=module_name,
                                 parent=module_name,
                             ))
-            elif line_str.startswith(("def ", "function ", "async def ", "public ", "private ", "protected ")):
-                tokens = line_str.split("(")
+
+            # Function / Method / Component definitions
+            elif clean_line.startswith(("def ", "function ")) or (clean_line.startswith("const ") and ("=>" in clean_line or "function" in clean_line)):
+                tokens = clean_line.split("(")
                 if tokens:
                     first_part = tokens[0].split()
                     name = first_part[-1] if first_part else "unknown"
-                    name = name.rstrip(":")
-                    if name and name not in ("if", "for", "while", "class", "{"):
+                    name = name.rstrip(":").rstrip("=").strip()
+                    if name and name not in ("if", "for", "while", "class", "{", "return"):
                         kind = "method" if current_class else "function"
                         symbol_id = f"{rel_file}::{name}" if not current_class else f"{rel_file}::{current_class}.{name}"
+                        current_func = symbol_id
                         graph.add_symbol(Symbol(
                             id=symbol_id,
                             kind=kind,
@@ -248,6 +264,21 @@ class TreeSitterAnalyzer:
                             module=module_name,
                             parent=current_class or module_name,
                         ))
+
+            # JSX element call site detection e.g. <HUDPanels ... />
+            jsx_matches = re.findall(r"<([A-Z]\w+)", line_str)
+            for target_comp in jsx_matches:
+                caller = current_func or module_name
+                graph.add_relation(Relation(
+                    source=caller,
+                    target=target_comp,
+                    kind="CALLS",
+                    file=rel_file,
+                    line=idx,
+                    evidence=Evidence(tier="deterministic_fact", label="static_ast"),
+                    resolution="unresolved_dynamic_dispatch",
+                    resolution_evidence=Evidence(tier="deterministic_heuristic", label="fallback_scanner"),
+                ))
 
 
 

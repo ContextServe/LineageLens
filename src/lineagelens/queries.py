@@ -7,6 +7,7 @@ No duplicated query logic across the three API surfaces.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,6 +24,8 @@ from .model import (
 )
 from .report import AnalysisReport, FileFailure, SymbolWarning
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from .index import GraphIndex
     from .reachability import DeadCodeCandidate
@@ -34,15 +37,24 @@ class GraphNotFoundError(RuntimeError):
 
 
 def load_graph(project: Path) -> CodeGraph:
-    """Load a code graph from .lineagelens/graph.json.
+    """Load a code graph from .lineagelens/index.sqlite or .lineagelens/graph.json.
 
     Raises:
         GraphNotFoundError: If graph file doesn't exist or is malformed
     """
+    db_path = project / ".lineagelens" / "index.sqlite"
+    if db_path.exists():
+        try:
+            from .db import SQLiteIndexDB
+            db = SQLiteIndexDB(db_path)
+            return db.to_code_graph(project_root=str(project))
+        except Exception as e:
+            logger.warning(f"Could not load index.sqlite, falling back to graph.json: {e}")
+
     path = project / ".lineagelens" / "graph.json"
     if not path.exists():
         raise GraphNotFoundError(
-            f"Analysis graph not found at {path}\n"
+            f"Analysis graph not found at {path} or {db_path}\n"
             f"Please run: lineagelens analyze {project}\n"
             f"Then retry: lineagelens serve {project}"
         )
