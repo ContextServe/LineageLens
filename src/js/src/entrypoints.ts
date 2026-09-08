@@ -58,9 +58,26 @@ export function detectEntryPoints(
     }
   }
 
-  // Check UI entry points (React page components)
-  if ((filePath.includes("pages/") || filePath.includes("app/")) && (symbolName === "default" || symbolName.endsWith("Page"))) {
-    kinds.push("ui_entry");
+  // Check UI entry points (React page/app components, App.tsx, main.tsx, index.tsx)
+  if (
+    filePath.includes("pages/") ||
+    filePath.includes("app/") ||
+    filePath.endsWith("App.tsx") ||
+    filePath.endsWith("App.jsx") ||
+    filePath.endsWith("main.tsx") ||
+    filePath.endsWith("main.jsx") ||
+    filePath.endsWith("index.tsx") ||
+    filePath.endsWith("index.jsx")
+  ) {
+    if (
+      symbolName === "default" ||
+      symbolName === "App" ||
+      symbolName === "main" ||
+      symbolName.endsWith("Page") ||
+      symbolName.endsWith("App")
+    ) {
+      kinds.push("ui_entry");
+    }
   }
 
   return kinds;

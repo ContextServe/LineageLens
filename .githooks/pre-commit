@@ -1,0 +1,38 @@
+#!/bin/bash
+set -e
+
+# Pre-commit hook script for LineageLens
+# Runs backend/frontend tests, ruff check, and lineagelens dead-code ratchet.
+
+echo "=================================================="
+echo "🔍 Running Pre-Commit Hooks..."
+echo "=================================================="
+
+# Determine Python/Executable environment
+VENV_BIN="./.venv/bin"
+if [ -d "$VENV_BIN" ]; then
+    PYTEST="$VENV_BIN/pytest"
+    RUFF="$VENV_BIN/ruff"
+    LINEAGELENS="$VENV_BIN/lineagelens"
+else
+    PYTEST="pytest"
+    RUFF="ruff"
+    LINEAGELENS="lineagelens"
+fi
+
+echo "1/3 🧪 Running backend and frontend tests..."
+echo "  ↳ Running backend tests ($PYTEST)..."
+$PYTEST
+
+echo "  ↳ Running frontend tests (npm type-check & vitest)..."
+(cd frontend && npm run type-check && npx vitest run --passWithNoTests)
+
+echo "2/3 🧹 Running ruff linter ($RUFF check src tests)..."
+$RUFF check src tests
+
+echo "3/3 🎯 Running LineageLens dead-code ratchet ($LINEAGELENS check . --fail-on dead)..."
+$LINEAGELENS check . --fail-on dead
+
+echo "=================================================="
+echo "✅ All pre-commit checks passed successfully!"
+echo "=================================================="

@@ -62,6 +62,9 @@ class SCIPProtobufIngestor:
             # Step 1: Collect Documents and Symbol Definitions
             for doc in index.documents:
                 rel_path = doc.relative_path
+                parts = rel_path.split("/")
+                if any(ignored in parts for ignored in (".venv", "node_modules", "dist", "build", ".lineagelens", "site-packages")):
+                    continue
                 module_name = rel_path.replace("/", ".").rsplit(".", 1)[0]
                 
                 graph.add_container(Container(
@@ -82,7 +85,7 @@ class SCIPProtobufIngestor:
 
                         symbol_location_map[symbol_uri] = (rel_file := rel_path, line)
 
-                        graph.add_symbol(Symbol(
+                        sym_obj = Symbol(
                             id=symbol_id,
                             kind="function" if "(" in symbol_uri else "class",
                             name=name,
@@ -91,7 +94,18 @@ class SCIPProtobufIngestor:
                             module=module_name,
                             parent=module_name,
                             description=f"SCIP Symbol: {symbol_uri}",
-                        ))
+                        )
+                        from .entrypoints import PRAGMA
+                        file_p = self.project_root / rel_path
+                        if file_p.exists():
+                            try:
+                                source_lines = file_p.read_text(errors="replace").splitlines()
+                                if any(PRAGMA.search(line_content) for line_content in source_lines[max(0, line - 3) : min(len(source_lines), line + 2)]):
+                                    sym_obj.mark_entry_point("pragma_keep")
+                            except Exception:
+                                pass
+
+                        graph.add_symbol(sym_obj)
 
             # Step 2: Extract References and Compiler-verified Relations
             for doc in index.documents:

@@ -35,7 +35,7 @@ export class JsAstAnalyzer {
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (!["node_modules", ".git", "dist", "build", "coverage", ".next"].includes(entry.name)) {
+        if (!entry.name.startsWith(".") && !["node_modules", "dist", "build", "coverage", "venv"].includes(entry.name)) {
           files.push(...this.collectFiles(fullPath));
         }
       } else if (/\.(js|jsx|ts|tsx)$/.test(entry.name) && !entry.name.endsWith(".d.ts")) {
@@ -256,33 +256,45 @@ export class JsAstAnalyzer {
       }
     }
 
-    // Call Expression -> CALLS / AWAIT_CALLS relation
-    if (ts.isCallExpression(node) && activeSymbolId) {
+    // Call Expression or JSX Element -> CALLS / AWAIT_CALLS relation
+    if ((ts.isCallExpression(node) || ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) && activeSymbolId) {
       const line = sf.getLineAndCharacterOfPosition(node.getStart()).line + 1;
-      const calledName = node.expression.getText(sf);
-      const funcName = calledName.includes(".") ? calledName.split(".").pop()! : calledName;
+      let funcName = "";
 
-      // Resiliency check
-      const currentSymbol = symbolsMap.get(activeSymbolId);
-      if (currentSymbol) {
-        const risks = checkResiliencyRisks(funcName, line, currentSymbol.async_);
-        risks.forEach(r => currentSymbol.resiliency.push(r));
+      if (ts.isJsxSelfClosingElement(node)) {
+        funcName = node.tagName.getText(sf);
+      } else if (ts.isJsxElement(node)) {
+        funcName = node.openingElement.tagName.getText(sf);
+      } else {
+        const calledName = node.expression.getText(sf);
+        funcName = calledName.includes(".") ? calledName.split(".").pop()! : calledName;
       }
 
-      const targetSymbolId = this.findSymbolIdByName(funcName, symbolsMap);
-      if (targetSymbolId) {
-        const isAwait = node.parent && ts.isAwaitExpression(node.parent);
-        relations.push({
-          source: activeSymbolId,
-          target: targetSymbolId,
-          kind: isAwait ? "AWAIT_CALLS" : "CALLS",
-          file: relPath,
-          line,
-          evidence: { tier: "deterministic_fact", label: "static_ast" },
-          resolution: "resolved",
-          resolution_evidence: { tier: "deterministic_fact", label: "static_scope_walk" },
-          arguments: []
-        });
+      // Resiliency check for direct calls
+      if (ts.isCallExpression(node)) {
+        const currentSymbol = symbolsMap.get(activeSymbolId);
+        if (currentSymbol) {
+          const risks = checkResiliencyRisks(funcName, line, currentSymbol.async_);
+          risks.forEach(r => currentSymbol.resiliency.push(r));
+        }
+      }
+
+      if (funcName && (funcName[0] === funcName[0].toUpperCase() || ts.isCallExpression(node))) {
+        const targetSymbolId = this.findSymbolIdByName(funcName, symbolsMap);
+        if (targetSymbolId) {
+          const isAwait = ts.isCallExpression(node) && node.parent && ts.isAwaitExpression(node.parent);
+          relations.push({
+            source: activeSymbolId,
+            target: targetSymbolId,
+            kind: isAwait ? "AWAIT_CALLS" : "CALLS",
+            file: relPath,
+            line,
+            evidence: { tier: "deterministic_fact", label: "static_ast" },
+            resolution: "resolved",
+            resolution_evidence: { tier: "deterministic_fact", label: "static_scope_walk" },
+            arguments: []
+          });
+        }
       }
     }
 

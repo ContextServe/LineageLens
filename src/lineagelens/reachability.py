@@ -197,6 +197,7 @@ class _Graph:
     outgoing: dict[str, list]
     incoming: dict[str, list]
     dunders_of: dict[str, list[str]]
+    children_of: dict[str, list[str]]
     overrides_of: dict[str, list[str]]
     overridden_by: dict[str, list[str]]
 
@@ -206,6 +207,7 @@ class _Graph:
         incoming: dict[str, list] = defaultdict(list)
         overrides_of: dict[str, list[str]] = defaultdict(list)
         overridden_by: dict[str, list[str]] = defaultdict(list)
+        children_of: dict[str, list[str]] = defaultdict(list)
         for relation in graph.relations:
             outgoing[relation.source].append(relation)
             incoming[relation.target].append(relation)
@@ -215,40 +217,36 @@ class _Graph:
 
         dunders_of: dict[str, list[str]] = defaultdict(list)
         for symbol in graph.symbols.values():
-            if symbol.parent and symbol.name in IMPLICIT_DUNDERS:
-                parent = graph.symbols.get(symbol.parent)
-                if parent is not None and parent.kind == "class":
-                    dunders_of[symbol.parent].append(symbol.id)
+            if symbol.parent:
+                children_of[symbol.parent].append(symbol.id)
+                if symbol.name in IMPLICIT_DUNDERS:
+                    parent = graph.symbols.get(symbol.parent)
+                    if parent is not None and parent.kind == "class":
+                        dunders_of[symbol.parent].append(symbol.id)
 
         return cls(
             outgoing=dict(outgoing),
             incoming=dict(incoming),
             dunders_of=dict(dunders_of),
+            children_of=dict(children_of),
             overrides_of=dict(overrides_of),
             overridden_by=dict(overridden_by),
         )
 
 
 def _walk(graph: CodeGraph, adjacency: _Graph, seeds: list[str]) -> set[str]:
-    """Symbols reachable from ``seeds`` over every edge kind, plus two implicit rules.
-
-    The implicit rules cannot be plain edges:
-
-    * a reachable class keeps its dunder methods, because the language invokes
-      them with no call site naming them. It does **not** keep its ordinary
-      methods -- that would destroy dead-method detection entirely.
-    * a reachable base method implies its overrides may be invoked
-      polymorphically. This is the *reverse* of the OVERRIDES edge; the forward
-      direction (an override implies its base declaration) is the edge itself.
-    """
+    """Symbols reachable from ``seeds`` over every edge kind, plus implicit rules."""
     seen = {seed for seed in seeds if seed in graph.symbols}
     queue = deque(seen)
     while queue:
         current = queue.popleft()
 
         targets = [relation.target for relation in adjacency.outgoing.get(current, ())]
-        if graph.symbols[current].kind == "class":
+        current_sym = graph.symbols[current]
+        if current_sym.kind == "class":
             targets.extend(adjacency.dunders_of.get(current, ()))
+        elif current_sym.kind in ("function", "method"):
+            targets.extend(adjacency.children_of.get(current, ()))
         targets.extend(adjacency.overrides_of.get(current, ()))
 
         for target in targets:
@@ -409,6 +407,20 @@ def _mechanisms_for(
                 "implicit_dunder",
                 "deterministic_fact",
                 f"invoked implicitly by the language on {parent.name}",
+                parent.id,
+            )
+        )
+
+    if (
+        parent is not None
+        and parent.kind in ("function", "method")
+        and parent.id in reachable
+    ):
+        found.append(
+            _Option(
+                "inner_scope_definition",
+                "deterministic_fact",
+                f"defined inside reachable scope {parent.name}",
                 parent.id,
             )
         )
