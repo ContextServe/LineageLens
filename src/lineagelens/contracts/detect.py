@@ -56,6 +56,11 @@ SPI_GLOBS = (
 #: Node kinds whose declared type can key a contract.
 _TYPED_KINDS = frozenset({NodeKind.FIELD, NodeKind.PARAMETER, NodeKind.VARIABLE})
 
+#: Bytes a decorator may sit above its declaration. Generous enough for a
+#: stack of decorators and a docstring, tight enough that a trailing decorator
+#: cannot claim an unrelated declaration further down the file.
+MAX_DECORATOR_GAP = 400
+
 #: Node kinds that can themselves be a contract, or implement one.
 TYPE_OWNER_KINDS = frozenset({
     NodeKind.CLASS, NodeKind.INTERFACE, NodeKind.STRUCT, NodeKind.TRAIT,
@@ -147,6 +152,12 @@ def detect_in_observation(
         r for r in observation.refs
         if r.ref_kind in (RefKind.IMPLEMENT, RefKind.INHERIT)
     ]
+    # Declarations a decorator could be attached to, in source order.
+    decoratable = sorted(
+        (n for n in observation.nodes
+         if n.is_callable or n.kind in TYPE_OWNER_KINDS or n.kind is NodeKind.FIELD),
+        key=lambda n: n.span.start_byte,
+    )
 
     for ref in observation.refs:
         enriched = ref
@@ -179,8 +190,15 @@ def detect_in_observation(
                 span=ref.span,
             ))
 
+        # A decorator sits *before* the declaration it decorates, so it falls
+        # outside that declaration's span and the extractor attaches it to the
+        # enclosing module. Left alone, `@router.post("/api/orders")` would
+        # expose the contract from the module rather than from the handler --
+        # and "what reaches this route" would return nothing useful.
+        source = _decorated_declaration(ref, decoratable) or ref.from_node
+
         result.edges.append(Edge(
-            src=ref.from_node,
+            src=source,
             dst=contract.id,
             kind=match.edge_kind,
             # A contract join is a name match on a normalised string, never a
@@ -377,6 +395,37 @@ def _contract_key_source(
         if owner.span.contains(candidate.span):
             return candidate.ref_text
     return owner.name
+
+
+def _decorated_declaration(
+    ref: UnresolvedRef, decoratable: list[Node]
+) -> str | None:
+    """The declaration a decorator applies to, or ``None``.
+
+    A decorator precedes its target, so containment cannot find it: the nearest
+    declaration *starting after* the decorator is the one being decorated. The
+    gap is bounded so that a decorator at the end of a class body does not
+    capture the next top-level declaration hundreds of lines below.
+    """
+    if ref.ref_kind is not RefKind.DECORATE:
+        return None
+
+    best: tuple[int, str] | None = None
+    for node in decoratable:
+        distance = node.span.start_byte - ref.span.end_byte
+        if distance < 0:
+            # Starts before the decorator ends. An annotation written *inside*
+            # a declaration (Java field annotations are) belongs to it.
+            if node.span.contains(ref.span):
+                length = node.span.byte_length
+                if best is None or length < best[0]:
+                    best = (length, node.id)
+            continue
+        if distance > MAX_DECORATOR_GAP:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, node.id)
+    return best[1] if best else None
 
 
 def _innermost_containing(span: Span, nodes: list[Node]) -> Node | None:

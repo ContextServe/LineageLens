@@ -19,6 +19,7 @@ sides needs to know the other exists.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,11 +117,23 @@ class Adapter:
     def method_for(self, ref: UnresolvedRef) -> str:
         """HTTP verb for this observation.
 
-        Derived from the matched name where the framework encodes it there
-        (``app.post``, ``@DeleteMapping``), which is the common case.
+        Three sources, in order:
+
+        1. **An options argument.** ``fetch(url, {method: "POST"})`` carries the
+           verb in its second argument. Without reading it, every ``fetch``
+           would be keyed ``GET`` and a POST client would silently fail to join
+           its POST route -- a wrong answer rather than a missing one.
+        2. **The matched name.** ``app.post``, ``@DeleteMapping``: the common
+           case, where the framework encodes the verb in the API.
+        3. **The adapter's first declared method**, as the documented default.
         """
         if self.kind is not ContractKind.HTTP_ROUTE:
             return "ANY"
+
+        explicit = _method_from_options(ref)
+        if explicit:
+            return explicit
+
         lowered = ref.ref_text.lower()
         for verb in self.methods:
             token = verb.lower()
@@ -281,6 +294,25 @@ class AdapterRegistry:
                 adapter=adapter, normalised=normalised,
             )
         return None
+
+
+#: `method: "POST"` inside an options object, in any of the six languages'
+#: object syntaxes. Matched on the captured argument text rather than parsed,
+#: because the argument arrives as source and a full expression parse would be
+#: the wrong tool for reading one literal.
+_METHOD_OPTION = re.compile(
+    r"""["']?method["']?\s*[:=]\s*["'](?P<verb>[A-Za-z]+)["']""",
+    re.IGNORECASE,
+)
+
+
+def _method_from_options(ref: UnresolvedRef) -> str:
+    """An explicit HTTP verb in a call's options argument, or ``""``."""
+    for arg in ref.metadata.get("args") or ():
+        match = _METHOD_OPTION.search(str(arg.get("text", "")))
+        if match:
+            return match.group("verb").upper()
+    return ""
 
 
 def _as_names(raw: object, path: Path, adapter_id: str) -> tuple[str, ...]:

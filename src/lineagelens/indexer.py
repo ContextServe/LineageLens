@@ -199,6 +199,7 @@ class Indexer:
             oracles=OracleRegistry(project_root=self.root, lang_of_file=lang_of_file),
             adapters=adapters,
             project_root=self.root,
+            dataflow=self.dataflow,
         )
         resolved = resolver.resolve(observations)
 
