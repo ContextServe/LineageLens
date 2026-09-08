@@ -136,6 +136,23 @@
           (expression_statement
             (assignment left: (identifier) @name)) @node.variable))
 
+; Binding forms other than assignment. dataflow.scm already records the *write*
+; at each of these, but without a declaration node there is nothing for a later
+; read to resolve to -- so `except ... as e` followed by a use of `e` fell out of
+; lexical scope and became a project-wide ambiguity across every `e` in the
+; repository.
+(for_statement left: (identifier) @name) @node.variable
+
+(for_in_clause left: (identifier) @name) @node.variable
+
+(as_pattern alias: (as_pattern_target (identifier) @name)) @node.variable
+
+(named_expression name: (identifier) @name) @node.variable
+
+; `global x` / `nonlocal x` rebind an outer name rather than declaring one, so
+; they are deliberately absent: creating a node here would shadow the real
+; declaration and split one variable into two.
+
 ; Module-level UPPER_SNAKE is a constant by convention. Distinguishing it
 ; matters for planning queries: a constant is a configuration surface, whereas
 ; a module-level mutable is state.
