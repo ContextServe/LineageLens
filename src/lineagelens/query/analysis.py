@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..core import DATA_EDGES, EdgeKind, Intent, Node, NodeFlags
+from ..core import DATA_EDGES, EdgeKind, Intent, Node, NodeFlags, NodeKind
 from ..store import GraphStore
 from .budget import Budget, Envelope
 from .traverse import Traverser
@@ -112,8 +112,25 @@ class Analyser:
             return None
 
         target = containing[-1]  # innermost: the thing being edited
-        anchored = self.store.edges_on_line(file_path, line)
+        # CONTAINS is lexical structure, not something the line *does*. Listing
+        # it as an operation is noise that crowds out the real ones.
+        anchored = [
+            e for e in self.store.edges_on_line(file_path, line)
+            if e.kind is not EdgeKind.CONTAINS
+        ]
         change_kind = self._classify(target, anchored, line, containing)
+
+        # A decorator precedes its declaration, so the innermost node
+        # containing `@router.post("/api/orders")` is the *module*. Reporting
+        # that as the edit target is technically true and useless: the symbol a
+        # reader cares about is the handler, which is exactly the source of the
+        # EXPOSES edge written on that line.
+        for edge in anchored:
+            if edge.kind in (EdgeKind.EXPOSES, EdgeKind.CONSUMES):
+                owner = self.store.get_node(edge.src)
+                if owner is not None and owner.kind is not NodeKind.MODULE:
+                    target = owner
+                    break
 
         report = ImpactReport(
             target=target.qualified_name,

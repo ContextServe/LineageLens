@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lineagelens"
-version = "0.1.0"
-description = "Evidence-labelled Python code lineage for humans and coding agents."
+version = "0.2.0"
+description = "Deterministic multi-language code graph: control flow, data flow and cross-service contracts, for humans and coding agents."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -16,12 +16,9 @@ classifiers = [
 ]
 dependencies = [
   "PyYAML>=6.0",
+  # jedi is the vendored Tier B resolver for Python (§7.2): a wheel, so Python
+  # needs no external toolchain.
   "jedi>=0.19",
-  "fastapi>=0.110",
-  "strawberry-graphql[fastapi]>=0.235",
-  "uvicorn>=0.29",
-  "pydantic>=2.0",
-  "watchdog>=3.0.0",
   "tomli>=2.0; python_version<'3.11'",
 
   # Tier A extraction is not optional (issue #51 §7.1), so tree-sitter and every
@@ -47,12 +44,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-web = ["fastapi>=0.110", "strawberry-graphql[fastapi]>=0.235", "uvicorn>=0.29", "pydantic>=2.0"]
 mcp = ["mcp>=1.0"]
-llm = ["httpx>=0.27"]
+watch = ["watchdog>=3.0.0"]
 # SCIP is a Tier B resolver oracle (§7.2), not a graph producer, so it stays
-# optional. The `treesitter` and `hybrid` extras are gone: tree-sitter is now a
-# core dependency and there is no longer a user-selectable engine to combine.
+# optional. Gone: `treesitter` and `hybrid` (tree-sitter is now core and there
+# is no user-selectable engine), `web` (the GraphQL/UI surface was built on the
+# schema-3 core), and `llm` (§11 forbids an LLM in the extraction path).
 scip = ["protobuf>=4.25.0"]
 
 # ruff is pinned to a minor range, not just a floor. Its default rule set
@@ -63,16 +60,16 @@ dev = ["pytest>=8.0", "ruff>=0.16,<0.17"]
 
 [project.scripts]
 lineagelens = "lineagelens.cli:main"
-lineagelens-mcp = "lineagelens.mcp_server:main"
+lineagelens-mcp = "lineagelens.mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lineagelens"]
 
-# Include pre-built frontend in the wheel
-# Frontend must be built before packaging: cd frontend && npm install && npm run build
-# Then commit frontend/dist to git before running python -m build .
+# Extraction specs and contract adapters are data the package needs at runtime,
+# not source. Without these the wheel installs an engine with nothing to run.
 [tool.hatch.build.targets.wheel.force-include]
-"frontend/dist" = "lineagelens/frontend/dist"
+"src/lineagelens/spec" = "lineagelens/spec"
+"src/lineagelens/contracts/definitions" = "lineagelens/contracts/definitions"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -80,11 +77,10 @@ pythonpath = ["src"]
 
 
 [tool.ruff]
-# The reachability corpus is fixture *data*: it is deliberately written to look
-# like real-world code (forward-ref annotations, Optional, a shadowed builtin
-# name) so the analyzer sees realistic input. Linting it would mean rewriting
-# fixtures to satisfy a linter rather than to exercise the analyzer.
-extend-exclude = ["tests/fixtures"]
+# Conformance corpora are fixture *data*, written to look like real-world code
+# so the extractor sees realistic input. Linting them would mean rewriting
+# fixtures to satisfy a linter rather than to exercise the extractor.
+extend-exclude = ["tests/fixtures", "src/lineagelens/conformance/corpus"]
 target-version = "py310"
 
 [tool.ruff.lint]
@@ -108,11 +104,10 @@ select = [
 ]
 
 ignore = [
-  # The analyzer's documented contract is that it never aborts on a bad input
-  # file: a syntax error, an encoding problem or an unexpected AST shape must be
-  # recorded in the report and analysis must continue on the next file. That is
-  # implemented with broad excepts on purpose, and each one records a
-  # FileFailure or a SymbolWarning rather than swallowing the error silently.
+  # Extraction never aborts on a bad input file: a syntax error, an encoding
+  # problem or an unexpected tree shape is recorded in the file's ledger row and
+  # extraction continues. That needs broad excepts, and each one records a
+  # ParseError or a Boundary rather than swallowing the failure silently.
   "BLE001",
   # Same reasoning where the recovery genuinely is "carry on": probing an
   # optional third-party API surface that varies by version.
