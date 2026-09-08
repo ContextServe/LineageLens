@@ -106,11 +106,13 @@
 
 ; A `const` at module scope with an UPPER_SNAKE name is a configuration
 ; surface; distinguishing it from mutable state is useful for planning queries.
-(program
-  (lexical_declaration
-    "const"
-    (variable_declarator name: (identifier) @name)) @node.constant
-  (#match? @name "^[A-Z][A-Z0-9_]*$"))
+; `export const MAX = 3` wraps the declaration in an export_statement, so
+; requiring a direct child of `program` missed every exported constant -- which
+; is most of them in a module-based codebase.
+((lexical_declaration
+   "const"
+   (variable_declarator name: (identifier) @name)) @node.constant
+ (#match? @name "^[A-Z][A-Z0-9_]*$"))
 
 (lexical_declaration
   (variable_declarator

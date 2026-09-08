@@ -145,6 +145,7 @@ class Resolver:
         adapters: AdapterRegistry | None = None,
         project_root: Path | None = None,
         dataflow: DataflowMode = DataflowMode.LAZY,
+        eager_dataflow_for: frozenset[str] = frozenset(),
         provenance: str = "tier-a-resolver",
     ) -> None:
         self.index = index
@@ -154,8 +155,16 @@ class Resolver:
         #: query layer resolves a slice on demand and persists it -- so cost is
         #: paid once per body per content hash and amortises toward EAGER.
         self.dataflow = dataflow
+        #: Files whose data flow to compute even in INCREMENTAL mode: the ones
+        #: whose content hash changed. This is what §9.2 means by incremental --
+        #: eager where the code moved, lazy where it did not -- rather than a
+        #: rebuild strategy, which is a different axis entirely.
+        self.eager_dataflow_for = eager_dataflow_for
         #: WRITE observations per file, for locating a call's assignment target.
         self._writes_by_file: dict[str, list[UnresolvedRef]] = {}
+        #: INSTANTIATE observations per file, for recovering the type behind an
+        #: inferred declaration (`var x = new Foo()`).
+        self._constructions_by_file: dict[str, list[UnresolvedRef]] = {}
         #: Framework adapters (§8.2). Optional: without them the graph loses
         #: only its contract edges, and every unclaimed framework-shaped
         #: declaration is still reported so the gap is visible.
@@ -179,10 +188,16 @@ class Resolver:
         result.edges.extend(self._contains_edges(observations))
 
         self._writes_by_file = {}
+        self._constructions_by_file = {}
         for observation in observations:
             writes = [r for r in observation.refs if r.ref_kind is RefKind.WRITE]
             if writes:
                 self._writes_by_file[observation.file.path] = writes
+            built = [
+                r for r in observation.refs if r.ref_kind is RefKind.INSTANTIATE
+            ]
+            if built:
+                self._constructions_by_file[observation.file.path] = built
 
         structural = {RefKind.INHERIT, RefKind.IMPLEMENT, RefKind.IMPORT}
         for phase in (structural, None):
@@ -266,7 +281,7 @@ class Resolver:
                 continue
             if exclude is not None and ref.ref_kind in exclude:
                 continue
-            if ref.ref_kind in DATA_REFS and self.dataflow is DataflowMode.LAZY:
+            if ref.ref_kind in DATA_REFS and self._defer_dataflow(observation):
                 # Deferred, not dropped: retained as pending so the coverage
                 # ledger still accounts for it and the query layer can resolve
                 # this body when a precise query actually needs it (§9.2, §10.1).
@@ -469,6 +484,14 @@ class Resolver:
                 owners.append(holder)
                 continue
             declared = holder.type_ref or holder.return_type
+            if declared and _is_inferred_type(declared):
+                # `var repo = new Repository()` declares the type as `var`,
+                # which names nothing. The construction on the same line does
+                # name it, and reading that is deterministic rather than
+                # inference -- the type was written down, just on the right of
+                # the `=`. Without this, `repo.Save(...)` is unresolvable, and
+                # C# and TypeScript put almost every local behind `var`/`const`.
+                declared = self._constructed_type(holder)
             if declared:
                 owners.extend(
                     n for n in self.index.by_name(_trailing_name(declared))
@@ -478,6 +501,18 @@ class Resolver:
         if not owners:
             owners.extend(n for n in self.index.by_name(base) if n.kind in TYPE_KINDS)
         return owners
+
+    def _constructed_type(self, holder: Node) -> str | None:
+        """Type name constructed inside a declaration's own span, if any.
+
+        Deliberately scoped to the declaration: an INSTANTIATE anywhere else in
+        the body says nothing about *this* variable, and widening the search
+        would start inventing receiver types.
+        """
+        for ref in self._constructions_by_file.get(holder.file_path, ()):
+            if holder.span.contains(ref.span):
+                return ref.ref_text
+        return None
 
     def _import_map(self, observation: Observation) -> dict[str, list[Node]]:
         """What this file's import statements bring into scope.
@@ -709,6 +744,14 @@ class Resolver:
         )
 
 
+    def _defer_dataflow(self, observation: Observation) -> bool:
+        """Is this file's data flow deferred rather than computed now (§9.2)?"""
+        if self.dataflow is DataflowMode.EAGER:
+            return False
+        if self.dataflow is DataflowMode.INCREMENTAL:
+            return observation.file.path not in self.eager_dataflow_for
+        return True
+
     def _dataflow_status(self, observation: Observation) -> DataflowStatus:
         """Whether this file's data-flow edges exist yet (§9.2).
 
@@ -719,7 +762,7 @@ class Resolver:
         """
         if not any(r.ref_kind in DATA_REFS for r in observation.refs):
             return DataflowStatus.UNSUPPORTED
-        if self.dataflow is DataflowMode.LAZY:
+        if self._defer_dataflow(observation):
             return DataflowStatus.LAZY
         return DataflowStatus.COMPUTED
 
@@ -735,6 +778,15 @@ def _as_unresolved(
 
     return replace(ref, status=status, reason=reason,
                    candidates=candidates or ref.candidates)
+
+
+#: Declaration keywords that stand in for a type rather than naming one. A
+#: variable declared with any of these has its type on the right of the `=`.
+_INFERRED_TYPES = frozenset({"var", "let", "const", "auto", "dynamic", "object?"})
+
+
+def _is_inferred_type(declared: str) -> bool:
+    return declared.strip().strip("?") in _INFERRED_TYPES
 
 
 def _trailing_name(text: str) -> str:
