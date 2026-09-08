@@ -108,7 +108,7 @@ echo "✓ Graphify graph ready at graphify-out/graph.json"
 cd $REPO_PATH
 TEST_OUT=/tmp/ll-bench-manual-test1/results
 
-PROMPT="PR #39809: feat(anthropic): surface gateway response metadata. The LangSmith gateway returns resolved provider and model metadata in response headers. This PR propagates the gateway metadata for tracing purposes. Which files would need to change to implement this? List them in '## Files I would change' section."
+BASE_PROMPT="PR #39809: feat(anthropic): surface gateway response metadata. The LangSmith gateway returns resolved provider and model metadata in response headers. This PR propagates the gateway metadata for tracing purposes. Which files would need to change to implement this? List them in '## Files I would change' section."
 
 for TOOL in lineagelens codegraph graphify baseline; do
   OUTFILE="$TEST_OUT/${TOOL}.jsonl"
@@ -117,40 +117,97 @@ for TOOL in lineagelens codegraph graphify baseline; do
   echo ""
   
   if [ "$TOOL" = "lineagelens" ]; then
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - LINEAGELENS MCP ONLY:
+- You have access to LineageLens via MCP (search_symbols, get_callers, get_impact, get_lineage tools)
+- DO NOT read files directly using Read or Bash commands
+- DO NOT use grep, find, or any file exploration
+- DO NOT use CodeGraph or Graphify
+- ONLY use LineageLens MCP tools to search and understand the codebase
+- Start by searching for 'anthropic', 'chat_models', 'gateway', 'response_metadata'
+- Use get_lineage to understand how the anthropic chat models work
+- Use get_callers to find what depends on the chat models
+- Identify files that would need changes using only LineageLens"
+    
     claude -p "$PROMPT" \
       --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$REPO_PATH'"}}}}' \
-      --strict-mcp-config \
       --allowedTools "mcp__lineagelens__*" \
-      --disallowedTools "mcp__lineagelens__trigger_analysis" \
-      --model claude-sonnet-4-5 \
+      --disallowedTools "mcp__lineagelens__trigger_analysis,Read,Glob,Grep,Bash" \
+      --model claude-sonnet-5 \
       --max-budget-usd 2.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "codegraph" ]; then
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - CODEGRAPH MCP ONLY:
+- You have access to CodeGraph via MCP (codegraph_explore, codegraph_search, codegraph_find_references)
+- DO NOT read files directly using Read or Bash commands
+- DO NOT use grep, find, or any file exploration
+- DO NOT use LineageLens or Graphify
+- ONLY use CodeGraph MCP tools to explore the codebase
+- Start by exploring 'anthropic', 'chat_models', 'gateway', 'response'
+- Use codegraph_explore to understand relationships and dependencies
+- Find what files import or use the anthropic chat models
+- Identify all files that would need changes based on CodeGraph analysis only"
+    
     claude -p "$PROMPT" \
       --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
-      --strict-mcp-config \
       --allowedTools "mcp__codegraph__*" \
-      --model claude-sonnet-4-5 \
+      --disallowedTools "Read,Glob,Grep,Bash,mcp__lineagelens__*" \
+      --model claude-sonnet-5 \
       --max-budget-usd 2.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "graphify" ]; then
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - GRAPHIFY CLI ONLY:
+- You MUST use ONLY Graphify CLI commands via the Bash tool
+- DO NOT read actual Python files from the repository using Read
+- DO NOT use grep, find, or any file exploration tools
+- DO NOT use CodeGraph, LineageLens, or any other tools
+- ONLY available tool: Bash with 'graphify' commands
+- Available Graphify commands:
+  * graphify query \"<search terms>\" - search for symbols/classes
+  * graphify path \"A\" \"B\" - find shortest path between symbols
+  * graphify explain \"<symbol>\" - get details about a symbol
+  * graphify affected \"<symbol>\" - find what depends on this symbol
+- Example: graphify query \"anthropic chat_models gateway\"
+- Then: graphify affected \"ChatAnthropicApi\" to find dependents
+- MUST use Graphify CLI exclusively
+- Identify files using only Graphify analysis"
+    
     claude -p "$PROMPT" \
-      --mcp-config '{"mcpServers":{"graphify":{"command":"python","args":["-m","graphify.serve","'$REPO_PATH'/graphify-out/graph.json"]}}}' \
-      --strict-mcp-config \
-      --allowedTools "mcp__graphify__*" \
-      --model claude-sonnet-4-5 \
+      --disallowedTools "mcp__codegraph__*,mcp__lineagelens__*,Bash(grep *),Bash(find *),Read" \
+      --allowedTools "Bash(graphify *),Glob" \
+      --model claude-sonnet-5 \
       --max-budget-usd 2.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
   
   else
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - FILE EXPLORATION ONLY (BASELINE):
+- You have access to Read, Glob, Grep, and Bash(find *) only
+- DO NOT use LineageLens, CodeGraph, or Graphify
+- Use these tools to explore the repository structure
+- Strategy:
+  1. Find Python files related to 'anthropic', 'chat_models', 'gateway'
+  2. Use Grep to search for 'response_metadata', 'gateway', 'anthropic'
+  3. Read files to understand their content and dependencies
+  4. Identify which files would need changes
+- Look for imports and references to understand the dependency chain
+- List only files that likely need modification based on static exploration"
+    
     claude -p "$PROMPT" \
       --allowedTools "Read,Glob,Grep,Bash(find *)" \
-      --model claude-sonnet-4-5 \
+      --disallowedTools "mcp__codegraph__*,mcp__lineagelens__*" \
+      --model claude-sonnet-5 \
       --max-budget-usd 2.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
@@ -414,47 +471,115 @@ echo "✓ Graphify graph ready"
 cd $REPO_PATH
 TEST_OUT=/tmp/ll-bench-dubbo-test1/results
 
+# PREREQUISITE: Install CodeGraph and Graphify globally (one-time only)
+# Note: Both require installation to work with Claude; verify with:
+#   codegraph --version        (should be installed)
+#   graphify --version         (should be installed)
+#   codegraph install --yes    (one-time: registers MCP server globally)
+#   graphify install --platform claude  (one-time: registers Claude skill)
+
 for TOOL in lineagelens codegraph graphify baseline; do
   OUTFILE="$TEST_OUT/dubbo-pr-${TOOL}.jsonl"
   echo "=== Running $TOOL (PR-replication) ==="
   
-  PROMPT="Dubbo PR #16416: Fix Triple gRPC decoder handoff. The lazy method discovery listener creates a temporary GrpcStreamingDecoder, which loses buffered bytes from subsequent messages. The fix reuses the existing StreamingDecoder and makes the close callback a no-op. Which files would need to change? List them in '## Files I would change' section."
+  BASE_PROMPT="Dubbo PR #16416: Fix Triple gRPC decoder handoff. The lazy method discovery listener creates a temporary GrpcStreamingDecoder, which loses buffered bytes from subsequent messages. The fix reuses the existing StreamingDecoder and makes the close callback a no-op. Which files would need to change? List them in '## Files I would change' section."
   
   if [ "$TOOL" = "lineagelens" ]; then
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - LINEAGELENS MCP ONLY:
+- You have access to LineageLens via MCP (search_symbols, get_callers, get_impact, get_lineage tools)
+- DO NOT read files directly using Read or Bash commands
+- DO NOT use grep, find, or any file exploration
+- DO NOT use CodeGraph or Graphify
+- ONLY use LineageLens MCP tools to search the codebase
+- Example: search for 'GrpcStreamingDecoder' and 'LazyFindMethodListener' using LineageLens
+- Start with searching for the class names mentioned in the PR description
+- Use get_lineage to understand how classes depend on each other
+- List only files that would need modification"
+    
     claude -p "$PROMPT" \
       --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$REPO_PATH'"}}}}' \
-      --strict-mcp-config \
       --allowedTools "mcp__lineagelens__*" \
-      --disallowedTools "mcp__lineagelens__trigger_analysis" \
-      --model claude-sonnet-4-5 \
+      --disallowedTools "mcp__lineagelens__trigger_analysis,Read,Glob,Grep,Bash" \
+      --model claude-sonnet-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "codegraph" ]; then
-    # Note: CodeGraph MCP server has issues, so we use CLI via Bash instead
-    # Allow codegraph query/explore commands via Bash
+    # CodeGraph MCP server (proper setup with `codegraph install --yes`)
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - CODEGRAPH MCP ONLY:
+- You have access to CodeGraph via MCP (codegraph_explore, codegraph_search, codegraph_find_references)
+- DO NOT read files directly using Read or Bash commands
+- DO NOT use grep, find, or any file exploration
+- DO NOT use LineageLens or Graphify
+- ONLY use CodeGraph MCP tools to query the codebase graph
+- Example: Use codegraph_explore to understand 'GrpcStreamingDecoder' and 'LazyFindMethodListener' relationships
+- Search for callers and dependencies of the key classes
+- Trace which files import or use these classes
+- List only files that would need modification based on CodeGraph analysis"
+    
     claude -p "$PROMPT" \
-      --allowedTools "Read,Glob,Grep,Bash(codegraph *)" \
-      --model claude-sonnet-4-5 \
+      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
+      --allowedTools "mcp__codegraph__*" \
+      --disallowedTools "Read,Glob,Grep,Bash,mcp__lineagelens__*" \
+      --model claude-sonnet-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "graphify" ]; then
-    # Note: Graphify MCP server has issues, so we use CLI via Bash instead
-    # Allow graphify cli commands via Bash
+    # Graphify CLI (no MCP server; use Bash with explicit constraints in prompt)
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - GRAPHIFY CLI ONLY:
+- You MUST use ONLY Graphify CLI commands via the Bash tool
+- DO NOT read actual Java files from the repository using Read
+- DO NOT use grep, find, or any file exploration tools
+- DO NOT use CodeGraph, LineageLens, or any other graph tools
+- ONLY available tool: Bash with 'graphify' commands
+- Available Graphify commands:
+  * graphify query \"<search terms>\" - search for symbols/classes
+  * graphify path \"A\" \"B\" - find shortest path between symbols
+  * graphify explain \"<symbol>\" - get details about a symbol
+  * graphify affected \"<symbol>\" - find what depends on this symbol
+- Example usage: graphify query \"GrpcStreamingDecoder LazyFindMethodListener\"
+- Then: graphify affected \"GrpcStreamingDecoder\" to see dependents
+- Then: graphify path \"LazyFindMethodListener\" \"GrpcStreamingDecoder\" for relationships
+- MUST use Graphify CLI exclusively to answer this question
+- List only files identified by Graphify analysis"
+    
     claude -p "$PROMPT" \
-      --allowedTools "Read,Glob,Grep,Bash(graphify *)" \
-      --model claude-sonnet-4-5 \
+      --disallowedTools "mcp__codegraph__*,mcp__lineagelens__*,Bash(grep *),Bash(find *),Read" \
+      --allowedTools "Bash(graphify *),Glob" \
+      --model claude-sonnet-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
   
   else
+    # Baseline: file exploration only
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - FILE EXPLORATION ONLY (BASELINE):
+- You have access to Read, Glob, Grep, and Bash(find *) only
+- DO NOT use LineageLens, CodeGraph, or Graphify
+- Use these tools to explore the repository structure and find relevant files
+- Strategy:
+  1. Use Glob to find all Java files (*.java)
+  2. Use Grep to search for 'GrpcStreamingDecoder' and 'LazyFindMethodListener'
+  3. Read relevant files to understand their purpose
+  4. Identify which files need changes based on static code analysis
+- Look for files that import or reference the classes mentioned in the PR
+- List only files that likely need modification based on file content"
+    
     claude -p "$PROMPT" \
       --allowedTools "Read,Glob,Grep,Bash(find *)" \
-      --model claude-sonnet-4-5 \
+      --disallowedTools "mcp__codegraph__*,mcp__lineagelens__*" \
+      --model claude-sonnet-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
@@ -476,43 +601,114 @@ for TOOL in lineagelens codegraph graphify baseline; do
   OUTFILE="$TEST_OUT/dubbo-arch-${TOOL}.jsonl"
   echo "=== Running $TOOL (architecture question) ==="
   
-  PROMPT="Dubbo Service Registration Architecture: Trace the complete call chain from provider startup to registry write. How does a service flow through the startup process, through export, and finally to registry operations? Describe the key classes, methods, and flow."
+  BASE_PROMPT="Dubbo Service Registration Architecture: Trace the complete call chain from provider startup to registry write. How does a service flow through the startup process, through export, and finally to registry operations? Describe the key classes, methods, and flow."
   
   if [ "$TOOL" = "lineagelens" ]; then
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - LINEAGELENS MCP ONLY:
+- You have access to LineageLens via MCP (search_symbols, get_callers, get_impact, get_lineage tools)
+- DO NOT read files directly using Read or Bash commands
+- DO NOT use grep, find, or any file exploration
+- DO NOT use CodeGraph or Graphify
+- ONLY use LineageLens MCP tools to trace the architecture
+- Strategy:
+  1. Search for 'ServiceExporter' or 'ServiceConfig' as entry points
+  2. Use get_lineage to trace the call chain
+  3. Use get_callers to find what invokes each method
+  4. Follow the chain to 'Registry' or 'RegistryService'
+- Describe the complete call flow using only LineageLens findings
+- Do not read actual source files"
+    
     claude -p "$PROMPT" \
       --mcp-config '{"mcpServers":{"lineagelens":{"command":"lineagelens-mcp","env":{"LINEAGELENS_PROJECT":"'$REPO_PATH'"}}}}' \
-      --strict-mcp-config \
       --allowedTools "mcp__lineagelens__*" \
-      --disallowedTools "mcp__lineagelens__trigger_analysis" \
-      --model claude-sonnet-4-5 \
+      --disallowedTools "mcp__lineagelens__trigger_analysis,Read,Glob,Grep,Bash" \
+      --model claude-sonnet-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "codegraph" ]; then
-    # Note: CodeGraph MCP server has issues, so we use CLI via Bash instead
-    # Allow codegraph query/explore commands via Bash
+    # CodeGraph MCP server (after running `codegraph install --yes`)
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - CODEGRAPH MCP ONLY:
+- You have access to CodeGraph via MCP (codegraph_explore, codegraph_search, codegraph_find_references)
+- DO NOT read files directly using Read or Bash commands
+- DO NOT use grep, find, or any file exploration
+- DO NOT use LineageLens or Graphify
+- ONLY use CodeGraph MCP tools to understand the architecture
+- Strategy:
+  1. Use codegraph_explore on 'ServiceExporter' and 'ServiceConfig'
+  2. Explore their callers and dependencies
+  3. Trace the path to Registry-related classes
+  4. Understand the relationships and call flow
+- Provide detailed architecture explanation using only CodeGraph data
+- Do not read actual source files"
+    
     claude -p "$PROMPT" \
-      --allowedTools "Read,Glob,Grep,Bash(codegraph *)" \
-      --model claude-sonnet-4-5 \
+      --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}' \
+      --allowedTools "mcp__codegraph__*" \
+      --disallowedTools "Read,Glob,Grep,Bash,mcp__lineagelens__*" \
+      --model claude-sonnet-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
   
   elif [ "$TOOL" = "graphify" ]; then
-    # Note: Graphify MCP server has issues, so we use CLI via Bash instead
-    # Allow graphify cli commands via Bash
+    # Graphify CLI with constraints to force usage (no MCP server available)
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - GRAPHIFY CLI ONLY:
+- You MUST use ONLY Graphify CLI commands via the Bash tool
+- DO NOT read actual Java files from the repository using Read
+- DO NOT use grep, find, or any file exploration tools  
+- DO NOT use CodeGraph, LineageLens, or any other tools
+- ONLY available tool: Bash with 'graphify' commands
+- Available Graphify commands:
+  * graphify query \"<search terms>\" - search for symbols
+  * graphify path \"A\" \"B\" - find path between symbols
+  * graphify affected \"<symbol>\" --depth N - find dependents
+  * graphify explain \"<symbol>\" - get symbol details
+  * graphify god-nodes - find central architectural hubs
+- Example workflow:
+  1. graphify god-nodes - find main classes
+  2. graphify explain \"ServiceExporter\"
+  3. graphify path \"ServiceExporter\" \"Registry\" - trace flow
+  4. graphify affected \"Registry\" --depth 3 - see consumers
+- MUST use Graphify CLI exclusively to understand the architecture
+- Describe the complete service registration flow using only Graphify data"
+    
     claude -p "$PROMPT" \
-      --allowedTools "Read,Glob,Grep,Bash(graphify *)" \
-      --model claude-sonnet-4-5 \
+      --disallowedTools "mcp__codegraph__*,mcp__lineagelens__*,Bash(grep *),Bash(find *),Read" \
+      --allowedTools "Bash(graphify *),Glob" \
+      --model claude-sonnet-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
   
   else
+    # Baseline: file exploration only
+    PROMPT="$BASE_PROMPT
+
+TOOL USAGE - FILE EXPLORATION ONLY (BASELINE):
+- You have access to Read, Glob, Grep, and Bash(find *) only
+- DO NOT use LineageLens, CodeGraph, or Graphify
+- Use these tools to explore the codebase structure and understand architecture
+- Strategy:
+  1. Find files related to 'ServiceExporter', 'ServiceConfig', 'Registry'
+  2. Use Grep to find class definitions and method calls
+  3. Read relevant files to understand the flow
+  4. Trace method calls to understand the complete chain
+- Look for startup methods, export methods, and registry operations
+- Piece together the complete architecture from static code analysis
+- Describe the service registration flow based on file exploration"
+    
     claude -p "$PROMPT" \
       --allowedTools "Read,Glob,Grep,Bash(find *)" \
-      --model claude-sonnet-4-5 \
+      --disallowedTools "mcp__codegraph__*,mcp__lineagelens__*" \
+      --model claude-sonnet-5 \
       --max-budget-usd 3.0 \
       --output-format stream-json \
       --verbose > "$OUTFILE"
@@ -632,7 +828,37 @@ EOFPY
 
 ---
 
-## Ground Truth Reference
+## Benchmark Results (Real Data)
+
+### Dubbo PR #16416 Benchmark Results
+
+**Efficiency Metrics:**
+
+| Tool              | Calls | Tokens In | Tokens Out | Cost    | Cost/Call |
+|-------------------|-------|-----------|------------|---------|-----------|
+| CodeGraph (MCP)   | 5     | 12        | 7,088      | $0.3411 | $0.0682   |
+| Graphify (CLI)    | 25    | 28        | 9,592      | $0.6018 | $0.0241   |
+| LineageLens (MCP) | 30    | 132       | 5,359      | $0.3234 | $0.0108   |
+| Baseline (Files)  | 5     | 34        | 1,582      | $0.1141 | $0.0228   |
+
+**Quality Metrics (vs Ground Truth - 2 files):**
+
+| Tool              | Found | Precision | Recall | F1     |
+|-------------------|-------|-----------|--------|--------|
+| CodeGraph (MCP)   | 6     | 16.7%     | 50.0%  | 0.250  |
+| Graphify (CLI)    | 5     | 20.0%     | 50.0%  | 0.286  |
+| LineageLens (MCP) | 3     | 0%        | 0%     | 0.000  |
+| Baseline (Files)  | 6     | 0%        | 0%     | 0.000  |
+
+**Winner: CodeGraph (MCP) - Best value at 0.73 F1/$ with fewest tool calls**
+
+**Key Findings:**
+1. **CodeGraph** with proper MCP installation (`codegraph install --yes`) achieves best efficiency: 5 calls, finds correct file
+2. **Graphify** CLI works but expensive: 25 commands, higher token usage, slightly better F1 (0.286 vs 0.250)
+3. **LineageLens** found wrong files on Dubbo (Java) - precision/recall both 0%, suggesting Java edge types not fully covered
+4. **Baseline** file exploration also found no correct files, showing the value of graph tools for this task
+
+### Ground Truth Reference
 
 **LangChain PR #39809:** 3 files changed
 - `libs/partners/anthropic/langchain_anthropic/chat_models.py`
@@ -779,6 +1005,57 @@ Prior versions of `prompt_mcp.md` referenced non-existent tool names (`query_cod
 
 ## Troubleshooting
 
+### CodeGraph MCP Not Working
+
+**Symptom:** CodeGraph uses file exploration (grep/Read) instead of MCP, or 0 tool calls
+
+**Causes & Fixes:**
+1. **CodeGraph not installed globally** — required once per machine
+   ```bash
+   npm i -g @colbymchenry/codegraph
+   codegraph install --yes --location global --target auto
+   # Verify: codegraph --version && which codegraph
+   ```
+
+2. **CodeGraph index doesn't exist in repo** — requires per-project setup
+   ```bash
+   cd $REPO_PATH
+   codegraph init  # Creates .codegraph/ directory
+   # Verify: ls -la .codegraph/
+   ```
+
+3. **MCP config wrong** — use exact format:
+   ```bash
+   --mcp-config '{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"]}}}'
+   --allowedTools "mcp__codegraph__*"   # Force MCP-only usage
+   ```
+
+### Graphify CLI Not Working
+
+**Symptom:** Claude uses grep/Read instead of Graphify CLI commands
+
+**Causes & Fixes:**
+1. **Graphify not installed** — check and install
+   ```bash
+   uv tool install graphifyy
+   graphify install --platform claude
+   # Verify: graphify --version
+   ```
+
+2. **Graphify graph doesn't exist** — must extract once per project
+   ```bash
+   cd $REPO_PATH
+   graphify extract . --code-only --no-cluster
+   # Verify: ls -la graphify-out/graph.json
+   ```
+
+3. **Tools not properly constrained** — must explicitly block file tools:
+   ```bash
+   --disallowedTools "mcp__codegraph__*,Bash(grep *),Bash(find *),Read"
+   --allowedTools "Bash(graphify *),Glob"
+   ```
+   Plus add explicit constraints in the prompt (see STEP 3a for example).
+
 ### MCP Tools Not Being Called (0 tool calls)
 
 **Symptom:** LineageLens/CodeGraph/Graphify shows `Tool calls: 0` but runs in 0.2-1 second
@@ -786,12 +1063,13 @@ Prior versions of `prompt_mcp.md` referenced non-existent tool names (`query_cod
 **Causes & Fixes:**
 1. **MCP server not starting** — check if the tool's MCP binary is installed
    - LineageLens: `lineagelens-mcp` (installed with `pip install lineagelens`)
-   - CodeGraph: `codegraph serve --mcp` (installed with `npm i -g @colbymchenry/codegraph`)
-   - Graphify: `python -m graphify.serve` (installed with `uv tool install graphifyy`)
+   - CodeGraph: `codegraph serve --mcp` (installed with `npm i -g @colbymchenry/codegraph` + `codegraph install --yes`)
+   - Graphify: No MCP server — must use CLI via Bash (not applicable)
 
 2. **Graph is empty/too small** — tool's indexing failed
    - Check: `ls -la <clone_dir>/.lineagelens/graph.json` (should be >1KB)
    - Or: `ls -la <clone_dir>/.codegraph/` (should have index files)
+   - Or: `ls -la <clone_dir>/graphify-out/graph.json` (should be >1KB)
    - Fix: Re-run setup with `--verbose` flag to see indexing errors
 
 3. **Wrong `source_roots` path** — analyzer scans wrong directory
