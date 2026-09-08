@@ -69,11 +69,13 @@
 ; (unlike TypeScript's public_field_definition, which uses `name:`).
 (field_definition property: (property_identifier) @name) @node.field
 
-(program
-  (lexical_declaration
-    "const"
-    (variable_declarator name: (identifier) @name)) @node.constant
-  (#match? @name "^[A-Z][A-Z0-9_]*$"))
+; `export const MAX = 3` wraps the declaration in an export_statement, so
+; requiring a direct child of `program` missed every exported constant -- which
+; is most of them in a module-based codebase.
+((lexical_declaration
+   "const"
+   (variable_declarator name: (identifier) @name)) @node.constant
+ (#match? @name "^[A-Z][A-Z0-9_]*$"))
 
 (lexical_declaration
   (variable_declarator name: (identifier) @name)) @node.variable

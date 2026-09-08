@@ -51,6 +51,14 @@
 
 (assignment_expression right: (identifier) @flow.name) @flow.read
 
+; `var amount = this.total;` -- the initialiser of a declaration is a read.
+; Without these, a C# body produced writes and no reads at all, so nothing
+; flowed anywhere.
+(variable_declarator (identifier) @_n (identifier) @flow.name) @flow.read
+
+(variable_declarator
+  (member_access_expression name: (identifier) @flow.name)) @flow.read
+
 (binary_expression left: (identifier) @flow.name) @flow.read
 (binary_expression right: (identifier) @flow.name) @flow.read
 

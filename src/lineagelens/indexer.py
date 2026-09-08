@@ -38,7 +38,7 @@ from .extract import (
 )
 from .resolve import OracleRegistry, Resolver, SymbolIndex
 from .services import IGNORED_DIRS, ServiceLocator, discover_services
-from .store import DB_FILENAME, GraphStore
+from .store import DB_FILENAME, GraphNotFound, GraphStore, SchemaMismatch
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,11 @@ MAX_FILE_BYTES = 2_000_000
 
 #: Path fragments that mark generated or vendored code. Recorded with a reason
 #: rather than dropped, so the ledger can say why (§10.6).
+#: Sentinel meaning "every file", used when an incremental run has no prior
+#: index to compare against and so must compute everything.
+ALL_FILES_SENTINEL: frozenset[str] = frozenset({"\x00all"})
+ALL_FILES = ALL_FILES_SENTINEL
+
 GENERATED_MARKERS = (
     ".min.js", ".min.css", ".bundle.js", ".generated.", "_pb2.py", "_pb.go",
     ".pb.go", ".g.cs", ".designer.cs", ".d.ts",
@@ -70,6 +75,8 @@ class IndexReport:
     boundaries: int = 0
     services: int = 0
     contracts: int = 0
+    #: ``{path: added|modified|removed}`` when run with dataflow=incremental.
+    changed_files: dict[str, str] = field(default_factory=dict)
     languages: dict[str, int] = field(default_factory=dict)
     #: Framework-shaped declarations no adapter claimed, commonest first (§8.2).
     unclaimed_frameworks: list[dict[str, object]] = field(default_factory=list)
@@ -90,6 +97,7 @@ class IndexReport:
             },
             "services": self.services,
             "contracts": self.contracts,
+            **({"changed_files": self.changed_files} if self.changed_files else {}),
             "languages": dict(sorted(self.languages.items())),
             "unclaimed_frameworks": self.unclaimed_frameworks,
             "skipped_reasons": dict(sorted(self.skipped_reasons.items())),
@@ -120,6 +128,62 @@ class Indexer:
 
     # ---- entry point ------------------------------------------------------
 
+    def changed_files(self, db_path: Path | None = None) -> dict[str, str] | None:
+        """Which files differ from the existing index, by content hash (§11).
+
+        Returns ``None`` when there is no comparable index -- a missing store, a
+        different schema, or different grammar/spec/adapter digests. A grammar
+        upgrade changes parse output, so reusing rows extracted by the previous
+        one would produce a graph that is neither the old result nor the new one.
+
+        The return is ``{path: state}`` where state is ``added``, ``modified``
+        or ``removed``, so a caller can report what it is about to redo.
+        """
+        target = db_path or self.root / ".lineagelens" / DB_FILENAME
+        if not target.exists():
+            return None
+
+        try:
+            store = GraphStore.open(target)
+        except (GraphNotFound, SchemaMismatch):
+            return None
+
+        try:
+            row = store.conn.execute(
+                "SELECT grammar_digest, spec_digest, adapter_digest "
+                "FROM graph_meta WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                return None
+            adapters = AdapterRegistry(project_adapter_roots(self.root))
+            if (
+                row["grammar_digest"] != self.parsers.digest()
+                or row["spec_digest"] != self.specs.digest()
+                or row["adapter_digest"] != adapters.digest()
+            ):
+                logger.info("grammar, spec or adapter digest changed; full rebuild")
+                return None
+
+            indexed = store.content_hashes()
+        finally:
+            store.close()
+
+        current: dict[str, str] = {}
+        for rel_path, content, _dialect in self._walk():
+            current[rel_path] = hashlib.blake2b(content, digest_size=16).hexdigest()
+
+        changed: dict[str, str] = {}
+        for path, digest in current.items():
+            previous = indexed.get(path)
+            if previous is None:
+                changed[path] = "added"
+            elif previous != digest:
+                changed[path] = "modified"
+        for path in indexed:
+            if path not in current:
+                changed[path] = "removed"
+        return changed
+
     def run(self, *, db_path: Path | None = None) -> tuple[GraphStore, IndexReport]:
         started = datetime.now(UTC)
         report = IndexReport(project_root=str(self.root))
@@ -142,6 +206,30 @@ class Indexer:
                 "skipped. Override per language with --allow-tier-a-only.",
                 ", ".join(sorted(refused)),
             )
+
+        # INCREMENTAL computes data flow eagerly for files whose content hash
+        # changed and defers it elsewhere (§9.2). Extraction and resolution
+        # always run over the whole project: resolution is global -- a call can
+        # target any file, and member lookup follows resolved bases -- so
+        # re-extracting one file without re-resolving its dependents would leave
+        # edges pointing at symbols that no longer exist. Parsing is not the
+        # expensive half anyway; Dubbo's 4,046 files index in 21s.
+        #
+        # With no comparable prior index every file counts as changed, so a
+        # first incremental run is equivalent to eager. That is the property
+        # `verify --incremental` checks.
+        eager_for: frozenset[str] = frozenset()
+        if self.dataflow is DataflowMode.INCREMENTAL:
+            changed = self.changed_files(db_path)
+            if changed is None:
+                logger.info("no comparable index; computing all data flow")
+                eager_for = frozenset(ALL_FILES)
+            else:
+                report.changed_files = dict(sorted(changed.items()))
+                eager_for = frozenset(
+                    path for path, state in changed.items() if state != "removed"
+                )
+                logger.info("%d files changed since the last index", len(changed))
 
         observations: list[Observation] = []
         lang_of_file: dict[str, str] = {}
@@ -200,6 +288,10 @@ class Indexer:
             adapters=adapters,
             project_root=self.root,
             dataflow=self.dataflow,
+            eager_dataflow_for=(
+                frozenset(lang_of_file) if eager_for is ALL_FILES_SENTINEL
+                else eager_for
+            ),
         )
         resolved = resolver.resolve(observations)
 

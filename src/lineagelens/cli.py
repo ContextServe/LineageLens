@@ -403,12 +403,16 @@ def _run_verify(args: Any) -> int:
     allow = frozenset(
         part.strip() for part in args.allow_tier_a_only.split(",") if part.strip()
     )
+    # EAGER for the comparison, so data-flow edges are part of what is being
+    # checked. Under LAZY they are deferred and the digest would not cover the
+    # largest and most order-sensitive edge set there is.
+    mode = DataflowMode.EAGER
     digests: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
         for run in (1, 2):
-            store, report = Indexer(args.path, allow_tier_a_only=allow).run(
-                db_path=Path(tmp) / f"run{run}" / DB_FILENAME
-            )
+            store, report = Indexer(
+                args.path, dataflow=mode, allow_tier_a_only=allow,
+            ).run(db_path=Path(tmp) / f"run{run}" / DB_FILENAME)
             digests.append(report.build_digest)
             store.close()
             print(f"  build {run}: {report.build_digest}")
@@ -421,8 +425,23 @@ def _run_verify(args: Any) -> int:
     print("\nOK: deterministic.")
 
     if args.incremental:
-        print("\nincremental rebuild not yet implemented; cold builds verified")
-        return 0
+        # §16.25. An incremental build with no prior index treats every file as
+        # changed, so it must equal a cold eager build. If it does not, the
+        # incremental path is perturbing the result -- which is the property
+        # that would break first if it ever started reusing stored rows.
+        with tempfile.TemporaryDirectory() as tmp:
+            store, incremental = Indexer(
+                args.path,
+                dataflow=DataflowMode.INCREMENTAL,
+                allow_tier_a_only=allow,
+            ).run(db_path=Path(tmp) / "incremental" / DB_FILENAME)
+            store.close()
+        print(f"  incremental: {incremental.build_digest}")
+        if incremental.build_digest != digests[0]:
+            print("\nFAIL: an incremental rebuild differs from a cold one.",
+                  file=sys.stderr)
+            return 1
+        print("OK: incremental matches cold.")
     return 0
 
 
