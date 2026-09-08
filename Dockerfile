@@ -1,31 +1,38 @@
-# Single-stage build: Python backend with prebuilt frontend
-FROM python:3.11-slim
+# LineageLens: indexer, query CLI and MCP server.
+#
+# No frontend stage and no web port: the React UI and the GraphQL/REST API were
+# built on the schema-3 core and were removed with it. What ships is the CLI and
+# the MCP server, which is what an agent actually talks to.
+FROM python:3.12-slim
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+# git so the image can index a repository it clones itself.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
 
-# Copy prebuilt frontend (committed to git)
-COPY frontend/dist ./frontend/dist
-
-# Copy Python source
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ ./src/
 
-# Install LineageLens with all optional dependencies
-RUN pip install --no-cache-dir -e ".[web,mcp,llm]"
+# Tier A extraction needs no external toolchain: every tree-sitter grammar is a
+# pinned core dependency. Java/Go/Rust/C# Tier B resolvers are system programs
+# and are deliberately absent -- those languages index at Tier A, and the
+# coverage envelope on every answer says so. Add a JDK here if you want
+# type-accurate Java resolution in-container.
+RUN pip install --no-cache-dir ".[mcp]"
 
-# Create non-root user
 RUN useradd -m -u 1000 lineagelens
 USER lineagelens
 
-# Health check
+# Mount a repository at /work and index it.
+VOLUME ["/work"]
+WORKDIR /work
+
+# Fails if the package cannot load its runtime data -- extraction specs and
+# contract adapters. A wheel missing those installs an engine with nothing to
+# run, and every query would return empty without raising.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD python -c "import requests; requests.get('http://localhost:8000/api/v1/entry-points')" || exit 1
+  CMD lineagelens ontology --json > /dev/null || exit 1
 
-# Default: serve the web UI
-ENV HOST=0.0.0.0
-ENV PORT=8000
-EXPOSE 8000
-
-CMD ["lineagelens", "serve", "."]
+ENV LINEAGELENS_PROJECT=/work
+CMD ["lineagelens", "mcp", "/work"]

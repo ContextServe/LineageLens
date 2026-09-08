@@ -7,15 +7,15 @@ Usage: python run_benchmark.py --config benchmark.yaml
 
 import argparse
 import json
+import re
+import shutil
+import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+
 import yaml
-import tempfile
-import shutil
-import re
 
 
 def log(msg: str, level: str = "INFO", section: bool = False):
@@ -82,7 +82,7 @@ def load_config(config_path: str) -> dict:
         log(f"Config file not found: {config_path}", "ERROR")
         sys.exit(1)
 
-    with open(config_file, 'r') as f:
+    with open(config_file) as f:
         config = yaml.safe_load(f)
 
     log(f"Loaded config from {config_path}")
@@ -391,7 +391,7 @@ def run_claude_scenario(scenario: str, prompt: str, clone_path: str, config: dic
         log(f"Tool restriction: {allowed_tools}", "INFO")
 
     # Run claude
-    log(f"Running: claude -p <prompt> [flags]", "INFO")
+    log("Running: claude -p <prompt> [flags]", "INFO")
     try:
         result = subprocess.run(
             cmd,
@@ -624,7 +624,7 @@ def write_report(results: list, ground_truth: set, work_dir: str, pr_num: int) -
         elif f1_delta < 0:
             f.write(f"• MCP F1 was {f1_delta:.3f} points lower\n")
         else:
-            f.write(f"• F1 scores were equal\n")
+            f.write("• F1 scores were equal\n")
 
     # Write summary.json
     summary_json_path = results_dir / "summary.json"
@@ -684,7 +684,7 @@ def load_and_render_prompt(scenario: str, pr_title: str, pr_body: str) -> str:
         log(f"Prompt template not found: {prompt_file}", "ERROR")
         sys.exit(1)
 
-    with open(prompt_file, 'r') as f:
+    with open(prompt_file) as f:
         template = f.read()
 
     # Replace placeholders
@@ -695,53 +695,62 @@ def load_and_render_prompt(scenario: str, pr_title: str, pr_body: str) -> str:
     return rendered
 
 
-def run_lineagelens_init_analyze(clone_path: str, source_roots: list, timeout: int = 900) -> bool:
-    """
-    Run 'lineagelens init' then 'lineagelens analyze' in the mcp clone.
-    If source_roots is provided, patch lineagelens.yaml first.
-    Returns: True if successful and graph.json has symbols, False otherwise.
+def run_lineagelens_index(clone_path: str, source_roots: list, timeout: int = 900) -> bool:
+    """Run ``lineagelens index`` in the clone.
+
+    Schema 4 removed the ``init`` step and the config file. ``source_roots`` is
+    accepted and ignored: language is detected per file and services come from
+    build manifests, so there is nothing to declare -- and the old
+    ``lineagelens.yaml`` patching this used to do would silently have no effect
+    if it were kept.
+
+    Returns True if the index was built and holds a plausible number of nodes.
     """
     clone = Path(clone_path)
 
-    log(f"Running lineagelens init in {clone.name}")
-    run_cmd(["lineagelens", "init", "."], cwd=str(clone), timeout=timeout)
-
-    # If source_roots provided, patch the config
     if source_roots:
-        log(f"Patching lineagelens.yaml with source_roots: {source_roots}")
-        config_file = clone / "lineagelens.yaml"
-        with open(config_file, 'r') as f:
-            config = yaml.safe_load(f)
-        if config is None:
-            config = {}
-        config['source_roots'] = source_roots
-        with open(config_file, 'w') as f:
-            yaml.dump(config, f)
+        log(
+            f"ignoring source_roots={source_roots}: schema 4 detects language "
+            f"per file and needs no configuration"
+        )
 
-    log(f"Running lineagelens analyze in {clone.name}")
-    # Analyze can take several minutes, especially on large repos
-    analyze_timeout = max(timeout * 2, 1200)
-    run_cmd(["lineagelens", "analyze", ".", "--quiet"], cwd=str(clone), timeout=analyze_timeout)
+    log(f"Running lineagelens index in {clone.name}")
+    # Indexing a large monorepo takes tens of seconds; allow generous headroom.
+    index_timeout = max(timeout * 2, 1200)
+    run_cmd(["lineagelens", "index", "."], cwd=str(clone), timeout=index_timeout)
 
-    # Check for graph.json and validate it's not empty
-    graph_file = clone / ".lineagelens" / "graph.json"
+    graph_file = clone / ".lineagelens" / "graph.sqlite"
     if not graph_file.exists():
-        log(f"graph.json not found at {graph_file}", "ERROR")
+        log(f"graph.sqlite not found at {graph_file}", "ERROR")
         return False
 
-    with open(graph_file, 'r') as f:
-        graph = json.load(f)
+    conn = sqlite3.connect(str(graph_file))
+    try:
+        node_count = conn.execute("SELECT count(*) FROM nodes").fetchone()[0]
+        edge_count = conn.execute("SELECT count(*) FROM edges").fetchone()[0]
+        # Dangling endpoints are impossible by foreign key, but this is the
+        # defect that made the schema-3 Dubbo graph 100% non-traversable while
+        # reporting success, so the benchmark checks rather than assumes.
+        dangling = conn.execute(
+            "SELECT count(*) FROM edges e "
+            "WHERE NOT EXISTS (SELECT 1 FROM nodes WHERE id = e.src) "
+            "   OR NOT EXISTS (SELECT 1 FROM nodes WHERE id = e.dst)"
+        ).fetchone()[0]
+    finally:
+        conn.close()
 
-    symbol_count = len(graph.get("symbols", []))
-    log(f"Graph has {symbol_count} symbols")
+    log(f"Graph has {node_count:,} nodes and {edge_count:,} edges")
 
-    if symbol_count < 20:
+    if dangling:
+        log(f"{dangling} edges have unresolvable endpoints", "ERROR")
+        return False
+
+    if node_count < 20:
         log(
-            f"WARNING: graph.json has only {symbol_count} symbols (expected >20). "
-            f"This may indicate an incorrect source_roots configuration. "
-            f"Check your config's source_roots setting (e.g., for langchain, use "
-            f"['libs/langchain/langchain']).",
-            "ERROR"
+            f"WARNING: only {node_count} nodes (expected >20). Check that the "
+            f"clone actually contains source in a supported language; run "
+            f"`lineagelens coverage` in the clone to see what was skipped.",
+            "ERROR",
         )
         return False
 
@@ -765,7 +774,7 @@ def main():
 
     # Load config
     config = load_config(args.config)
-    log(f"Configuration loaded successfully", "DEBUG")
+    log("Configuration loaded successfully", "DEBUG")
     log(f"  Repository: {config['repo']['url']}")
     log(f"  PR Number: {config['repo']['pr']}")
     log(f"  Language: {config.get('language', 'python')}")
@@ -780,7 +789,7 @@ def main():
         config["repo"]["pr"],
         config
     )
-    log(f"PR metadata resolved successfully", "DEBUG")
+    log("PR metadata resolved successfully", "DEBUG")
 
     # Prepare clones
     log("Preparing git clones at base commit", "INFO", section=True)
@@ -791,7 +800,7 @@ def main():
         pr_info["base_sha"],
         config
     )
-    log(f"Both clones created successfully", "DEBUG")
+    log("Both clones created successfully", "DEBUG")
 
     # Run lineagelens init + analyze on mcp clone only
     log("Running LineageLens analysis on MCP clone", "INFO", section=True)
@@ -801,7 +810,7 @@ def main():
         log(f"Patching source_roots: {source_roots}")
     log("Initializing LineageLens configuration...")
     log("Running code graph analysis (this may take a few minutes)...")
-    success = run_lineagelens_init_analyze(mcp_clone, source_roots, timeout=timeout)
+    success = run_lineagelens_index(mcp_clone, source_roots, timeout=timeout)
 
     if not success:
         log("FAILED: Unable to generate code graph on MCP clone", "ERROR", section=True)
