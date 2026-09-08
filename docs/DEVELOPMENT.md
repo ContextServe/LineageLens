@@ -55,16 +55,27 @@ be pip-installed. Check what this machine has:
 lineagelens ontology
 ```
 
-If a language has no available resolver, `index` **skips** its files and says
-so, rather than falling back to name matching. Override per language, and only
-deliberately:
+A language with no available resolver still indexes, at Tier A. What you lose
+is resolution quality: more references land in `unresolved_refs` as *ambiguous*
+rather than becoming edges. None are guessed — the resolver's never-pick rule
+holds regardless of tier — and the tier used is reported per language on every
+answer's coverage envelope.
+
+Make it strict where a partial graph should be an error:
 
 ```bash
-lineagelens index . --allow-tier-a-only go,rust
+lineagelens index . --require-tier-b          # every language
+lineagelens index . --require-tier-b=java,csharp
 ```
 
-Every edge produced that way is marked heuristic and reported in the coverage
-envelope, so the degradation is never silent.
+This is a deliberate reversal of §7.2, which made Tier B a hard requirement.
+That reasoning does not survive the resolver as built: §7.2 argued a
+Tier-A-only Java graph is the fabricated-edge failure of §1.2, but fabrication
+came from *picking among candidates*, which this resolver never does. Refusing
+the language costs everything — nodes, structure, contracts, data flow — to
+avoid a risk one layer down already prevents. The Dubbo benchmark settles it:
+100,122 nodes and 425,029 edges across 15 kinds, produced with `javac` merely
+*detected* and never actually answering a query.
 
 ### No configuration, no init step
 

@@ -150,14 +150,13 @@ def run_language(lang: str, *, corpus_root: Path | None = None) -> LanguageResul
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
-        # Every language is allowed at Tier A here on purpose. The suite
-        # measures what the *specs* express; whether a JDK happens to be on the
-        # machine running it is a separate fact, reported by
-        # ontology.installed_tiers().
+        # No Tier B requirement: the suite measures what the *specs* express.
+        # Whether a JDK happens to be on the machine running it is a separate
+        # fact, reported by ontology.installed_tiers().
         store, report = Indexer(
             root,
             dataflow=DataflowMode.EAGER,
-            allow_tier_a_only=frozenset(EXPECTATIONS),
+            require_tier_b=frozenset(),
         ).run(db_path=Path(tmp) / "conformance.sqlite")
         try:
             result.files = report.files_parsed

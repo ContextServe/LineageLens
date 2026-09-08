@@ -77,6 +77,9 @@ class IndexReport:
     contracts: int = 0
     #: ``{path: added|modified|removed}`` when run with dataflow=incremental.
     changed_files: dict[str, str] = field(default_factory=dict)
+    #: Languages indexed without a Tier B type resolver, so with more
+    #: references recorded as ambiguous. Reported, never silent.
+    tier_a_only: list[str] = field(default_factory=list)
     languages: dict[str, int] = field(default_factory=dict)
     #: Framework-shaped declarations no adapter claimed, commonest first (§8.2).
     unclaimed_frameworks: list[dict[str, object]] = field(default_factory=list)
@@ -100,6 +103,7 @@ class IndexReport:
             **({"changed_files": self.changed_files} if self.changed_files else {}),
             "languages": dict(sorted(self.languages.items())),
             "unclaimed_frameworks": self.unclaimed_frameworks,
+            **({"tier_a_only": self.tier_a_only} if self.tier_a_only else {}),
             "skipped_reasons": dict(sorted(self.skipped_reasons.items())),
             "build_digest": self.build_digest,
             "duration_seconds": round(self.duration_seconds, 3),
@@ -114,14 +118,30 @@ class Indexer:
         project_root: Path,
         *,
         dataflow: DataflowMode = DataflowMode.LAZY,
-        allow_tier_a_only: frozenset[str] = frozenset(),
+        require_tier_b: frozenset[str] = frozenset(),
     ) -> None:
         self.root = project_root.resolve()
         self.dataflow = dataflow
-        #: Languages the caller has explicitly accepted at Tier A only (§7.2).
-        #: Everything else with no available oracle is skipped rather than
-        #: resolved by name matching.
-        self.allow_tier_a_only = allow_tier_a_only
+        #: Languages to SKIP unless a Tier B type resolver is available.
+        #:
+        #: Empty by default, which is a correction to §7.2. That section made
+        #: Tier B a hard requirement on the grounds that a Tier-A-only Java
+        #: graph is the fabricated-edge failure of §1.2. That reasoning does not
+        #: survive contact with the resolver actually built: it never picks
+        #: among candidates, so *without* Tier B you get more references
+        #: recorded as ambiguous, not more wrong edges. The fabrication risk
+        #: Tier B was guarding against is already prevented by the never-guess
+        #: rule, one layer down.
+        #:
+        #: Refusing the language costs everything -- nodes, structure,
+        #: contracts, data flow -- to avoid a risk that no longer exists. The
+        #: Dubbo benchmark settles it empirically: 100,122 nodes and 425,029
+        #: edges across 15 kinds, produced with javac merely *detected* and
+        #: never actually answering a query. That was a Tier A result.
+        #:
+        #: `--require-tier-b` restores the strict behaviour where a caller wants
+        #: the guarantee, e.g. a CI job that must not report a partial graph.
+        self.require_tier_b = require_tier_b
         self.specs = SpecRegistry()
         self.parsers = ParserRegistry()
         self.extractor = SpecExtractor(specs=self.specs, parsers=self.parsers)
@@ -193,19 +213,27 @@ class Indexer:
         report.services = len(services)
 
         oracles = OracleRegistry(project_root=self.root)
-        refused = {
-            lang for lang in oracles.languages_without_tier_b()
-            if lang not in self.allow_tier_a_only
-        }
+        without_tier_b = set(oracles.languages_without_tier_b())
+        refused = without_tier_b & set(self.require_tier_b)
         if refused:
-            # §7.2 step 4. Refusal rather than degradation, because a
-            # Tier-A-only Java graph is the fabricated-edge failure of §1.2:
-            # 2,593 edges all claiming resolution=resolved, none traversable.
             logger.warning(
-                "no Tier B resolver for %s; files in these languages will be "
-                "skipped. Override per language with --allow-tier-a-only.",
+                "--require-tier-b was given for %s but no resolver is "
+                "available; files in these languages will be skipped.",
                 ", ".join(sorted(refused)),
             )
+        degraded = sorted(without_tier_b - refused)
+        if degraded:
+            # Indexed, but at lower resolution. Said once at INFO rather than
+            # WARNING: it is the normal state on most machines, and a warning
+            # on every run trains people to ignore warnings. The per-language
+            # tier is on every query's coverage envelope, which is where a
+            # caller acts on it.
+            logger.info(
+                "no Tier B resolver for %s; indexing at Tier A (more references "
+                "recorded as ambiguous, none guessed)",
+                ", ".join(degraded),
+            )
+            report.tier_a_only = degraded
 
         # INCREMENTAL computes data flow eagerly for files whose content hash
         # changed and defers it elsewhere (§9.2). Extraction and resolution

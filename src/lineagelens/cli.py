@@ -78,13 +78,13 @@ def _add_index(commands: Any) -> None:
         ),
     )
     cmd.add_argument(
-        "--allow-tier-a-only", default="",
+        "--require-tier-b", nargs="?", const="*", default="",
         help=(
-            "comma-separated languages to index without a type resolver. "
-            "Without this, a language with no available resolver is SKIPPED "
-            "rather than approximated by name matching -- see `lineagelens "
-            "ontology` for what is available here. Edges produced this way are "
-            "marked heuristic and reported in every coverage envelope"
+            "SKIP languages that have no native type resolver, instead of "
+            "indexing them at Tier A. Pass a comma-separated list, or the flag "
+            "alone for every language. Use in CI when a partial graph must be "
+            "an error. By default every language is indexed and the resolution "
+            "tier is reported per language in the coverage envelope"
         ),
     )
     cmd.add_argument("--force", action="store_true",
@@ -94,13 +94,10 @@ def _add_index(commands: Any) -> None:
 
 
 def _run_index(args: Any) -> int:
-    allow = frozenset(
-        part.strip() for part in args.allow_tier_a_only.split(",") if part.strip()
-    )
     indexer = Indexer(
         args.path,
         dataflow=DataflowMode(args.dataflow),
-        allow_tier_a_only=allow,
+        require_tier_b=_tier_b_set(args.require_tier_b),
     )
     store, report = indexer.run()
     try:
@@ -111,6 +108,17 @@ def _run_index(args: Any) -> int:
     finally:
         store.close()
     return 0
+
+
+def _tier_b_set(raw: str) -> frozenset[str]:
+    """Parse ``--require-tier-b``. Bare flag means every language."""
+    if not raw:
+        return frozenset()
+    if raw == "*":
+        from .extract import supported_languages
+
+        return supported_languages()
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
 def _print_index_report(report: Any, store: GraphStore) -> None:
@@ -134,6 +142,12 @@ def _print_index_report(report: Any, store: GraphStore) -> None:
         f"   boundaries {graph['boundaries']:,}"
     )
     print(f"  digest    {data['build_digest'][:16]}  ({data['duration_seconds']}s)")
+
+    if data.get("tier_a_only"):
+        print(
+            f"  tier A only: {', '.join(data['tier_a_only'])}"
+            f"  (no type resolver; more refs ambiguous, none guessed)"
+        )
 
     if data["skipped_reasons"]:
         print("  skipped:")
@@ -386,7 +400,7 @@ def _add_verify(commands: Any) -> None:
         "--incremental", action="store_true",
         help="also confirm an incremental rebuild equals a cold one",
     )
-    cmd.add_argument("--allow-tier-a-only", default="")
+    cmd.add_argument("--require-tier-b", nargs="?", const="*", default="")
     cmd.set_defaults(handler=_run_verify)
 
 
@@ -400,9 +414,7 @@ def _run_verify(args: Any) -> int:
     """
     import tempfile
 
-    allow = frozenset(
-        part.strip() for part in args.allow_tier_a_only.split(",") if part.strip()
-    )
+    allow = _tier_b_set(args.require_tier_b)
     # EAGER for the comparison, so data-flow edges are part of what is being
     # checked. Under LAZY they are deferred and the digest would not cover the
     # largest and most order-sensitive edge set there is.
@@ -411,7 +423,7 @@ def _run_verify(args: Any) -> int:
     with tempfile.TemporaryDirectory() as tmp:
         for run in (1, 2):
             store, report = Indexer(
-                args.path, dataflow=mode, allow_tier_a_only=allow,
+                args.path, dataflow=mode, require_tier_b=allow,
             ).run(db_path=Path(tmp) / f"run{run}" / DB_FILENAME)
             digests.append(report.build_digest)
             store.close()
@@ -433,7 +445,7 @@ def _run_verify(args: Any) -> int:
             store, incremental = Indexer(
                 args.path,
                 dataflow=DataflowMode.INCREMENTAL,
-                allow_tier_a_only=allow,
+                require_tier_b=allow,
             ).run(db_path=Path(tmp) / "incremental" / DB_FILENAME)
             store.close()
         print(f"  incremental: {incremental.build_digest}")
@@ -467,18 +479,19 @@ def _run_ontology(args: Any) -> int:
         print("\nconformance matrix not generated; per-language capability is "
               "reported as 'untested'")
 
-    print(f"\n{'language':12s} {'tier A':22s} {'tier B':22s} capabilities")
+    columns = ("nodes", "calls", "inherits", "implements", "dataflow", "contracts")
+    symbols = {True: "yes", "partial": "part", "untested": "?", False: "-",
+               "n/a": "n/a"}
+    header = "  ".join(f"{name[:9]:>9s}" for name in columns)
+    print(f"\n{'language':11s} {'type resolver':26s} {header}")
     for lang, entry in matrix["languages"].items():
         caps = entry.get("capabilities", {})
-        marks = "".join(
-            "y" if caps.get(name) is True else
-            "~" if caps.get(name) == "partial" else
-            "?" if caps.get(name) == "untested" else "n"
-            for name in ("nodes", "calls", "inherits", "implements",
-                         "dataflow", "contracts")
+        marks = "  ".join(
+            f"{symbols.get(caps.get(name), '-'):>9s}" for name in columns
         )
-        print(f"{lang:12s} {entry['tier_a']:22s} {entry['tier_b']:22s} {marks}")
-    print("            (nodes calls inherits implements dataflow contracts)")
+        print(f"{lang:11s} {entry['tier_b'][:26]:26s} {marks}")
+    print("\n  'n/a' means the language has no such construct; 'part' is a "
+          "documented partial (see `--json` for the reason).")
 
     project = matrix.get("project", {})
     if project.get("indexed"):
