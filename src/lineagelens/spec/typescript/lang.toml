@@ -1,0 +1,10 @@
+lang = "typescript"
+# One spec serves both grammars. TSX is a separate grammar rather than a dialect
+# flag, but its node types for declarations and calls are identical, so the
+# queries are shared.
+dialects = ["typescript", "tsx"]
+
+implicit_receivers = ["this"]
+doc_prefixes = ["/**", "*", "//"]
+
+constructor_names = ["constructor"]
