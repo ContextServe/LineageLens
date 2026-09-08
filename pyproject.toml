@@ -65,11 +65,11 @@ lineagelens-mcp = "lineagelens.mcp.server:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/lineagelens"]
 
-# Extraction specs and contract adapters are data the package needs at runtime,
-# not source. Without these the wheel installs an engine with nothing to run.
-[tool.hatch.build.targets.wheel.force-include]
-"src/lineagelens/spec" = "lineagelens/spec"
-"src/lineagelens/contracts/definitions" = "lineagelens/contracts/definitions"
+# No force-include needed: hatchling ships every file under the package
+# directory, so the extraction specs (*.scm), contract adapters (*.yaml) and the
+# capability matrix (*.json) are included as package data. They are data the
+# package needs at *runtime* -- without them the wheel installs an engine with
+# nothing to run -- so the wheel contents are asserted in tests/test_packaging.py.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
