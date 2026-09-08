@@ -56,6 +56,7 @@ from ..core import (
     BoundaryKind,
     Contract,
     Coverage,
+    DataflowMode,
     DataflowStatus,
     Edge,
     EdgeKind,
@@ -143,10 +144,18 @@ class Resolver:
         oracles: OracleRegistry | None = None,
         adapters: AdapterRegistry | None = None,
         project_root: Path | None = None,
+        dataflow: DataflowMode = DataflowMode.LAZY,
         provenance: str = "tier-a-resolver",
     ) -> None:
         self.index = index
         self.oracles = oracles or OracleRegistry()
+        #: When to compute data-flow edges (§9.2). In LAZY mode the READ/WRITE
+        #: observations are retained as pending rather than resolved, and the
+        #: query layer resolves a slice on demand and persists it -- so cost is
+        #: paid once per body per content hash and amortises toward EAGER.
+        self.dataflow = dataflow
+        #: WRITE observations per file, for locating a call's assignment target.
+        self._writes_by_file: dict[str, list[UnresolvedRef]] = {}
         #: Framework adapters (§8.2). Optional: without them the graph loses
         #: only its contract edges, and every unclaimed framework-shaped
         #: declaration is still reported so the gap is visible.
@@ -168,6 +177,12 @@ class Resolver:
         result = ResolveResult()
 
         result.edges.extend(self._contains_edges(observations))
+
+        self._writes_by_file = {}
+        for observation in observations:
+            writes = [r for r in observation.refs if r.ref_kind is RefKind.WRITE]
+            if writes:
+                self._writes_by_file[observation.file.path] = writes
 
         structural = {RefKind.INHERIT, RefKind.IMPLEMENT, RefKind.IMPORT}
         for phase in (structural, None):
@@ -250,6 +265,14 @@ class Resolver:
             if only is not None and ref.ref_kind not in only:
                 continue
             if exclude is not None and ref.ref_kind in exclude:
+                continue
+            if ref.ref_kind in DATA_REFS and self.dataflow is DataflowMode.LAZY:
+                # Deferred, not dropped: retained as pending so the coverage
+                # ledger still accounts for it and the query layer can resolve
+                # this body when a precise query actually needs it (§9.2, §10.1).
+                result.unresolved.append(_as_unresolved(
+                    ref, RefStatus.PENDING, "data flow deferred (dataflow=lazy)"
+                ))
                 continue
             self._resolve_ref(ref, imports, result)
 
@@ -505,6 +528,7 @@ class Resolver:
 
         if kind is EdgeKind.CALLS:
             result.edges.extend(self._param_binds(ref, target))
+            result.edges.extend(self._returns(ref, target))
 
     def _param_binds(self, ref: UnresolvedRef, target: Node) -> list[Edge]:
         """Bind each argument at a call site to the callee's parameter (§9).
@@ -544,8 +568,25 @@ class Resolver:
                 start_line=arg.get("line", ref.span.start_line), start_col=0,
                 end_line=arg.get("line", ref.span.start_line), end_col=0,
             )
+
+            # Bind from the *argument's own node* where the argument is a plain
+            # name, so a data-flow walk from a variable actually crosses the
+            # call. Binding from the enclosing body instead -- which is all the
+            # reference itself identifies -- leaves the value disconnected: a
+            # walk from `amount` would find only its local reads and stop at the
+            # call, which defeats the point of PARAM_BINDS.
+            source, how = ref.from_node, "enclosing_body"
+            argument_text = str(arg.get("text", ""))
+            if argument_text.isidentifier():
+                in_scope = [
+                    n for n in self.index.in_scope(ref.from_node, argument_text)
+                    if n.is_value
+                ]
+                if len(in_scope) == 1:
+                    source, how = in_scope[0].id, "argument_value"
+
             edges.append(Edge(
-                src=ref.from_node,
+                src=source,
                 dst=params[position].id,
                 kind=EdgeKind.PARAM_BINDS,
                 evidence=evidence,
@@ -553,9 +594,62 @@ class Resolver:
                 provenance=self.provenance,
                 span=span,
                 file_path=ref.file_path,
-                metadata={"arg_index": position, "arg_text": arg.get("text", "")},
+                metadata={
+                    "arg_index": position,
+                    "arg_text": argument_text,
+                    "bound_from": how,
+                },
             ))
         return edges
+
+    def _returns(self, ref: UnresolvedRef, target: Node) -> list[Edge]:
+        """Link a callee to the variable receiving its result (§9).
+
+        ``ok = repo.save(x)`` means ``ok``'s value comes from ``save``. Together
+        with PARAM_BINDS this is what carries a value *out* of a call, so a
+        backward data-flow walk from a field can cross a call boundary instead
+        of stopping at it.
+
+        The assignment target is found by span: the extractor recorded a WRITE
+        whose value expression encloses this call site. Requiring containment
+        rather than matching text means ``a = f(g(x))`` binds ``a`` to ``f``
+        and not to ``g`` -- the inner call is enclosed by the outer one, and
+        only the outermost write target actually receives the outer result.
+        """
+        writes = self._writes_by_file.get(ref.file_path)
+        if not writes:
+            return []
+
+        best: tuple[int, UnresolvedRef] | None = None
+        for write in writes:
+            if not write.span.contains(ref.span):
+                continue
+            length = write.span.byte_length
+            if best is None or length < best[0]:
+                best = (length, write)
+        if best is None:
+            return []
+
+        write = best[1]
+        # The write's own target must have resolved to a real node, or there is
+        # nothing to point at. Reusing the same scope lookup keeps this
+        # consistent with how the WRITE edge itself was resolved.
+        targets = self.index.in_scope(write.from_node, _trailing_name(write.ref_text))
+        values = [n for n in targets if n.is_value]
+        if len(values) != 1:
+            return []
+
+        return [Edge(
+            src=target.id,
+            dst=values[0].id,
+            kind=EdgeKind.RETURNS,
+            evidence=Evidence.fact("call_result_assignment"),
+            resolution=Resolution.EXACT,
+            provenance=self.provenance,
+            span=ref.span,
+            file_path=ref.file_path,
+            metadata={"via_call": target.qualified_name},
+        )]
 
     def _edge_kind_for(self, kind: EdgeKind, target: Node) -> EdgeKind:
         """Refine an edge kind now that the target's kind is known.
@@ -611,12 +705,23 @@ class Resolver:
             refs_inferred=inferred,
             refs_unresolved=unresolved,
             boundaries_count=boundaries,
-            dataflow_status=(
-                DataflowStatus.COMPUTED
-                if any(r.ref_kind in DATA_REFS for r in observation.refs)
-                else DataflowStatus.UNSUPPORTED
-            ),
+            dataflow_status=self._dataflow_status(observation),
         )
+
+
+    def _dataflow_status(self, observation: Observation) -> DataflowStatus:
+        """Whether this file's data-flow edges exist yet (§9.2).
+
+        Distinguishes the three honest states: computed, deferred but
+        computable, and not supported for this language at all. Collapsing
+        `lazy` into `unsupported` would make a deferred body look like a
+        permanent gap.
+        """
+        if not any(r.ref_kind in DATA_REFS for r in observation.refs):
+            return DataflowStatus.UNSUPPORTED
+        if self.dataflow is DataflowMode.LAZY:
+            return DataflowStatus.LAZY
+        return DataflowStatus.COMPUTED
 
 
 def _as_unresolved(
