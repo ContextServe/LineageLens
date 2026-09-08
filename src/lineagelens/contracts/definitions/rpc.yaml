@@ -1,0 +1,46 @@
+# RPC and service-provider contracts.
+#
+# This closes the gap `ontology.py` documented as permanent: "SPI/ServiceLoader
+# dispatch (META-INF/services/*) is NOT visible" and "Config-driven routes
+# (Spring, Dubbo config) are NOT visible". Both are contract joins.
+#
+# Dubbo is the motivating case. `@DubboService` on an implementation and
+# `@DubboReference` on a consuming field name the same interface, and that
+# interface FQN is the contract key -- so the provider and consumer link
+# without any call edge between them existing in source at all.
+
+- id: dubbo.service
+  lang: java
+  match: annotation
+  names: [DubboService, Service]
+  contract: {kind: rpc_service, role: exposes, key_from_type: true}
+
+- id: dubbo.reference
+  lang: java
+  match: annotation
+  names: [DubboReference, Reference]
+  contract: {kind: rpc_service, role: consumes, key_from_type: true}
+
+- id: spring.autowired
+  lang: java
+  match: annotation
+  names: [Autowired, Inject, Resource]
+  contract: {kind: spi, role: consumes, key_from_type: true}
+
+- id: spring.bean
+  lang: java
+  match: annotation
+  names: [Bean, Component, Repository, Controller, RestController]
+  contract: {kind: spi, role: exposes, key_from_type: true}
+
+- id: grpc.stub
+  lang: [java, python, go, csharp, typescript]
+  match: call
+  names: [newStub, newBlockingStub, newFutureStub]
+  contract: {kind: rpc_service, role: consumes, key_arg: 0}
+
+- id: nestjs.injectable
+  lang: typescript
+  match: decorator
+  names: [Injectable]
+  contract: {kind: spi, role: exposes, key_from_type: true}

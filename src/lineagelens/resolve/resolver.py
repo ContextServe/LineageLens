@@ -42,7 +42,15 @@ import logging
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from ..contracts import (
+    AdapterRegistry,
+    ContractResult,
+    UnclaimedDeclaration,
+    detect_in_observation,
+    detect_spi_resources,
+)
 from ..core import (
     Boundary,
     BoundaryKind,
@@ -107,6 +115,9 @@ class ResolveResult:
     boundaries: list[Boundary] = field(default_factory=list)
     contracts: list[Contract] = field(default_factory=list)
     coverage: dict[str, Coverage] = field(default_factory=dict)
+    #: Framework-shaped declarations no adapter claimed (§8.2). Surfaced so a
+    #: missing adapter is a reported coverage gap rather than silence.
+    unclaimed: list[UnclaimedDeclaration] = field(default_factory=list)
 
     def extend(self, other: ResolveResult) -> None:
         self.edges.extend(other.edges)
@@ -114,6 +125,12 @@ class ResolveResult:
         self.boundaries.extend(other.boundaries)
         self.contracts.extend(other.contracts)
         self.coverage.update(other.coverage)
+        self.unclaimed.extend(other.unclaimed)
+
+    def unclaimed_summary_top(self, limit: int = 10) -> list[dict[str, object]]:
+        """Unclaimed frameworks, commonest first -- the adapter work list."""
+        holder = ContractResult(unclaimed=list(self.unclaimed))
+        return holder.unclaimed_summary()[:limit]
 
 
 class Resolver:
@@ -124,10 +141,17 @@ class Resolver:
         index: SymbolIndex,
         *,
         oracles: OracleRegistry | None = None,
+        adapters: AdapterRegistry | None = None,
+        project_root: Path | None = None,
         provenance: str = "tier-a-resolver",
     ) -> None:
         self.index = index
         self.oracles = oracles or OracleRegistry()
+        #: Framework adapters (§8.2). Optional: without them the graph loses
+        #: only its contract edges, and every unclaimed framework-shaped
+        #: declaration is still reported so the gap is visible.
+        self.adapters = adapters
+        self.project_root = project_root
         self.provenance = provenance
 
     # ---- entry point ------------------------------------------------------
@@ -154,6 +178,8 @@ class Resolver:
         for observation in observations:
             result.boundaries.extend(observation.boundaries)
             result.contracts.extend(observation.contracts)
+
+        self._resolve_contracts(observations, result)
 
         # Bucket by file ONCE before per-file accounting.
         #
@@ -183,6 +209,33 @@ class Resolver:
             )
 
         return result
+
+    def _resolve_contracts(
+        self, observations: Sequence[Observation], result: ResolveResult
+    ) -> None:
+        """Detect cross-framework contracts and attach symbols to them (§8).
+
+        Runs last, because SPI registry files name implementations by
+        fully-qualified name and need the whole node set to look them up.
+        """
+        if self.adapters is None:
+            return
+
+        found = ContractResult()
+        for observation in observations:
+            found.merge(detect_in_observation(observation, self.adapters))
+
+        if self.project_root is not None:
+            by_qname: dict[str, list[Node]] = defaultdict(list)
+            for observation in observations:
+                for node in observation.nodes:
+                    by_qname[node.qualified_name].append(node)
+            found.merge(detect_spi_resources(self.project_root, dict(by_qname)))
+
+        result.contracts.extend(found.contracts.values())
+        result.edges.extend(found.edges)
+        result.boundaries.extend(found.boundaries)
+        result.unclaimed.extend(found.unclaimed)
 
     def _resolve_file(
         self,

@@ -23,6 +23,13 @@
     function: (identifier) @ref.name
     arguments: (arguments (_) @ref.arg)?)) @ref.decorate
 
+(decorator
+  (call_expression
+    function: (member_expression
+                object: (_) @receiver
+                property: (property_identifier) @ref.name)
+    arguments: (arguments (_) @ref.arg)?)) @ref.decorate
+
 (import_statement source: (string) @ref.name) @ref.import
 
 (import_specifier name: (identifier) @ref.name) @ref.import

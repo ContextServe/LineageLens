@@ -20,6 +20,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .contracts import AdapterRegistry, project_adapter_roots
 from .core import (
     DataflowMode,
     FileRecord,
@@ -68,7 +69,10 @@ class IndexReport:
     unresolved: int = 0
     boundaries: int = 0
     services: int = 0
+    contracts: int = 0
     languages: dict[str, int] = field(default_factory=dict)
+    #: Framework-shaped declarations no adapter claimed, commonest first (§8.2).
+    unclaimed_frameworks: list[dict[str, object]] = field(default_factory=list)
     skipped_reasons: dict[str, int] = field(default_factory=dict)
     build_digest: str = ""
     duration_seconds: float = 0.0
@@ -85,7 +89,9 @@ class IndexReport:
                 "unresolved_refs": self.unresolved, "boundaries": self.boundaries,
             },
             "services": self.services,
+            "contracts": self.contracts,
             "languages": dict(sorted(self.languages.items())),
+            "unclaimed_frameworks": self.unclaimed_frameworks,
             "skipped_reasons": dict(sorted(self.skipped_reasons.items())),
             "build_digest": self.build_digest,
             "duration_seconds": round(self.duration_seconds, 3),
@@ -187,9 +193,12 @@ class Indexer:
         # Resolution needs the whole node set: a call can target any file.
         all_nodes = [n for o in observations for n in o.nodes]
         index = SymbolIndex(all_nodes)
+        adapters = AdapterRegistry(project_adapter_roots(self.root))
         resolver = Resolver(
             index,
             oracles=OracleRegistry(project_root=self.root, lang_of_file=lang_of_file),
+            adapters=adapters,
+            project_root=self.root,
         )
         resolved = resolver.resolve(observations)
 
@@ -203,9 +212,12 @@ class Indexer:
         report.edges = counts["edges"]
         report.unresolved = counts["unresolved_refs"]
         report.boundaries = counts["boundaries"]
+        report.contracts = len({c.id for c in resolved.contracts})
+        report.unclaimed_frameworks = resolved.unclaimed_summary_top()
         report.build_digest = store.finalise(
             grammar_digest=self.parsers.digest(),
             spec_digest=self.specs.digest(),
+            adapter_digest=adapters.digest(),
             built_at=started.isoformat(),
         )
         report.duration_seconds = (datetime.now(UTC) - started).total_seconds()
