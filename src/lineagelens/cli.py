@@ -7,8 +7,10 @@ Six commands, replacing the schema-3 surface. Two are gone deliberately:
   silently discarded the rest. Running it on this repository emitted 39
   TypeScript symbols and zero Python, overwriting a good graph in place.
 * ``--engine`` is gone entirely. There is no user-selectable engine: extraction
-  is per-file and additive, and the choice a user actually has is a fidelity
-  budget (``--dataflow``), not an analyser.
+  is per-file and additive. ``--dataflow`` went the same way: data flow is
+  always computed, because deferring it dropped 69% of the data-flow edges to
+  save 3.2s, and its premise -- that a query touches a small slice -- does not
+  hold when resolution is global.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .core import SCHEMA_VERSION, DataflowMode, Intent
+from .core import SCHEMA_VERSION, Intent
 from .indexer import Indexer
 from .ontology import capability_matrix
 from .query import QueryEngine
@@ -69,15 +71,6 @@ def _add_index(commands: Any) -> None:
     )
     cmd.add_argument("path", nargs="?", default=".", type=Path)
     cmd.add_argument(
-        "--dataflow", choices=[m.value for m in DataflowMode],
-        default=DataflowMode.LAZY.value,
-        help=(
-            "when to compute data-flow edges. lazy (default) defers them per "
-            "function body; eager computes everything up front; incremental "
-            "recomputes only changed files"
-        ),
-    )
-    cmd.add_argument(
         "--require-tier-b", nargs="?", const="*", default="",
         help=(
             "SKIP languages that have no native type resolver, instead of "
@@ -96,7 +89,6 @@ def _add_index(commands: Any) -> None:
 def _run_index(args: Any) -> int:
     indexer = Indexer(
         args.path,
-        dataflow=DataflowMode(args.dataflow),
         require_tier_b=_tier_b_set(args.require_tier_b),
     )
     store, report = indexer.run()
@@ -377,9 +369,11 @@ def _run_coverage(args: Any) -> int:
         coverage = payload["coverage"]
         if coverage.get("refs"):
             refs = coverage["refs"]
-            print(f"\nreferences: {refs['total']:,} total  "
+            print(f"\nreferences: {refs['total']:,} observed  "
                   f"{refs['exact']:.0%} exact  {refs['inferred']:.0%} inferred  "
                   f"{refs['unresolved']:.0%} unresolved")
+            print("  unresolved is mostly genuinely external (stdlib, "
+                  "third-party) plus ambiguities recorded with candidates")
         if coverage.get("files"):
             print("files: " + "  ".join(
                 f"{k} {v:,}" for k, v in coverage["files"].items()
@@ -396,10 +390,6 @@ def _add_verify(commands: Any) -> None:
         help="rebuild twice and confirm the graph is byte-identical (§11)",
     )
     cmd.add_argument("path", nargs="?", default=".", type=Path)
-    cmd.add_argument(
-        "--incremental", action="store_true",
-        help="also confirm an incremental rebuild equals a cold one",
-    )
     cmd.add_argument("--require-tier-b", nargs="?", const="*", default="")
     cmd.set_defaults(handler=_run_verify)
 
@@ -415,15 +405,11 @@ def _run_verify(args: Any) -> int:
     import tempfile
 
     allow = _tier_b_set(args.require_tier_b)
-    # EAGER for the comparison, so data-flow edges are part of what is being
-    # checked. Under LAZY they are deferred and the digest would not cover the
-    # largest and most order-sensitive edge set there is.
-    mode = DataflowMode.EAGER
     digests: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
         for run in (1, 2):
             store, report = Indexer(
-                args.path, dataflow=mode, require_tier_b=allow,
+                args.path, require_tier_b=allow,
             ).run(db_path=Path(tmp) / f"run{run}" / DB_FILENAME)
             digests.append(report.build_digest)
             store.close()
@@ -436,24 +422,6 @@ def _run_verify(args: Any) -> int:
         return 1
     print("\nOK: deterministic.")
 
-    if args.incremental:
-        # §16.25. An incremental build with no prior index treats every file as
-        # changed, so it must equal a cold eager build. If it does not, the
-        # incremental path is perturbing the result -- which is the property
-        # that would break first if it ever started reusing stored rows.
-        with tempfile.TemporaryDirectory() as tmp:
-            store, incremental = Indexer(
-                args.path,
-                dataflow=DataflowMode.INCREMENTAL,
-                require_tier_b=allow,
-            ).run(db_path=Path(tmp) / "incremental" / DB_FILENAME)
-            store.close()
-        print(f"  incremental: {incremental.build_digest}")
-        if incremental.build_digest != digests[0]:
-            print("\nFAIL: an incremental rebuild differs from a cold one.",
-                  file=sys.stderr)
-            return 1
-        print("OK: incremental matches cold.")
     return 0
 
 

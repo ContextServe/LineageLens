@@ -357,16 +357,7 @@ class Analyser:
         ).fetchone()
         status = row["dataflow_status"] if row else "unknown"
         envelope.dataflow = {"status": status, "file": node.file_path}
-        if status == "lazy":
-            envelope.add_boundary(
-                "dataflow_deferred",
-                node_id=node.id,
-                detail=(
-                    f"{node.file_path} indexed with dataflow=lazy; "
-                    f"reindex with --dataflow=eager for complete flow"
-                ),
-            )
-        elif status == "unsupported":
+        if status == "unsupported":
             envelope.add_boundary(
                 "dataflow_unsupported",
                 node_id=node.id,

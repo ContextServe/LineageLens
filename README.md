@@ -187,7 +187,6 @@ usually no follow-up file read. Every one is budgeted and reports truncation.
 
 ```
 lineagelens index [path]      build the graph (all languages, one graph)
-  --dataflow lazy|eager|incremental
   --require-tier-b[=LANGS]    skip languages with no type resolver (CI strictness)
 lineagelens query [path] ...  the twelve primitives; --json for machine output
 lineagelens coverage [path]   what the index does and does not cover

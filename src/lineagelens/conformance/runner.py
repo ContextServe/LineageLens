@@ -135,7 +135,6 @@ class LanguageResult:
 
 def run_language(lang: str, *, corpus_root: Path | None = None) -> LanguageResult:
     """Index one language's corpus and measure what came out."""
-    from ..core import DataflowMode
     from ..indexer import Indexer
 
     root = (corpus_root or CORPUS_ROOT) / lang
@@ -153,11 +152,7 @@ def run_language(lang: str, *, corpus_root: Path | None = None) -> LanguageResul
         # No Tier B requirement: the suite measures what the *specs* express.
         # Whether a JDK happens to be on the machine running it is a separate
         # fact, reported by ontology.installed_tiers().
-        store, report = Indexer(
-            root,
-            dataflow=DataflowMode.EAGER,
-            require_tier_b=frozenset(),
-        ).run(db_path=Path(tmp) / "conformance.sqlite")
+        store, report = Indexer(root, require_tier_b=frozenset()).run(db_path=Path(tmp) / "conformance.sqlite")
         try:
             result.files = report.files_parsed
             result.node_kinds = store.node_kind_counts()

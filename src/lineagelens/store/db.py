@@ -33,7 +33,6 @@ from ..core import (
     Boundary,
     BoundaryKind,
     Coverage,
-    DataflowMode,
     Edge,
     EdgeKind,
     Evidence,
@@ -93,7 +92,6 @@ class GraphStore:
         db_path: Path | str,
         *,
         project_root: str,
-        dataflow_mode: DataflowMode = DataflowMode.LAZY,
         commit_sha: str | None = None,
         overwrite: bool = True,
     ) -> GraphStore:
@@ -116,15 +114,14 @@ class GraphStore:
         conn.executescript(SCHEMA_DDL)
         conn.execute(
             """
-            INSERT INTO graph_meta (id, schema_version, project_root, commit_sha, dataflow_mode)
-            VALUES (1, ?, ?, ?, ?)
+            INSERT INTO graph_meta (id, schema_version, project_root, commit_sha)
+            VALUES (1, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 schema_version = excluded.schema_version,
                 project_root   = excluded.project_root,
-                commit_sha     = excluded.commit_sha,
-                dataflow_mode  = excluded.dataflow_mode
+                commit_sha     = excluded.commit_sha
             """,
-            (SCHEMA_VERSION, project_root, commit_sha, dataflow_mode.value),
+            (SCHEMA_VERSION, project_root, commit_sha),
         )
         conn.commit()
         return store

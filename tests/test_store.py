@@ -339,7 +339,7 @@ class TestCoverageAccounting:
             Coverage(
                 file_path="f.py", nodes_found=1, refs_total=10,
                 refs_exact=5, refs_inferred=2, refs_unresolved=1,  # sums to 8
-                boundaries_count=0, dataflow_status=DataflowStatus.LAZY,
+                boundaries_count=0, dataflow_status=DataflowStatus.COMPUTED,
             )
 
     def test_skipped_file_must_state_a_reason(self):

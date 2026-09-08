@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from lineagelens.core import DataflowMode, EdgeKind, Intent
+from lineagelens.core import EdgeKind, Intent
 from lineagelens.indexer import Indexer
 from lineagelens.query import Budget, Envelope, QueryEngine, Traverser
 
@@ -70,10 +70,7 @@ def project(tmp_path_factory):
     # `web/` gets its own manifest so the cross-service split is exercised.
     (root / "web").mkdir(exist_ok=True)
     (root / "web" / "package.json").write_text('{"name": "web"}')
-    store, report = Indexer(
-        root,
-        dataflow=DataflowMode.EAGER,
-    ).run()
+    store, report = Indexer(root).run()
     return QueryEngine(store, str(root)), report, root
 
 
@@ -387,14 +384,21 @@ class TestDataflow:
         directions = {flow["direction"] for flow in result.results}
         assert directions <= {"upstream", "downstream"}
 
-    def test_lazy_dataflow_is_reported_as_deferred(self, tmp_path):
-        """A deferred body must not look like a permanent gap (§9.2)."""
+    def test_dataflow_is_always_computed(self, tmp_path):
+        """There is no deferral mode any more.
+
+        §9.2 specified lazy/eager/incremental and defaulted to lazy. Measured,
+        lazy cost 3.2s on this repository and dropped 69% of the data-flow
+        edges -- and its premise did not hold: resolution is global, so
+        computing one body's flow still needs the whole symbol index. It is
+        gone, and `dataflow_status` has only the two honest states left.
+        """
         (tmp_path / "m.py").write_text("def f(a):\n    b = a\n    return b\n")
-        store, _ = Indexer(tmp_path, dataflow=DataflowMode.LAZY).run()
+        store, _ = Indexer(tmp_path).run()
         engine = QueryEngine(store, str(tmp_path))
         result = engine.dataflow_of(qname(engine, "b", kind="variable"))
-        assert result.envelope.dataflow["status"] == "lazy"
-        assert "dataflow_deferred" in result.envelope.boundaries
+        assert result.envelope.dataflow["status"] == "computed"
+        assert "dataflow_deferred" not in result.envelope.boundaries
 
 
 # ---------------------------------------------------------------------------

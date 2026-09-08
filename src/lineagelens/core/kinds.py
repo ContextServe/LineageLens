@@ -272,22 +272,27 @@ class Intent(str, Enum):
         return self.value
 
 
-class DataflowMode(str, Enum):
-    """When data-flow edges get computed (§9.2)."""
-
-    LAZY = "lazy"                # per function body, on demand, then persisted
-    EAGER = "eager"              # everything at index time
-    INCREMENTAL = "incremental"  # eager for changed files, lazy elsewhere
-
-    def __str__(self) -> str:  # pragma: no cover - trivial
-        return self.value
-
-
 class DataflowStatus(str, Enum):
-    """Whether a given file's data-flow edges exist yet."""
+    """Whether a file's data-flow edges exist.
+
+    §9.2 specified three computation modes -- lazy, eager, incremental -- and
+    made lazy the default. That is gone, and data flow is now always computed.
+    Two reasons, both measured:
+
+    * lazy's premise does not hold. It was justified on "most queries touch a
+      small slice", but resolution is *global*: resolving one data-flow
+      reference needs the whole symbol index, which is most of the cost. The
+      saving was not available.
+    * the cost it avoided is small. Computing everything adds 3.2s on this
+      repository and 10s on Apache Dubbo's 4,046 files, while lazy dropped 69%
+      of the data-flow edges -- for a tool whose headline capability is data
+      flow.
+
+    So the only honest states left are "computed" and "this language has no
+    data-flow spec".
+    """
 
     COMPUTED = "computed"
-    LAZY = "lazy"              # not yet computed; will be on demand
     UNSUPPORTED = "unsupported"  # no dataflow.scm for this language
 
     def __str__(self) -> str:  # pragma: no cover - trivial

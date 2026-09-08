@@ -19,7 +19,6 @@ import threading
 import time
 from pathlib import Path
 
-from .core import DataflowMode
 from .indexer import Indexer
 from .services import IGNORED_DIRS
 
@@ -37,12 +36,10 @@ class IndexWatcher:
         self,
         project: Path,
         *,
-        dataflow: DataflowMode = DataflowMode.LAZY,
         require_tier_b: frozenset[str] = frozenset(),
         debounce: float = DEBOUNCE_SECONDS,
     ) -> None:
         self.project = Path(project).resolve()
-        self.dataflow = dataflow
         self.require_tier_b = require_tier_b
         self.debounce = debounce
         self._timer: threading.Timer | None = None
@@ -91,7 +88,6 @@ class IndexWatcher:
     def reindex(self, *, reason: str) -> None:
         store, report = Indexer(
             self.project,
-            dataflow=self.dataflow,
             require_tier_b=self.require_tier_b,
         ).run()
         try:

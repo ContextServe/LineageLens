@@ -92,7 +92,7 @@ three are gone:
 - **relation kinds** — all of them are always emitted. The allowlist existed to
   bisect regressions in a design where each kind was a separate risky pass.
 
-What is left is two flags on `index`: `--dataflow` and `--allow-tier-a-only`.
+What is left is one flag on `index`: `--require-tier-b`.
 
 The one optional directory is `.lineagelens/adapters/`, for contract adapters
 describing an in-house framework. Nothing is required to be there.
