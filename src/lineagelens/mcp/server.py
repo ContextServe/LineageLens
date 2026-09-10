@@ -29,6 +29,8 @@ is ``callers_of`` from an entry point).
 
 from __future__ import annotations
 
+import functools
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -103,10 +105,21 @@ def create_server(root: Path | None = None) -> Any:
 
         A traceback tells an agent nothing it can act on; the command to run
         does.
+
+        ``functools.wraps`` is load-bearing, not tidiness: ``@server.tool()``
+        builds each tool's input schema by introspecting the callable it is
+        handed. Copying only ``__name__``/``__doc__`` left it introspecting
+        ``wrapped(*args, **kwargs)``, so all 16 tools advertised a schema of
+        two required fields named ``args`` and ``kwargs`` and no honest client
+        could call any of them. ``wraps`` sets ``__wrapped__``, which
+        ``inspect.signature`` follows back to the real parameters. Every tool
+        is ``async``, so the wrapper must await ``fn`` -- returning the
+        coroutine un-awaited would leave these ``except`` clauses dead code.
         """
-        def wrapped(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        @functools.wraps(fn)
+        async def wrapped(*args: Any, **kwargs: Any) -> dict[str, Any]:
             try:
-                return fn(*args, **kwargs)
+                return await fn(*args, **kwargs)
             except GraphNotFound:
                 return {
                     "error": "no index",
@@ -118,8 +131,23 @@ def create_server(root: Path | None = None) -> Any:
                     "remedy": f"run: lineagelens index {project} --force",
                 }
 
-        wrapped.__name__ = fn.__name__
-        wrapped.__doc__ = fn.__doc__
+        # Advertise the tool's real parameters minus each signature's ``**_``
+        # catch-all: the SDK refuses any parameter whose name starts with an
+        # underscore, and the catch-all is not part of the tool's contract --
+        # ``fn`` still swallows unknown keywords at call time. ``__wrapped__``
+        # has to go with it, because ``inspect.signature`` follows that chain
+        # back to ``fn`` in preference to a ``__signature__`` set here, which
+        # would resurrect the very parameter we are removing.
+        signature = inspect.signature(fn)
+        wrapped.__signature__ = signature.replace(
+            parameters=[
+                param
+                for param in signature.parameters.values()
+                if param.kind
+                not in (param.VAR_KEYWORD, param.VAR_POSITIONAL)
+            ]
+        )
+        del wrapped.__wrapped__
         return wrapped
 
     # ---- tracing ----------------------------------------------------------

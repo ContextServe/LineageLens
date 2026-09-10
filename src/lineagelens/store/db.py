@@ -739,6 +739,113 @@ class GraphStore:
         ).fetchone()
         return int(row[0])
 
+    # ---- usage sites (new) ------------------------------------------------
+
+    def add_usage_site(
+        self,
+        symbol_name: str,
+        usage_type: str,
+        file_id: int,
+        file_path: str,
+        start_line: int,
+        end_line: int,
+        start_byte: int,
+        end_byte: int,
+        calling_symbol_id: str | None = None,
+        context_before: str | None = None,
+        context_line: str | None = None,
+        context_after: str | None = None,
+    ) -> None:
+        """Record where a symbol is used in the codebase."""
+        self.conn.execute(
+            """
+            INSERT INTO usage_sites (
+                symbol_name, usage_type, file_id, file_path,
+                start_line, end_line, start_byte, end_byte,
+                calling_symbol_id, context_before, context_line, context_after
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                symbol_name, usage_type, file_id, file_path,
+                start_line, end_line, start_byte, end_byte,
+                calling_symbol_id, context_before, context_line, context_after,
+            ),
+        )
+
+    def find_usage(
+        self,
+        symbol_name: str,
+        usage_type: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Find where a symbol is used (useful for external symbols).
+
+        Args:
+            symbol_name: Name to search for (e.g., "anthropic.Anthropic")
+            usage_type: Filter by usage type (import, call, etc.). None = all.
+            limit: Max results.
+
+        Returns:
+            List of usage dicts with symbol_name, usage_type, file_path, line, context.
+        """
+        if usage_type:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM usage_sites
+                WHERE symbol_name = ? AND usage_type = ?
+                ORDER BY file_path, start_line
+                LIMIT ?
+                """,
+                (symbol_name, usage_type, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM usage_sites
+                WHERE symbol_name = ?
+                ORDER BY file_path, start_line
+                LIMIT ?
+                """,
+                (symbol_name, limit),
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def get_usage_context(
+        self,
+        file_path: str,
+        line_number: int,
+        context_lines: int = 3,
+    ) -> str:
+        """Get source code context around a usage site.
+
+        Returns verbatim source with line numbers.
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except (FileNotFoundError, UnicodeDecodeError):
+            return ""
+
+        start = max(0, line_number - context_lines - 1)
+        end = min(len(lines), line_number + context_lines)
+
+        result = []
+        for i in range(start, end):
+            if i < len(lines):
+                marker = "→ " if i == line_number - 1 else "  "
+                result.append(f"{marker}{i+1:4d} | {lines[i].rstrip()}")
+
+        return "\n".join(result)
+
+    def find_imports(self, symbol_name: str, limit: int = 30) -> list[dict[str, Any]]:
+        """Find all import statements for a symbol."""
+        return self.find_usage(symbol_name, usage_type="import", limit=limit)
+
+    def find_calls(self, symbol_name: str, limit: int = 30) -> list[dict[str, Any]]:
+        """Find all call sites for a symbol."""
+        return self.find_usage(symbol_name, usage_type="call", limit=limit)
+
 
 # ---------------------------------------------------------------------------
 # row -> record

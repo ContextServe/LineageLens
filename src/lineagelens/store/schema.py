@@ -145,6 +145,26 @@ CREATE TABLE IF NOT EXISTS boundaries (
     col        INTEGER
 );
 
+-- Usage sites: Track how symbols (especially external ones) are used.
+-- Enables "find where X is called/imported/used" for agents to understand
+-- how external APIs are integrated into this codebase.
+CREATE TABLE IF NOT EXISTS usage_sites (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_name        TEXT NOT NULL,          -- "anthropic.Anthropic", "ChatAnthropic"
+    usage_type         TEXT NOT NULL,          -- "import", "call", "instantiate", "attribute_access", "type_annotation"
+    file_id            INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    file_path          TEXT NOT NULL,
+    start_line         INTEGER NOT NULL,
+    end_line           INTEGER NOT NULL,
+    start_byte         INTEGER NOT NULL,
+    end_byte           INTEGER NOT NULL,
+    calling_symbol_id  TEXT REFERENCES nodes(id) ON DELETE SET NULL,  -- which local symbol uses it
+    context_before     TEXT,                   -- 1-2 lines before for context
+    context_line       TEXT NOT NULL,          -- The actual usage line
+    context_after      TEXT,                   -- 1-2 lines after for context
+    indexed_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS coverage (
     file_id          INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
     nodes_found      INTEGER NOT NULL,
@@ -222,6 +242,11 @@ CREATE INDEX IF NOT EXISTS idx_unresolved_file   ON unresolved_refs(file_id);
 
 CREATE INDEX IF NOT EXISTS idx_boundaries_node   ON boundaries(node_id);
 CREATE INDEX IF NOT EXISTS idx_boundaries_kind   ON boundaries(kind);
+
+CREATE INDEX IF NOT EXISTS idx_usage_symbol      ON usage_sites(symbol_name);
+CREATE INDEX IF NOT EXISTS idx_usage_file        ON usage_sites(file_id);
+CREATE INDEX IF NOT EXISTS idx_usage_calling     ON usage_sites(calling_symbol_id);
+CREATE INDEX IF NOT EXISTS idx_usage_type        ON usage_sites(usage_type);
 
 CREATE INDEX IF NOT EXISTS idx_aliases_node      ON node_aliases(node_id);
 """
