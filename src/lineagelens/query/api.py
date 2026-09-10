@@ -148,6 +148,45 @@ class QueryEngine:
             return {}
         return source_for(self.store, nodes, self.project_root)
 
+    def _analyze_empty_search(self, query: str, query_intent: "QueryIntent") -> dict[str, Any]:  # noqa: F821
+        """Analyze why a search returned empty and suggest next steps."""
+        from .intent import suggest_tool
+
+        # Decompose compound queries
+        tokens = query.split()
+        suggestions = []
+
+        # Add individual tokens as suggestions
+        for token in tokens:
+            if len(token) > 3:
+                suggestions.append(token)
+
+        # Add common pairs
+        for i in range(len(tokens) - 1):
+            pair = f"{tokens[i]} {tokens[i+1]}"
+            if len(pair) > 5:
+                suggestions.append(pair)
+
+        # Add qualified name suggestions if detected
+        external_packages = {"anthropic", "openai", "pydantic", "fastapi"}
+        if any(pkg in query.lower() for pkg in external_packages):
+            suggestions.extend([
+                f"Try use explore('{tokens[0]}') for external packages",
+            ])
+            suggestions = [s for s in suggestions if s]
+
+        return {
+            "intent_detected": query_intent.value,
+            "intent_suggestion": suggest_tool(query_intent),
+            "suggestions": suggestions[:5],  # Top 5
+            "explanation": (
+                f"No results for '{query}'. This could mean:\n"
+                f"1. The term doesn't exist in this project\n"
+                f"2. It's part of an external package (use explore() instead)\n"
+                f"3. Try searching for parts of the name separately"
+            ),
+        }
+
     # ---- 1. find_paths ----------------------------------------------------
 
     def find_paths(
@@ -470,12 +509,47 @@ class QueryEngine:
         intent: Intent | str | None = None,
         limit: int | None = None,
     ) -> QueryResult:
-        """BM25-ranked search over name, qualified name, docstring, signature."""
+        """BM25-ranked search over name, qualified name, docstring, signature.
+
+        ⚠️  IMPORTANT: This searches only SYMBOLS DEFINED IN THIS PROJECT.
+
+        For external packages (anthropic.Anthropic, openai.OpenAI, etc.),
+        use explore() instead — it shows where they're used in this codebase.
+
+        **Returns:**
+        - If symbols found: matched results with source and metadata
+        - If empty: suggestions for alternative searches + tool recommendations
+        """
+        from .intent import detect_intent
+
         resolved, budget, envelope = self._prepare(intent, Intent.PLAN, limit=limit)
+
+        # Detect query intent early
+        query_intent = detect_intent(query, self.store)
+
+        # Perform search
         nodes = self.store.search(
             query, kinds=kinds, lang=lang, service_id=service,
             limit=budget.limit + 1,
         )
+
+        # If empty, provide actionable guidance
+        if not nodes:
+            analysis = self._analyze_empty_search(query, query_intent)
+            return QueryResult.of(
+                "search", [],
+                budget=budget, envelope=envelope,
+                extra={
+                    "status": "no_matches",
+                    "analysis": analysis,
+                    "next_steps": [
+                        analysis["intent_suggestion"],
+                        *[f"Try: search('{s}')" for s in analysis["suggestions"]],
+                    ],
+                }
+            )
+
+        # Format results (existing code)
         sources = self._sources(nodes[: budget.limit], resolved, budget)
         items = [
             {

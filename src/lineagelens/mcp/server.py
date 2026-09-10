@@ -362,9 +362,25 @@ def create_server(root: Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """Ranked search over name, qualified name, docstring and signature.
 
+        ⚠️  IMPORTANT: This searches only SYMBOLS DEFINED IN THIS PROJECT.
+
+        For external packages (anthropic.Anthropic, openai.OpenAI, etc.),
+        use explore() instead — it shows where they're used in this codebase.
+
         BM25-ranked. kinds filters by node kind: class, interface, enum,
         struct, trait, function, method, constructor, property, field,
         parameter, variable, constant, module, contract.
+
+        **Returns:**
+        - If symbols found: matched results with source, metadata, and usage
+        - If empty: suggestions for alternative searches + tool recommendations
+
+        **Examples:**
+        - search('ChatAnthropic') → finds locally-defined class
+        - search('with_raw_response anthropic') → 0 hits + suggests:
+            * search('with_raw_response')
+            * search('anthropic')
+            * explore('with_raw_response anthropic')  ← better for external APIs
         """
         return engine().search(
             query, kinds=kinds, lang=lang, service=service,
