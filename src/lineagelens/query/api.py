@@ -533,8 +533,37 @@ class QueryEngine:
             limit=budget.limit + 1,
         )
 
-        # If empty, provide actionable guidance
+        # If empty, try external usage fallback (Phase 5: Dual-Mode Search)
         if not nodes:
+            from .intent import QueryIntent
+
+            # Try finding external usage if intent suggests it
+            if query_intent == QueryIntent.EXTERNAL_USAGE:
+                external = self.store.find_usage(query, limit=budget.limit)
+                if external:
+                    # Format as external usage results
+                    external_formatted = [
+                        {
+                            "symbol": u["symbol_name"],
+                            "type": "external_usage",
+                            "usage_type": u["usage_type"],
+                            "at": f"{u['file_path']}:{u['start_line']}",
+                            "context": u["context_line"],
+                            "lang": "python",  # Infer from usage_type when available
+                        }
+                        for u in external
+                    ]
+                    return QueryResult.of(
+                        "search", external_formatted,
+                        budget=budget, envelope=envelope,
+                        extra={
+                            "status": "external_usage",
+                            "note": "No local symbols found. Showing where external symbols are used.",
+                            "tip": "Use explore() for a high-level overview of this external API.",
+                        }
+                    )
+
+            # No results anywhere - provide guidance
             analysis = self._analyze_empty_search(query, query_intent)
             return QueryResult.of(
                 "search", [],
