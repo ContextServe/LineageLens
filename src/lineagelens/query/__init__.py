@@ -18,6 +18,7 @@ from .budget import (
     Envelope,
     QueryResult,
 )
+from .intent import QueryIntent, detect_intent, suggest_tool
 from .traverse import Hop, Path, Traverser, kinds_for_intent, source_for
 
 __all__ = [
@@ -32,8 +33,11 @@ __all__ = [
     "ImpactReport",
     "Path",
     "QueryEngine",
+    "QueryIntent",
     "QueryResult",
     "Traverser",
+    "detect_intent",
     "kinds_for_intent",
     "source_for",
+    "suggest_tool",
 ]

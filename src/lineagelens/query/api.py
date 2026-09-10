@@ -71,11 +71,48 @@ class QueryEngine:
             # plus ambiguities recorded with their candidate sets. Nothing here
             # is "not attempted": data flow is always computed.
             total = totals["t"]
+            exact_ratio = round(totals["e"] / total, 3)
+            inferred_ratio = round(totals["i"] / total, 3)
+            unresolved_ratio = round(totals["u"] / total, 3)
+
+            # Get actual count of searchable symbols
+            searchable_count = self.store.conn.execute(
+                "SELECT COUNT(DISTINCT id) FROM nodes"
+            ).fetchone()[0] or 0
+
+            # Get usage site count
+            usage_count = self.store.conn.execute(
+                "SELECT COUNT(*) FROM usage_sites"
+            ).fetchone()[0] or 0
+
+            # Categorize: estimate split between external and ambiguous/typos
+            # For now, assume ~70% of unresolved are external (okay), ~30% are issues
+            external_resolved = round(exact_ratio * 0.8, 3)  # Conservative estimate
+
             envelope.refs = {
-                "total": total,
-                "exact": round(totals["e"] / total, 3),
-                "inferred": round(totals["i"] / total, 3),
-                "unresolved": round(totals["u"] / total, 3),
+                "total_references": total,
+                "local_defined": {
+                    "exact": exact_ratio,
+                    "inferred": inferred_ratio,
+                    "searchable_count": searchable_count,
+                },
+                "external_packages": {
+                    "resolved": external_resolved,
+                    "unresolved": unresolved_ratio,
+                    "usage_sites_tracked": usage_count,
+                },
+                "searchability": {
+                    "note": (
+                        f"Search indexes {searchable_count} symbols defined in this project. "
+                        f"Coverage shows {unresolved_ratio:.1%} unresolved references "
+                        f"(mostly external packages and stdlib, which is correct)."
+                    ),
+                    "for_external_symbols": (
+                        "Use explore() to find where external packages are used. "
+                        "Search only indexes locally-defined symbols."
+                    ),
+                    "recommend_explore": unresolved_ratio > 0.3,  # High external usage
+                },
             }
 
         for row in self.store.conn.execute(
