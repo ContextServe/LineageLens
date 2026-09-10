@@ -389,6 +389,45 @@ def create_server(root: Path | None = None) -> Any:
 
     @server.tool()
     @guarded
+    async def explore(
+        query: str,
+        context: str | None = None,
+        intent: str | None = None,
+        limit: int | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """One-shot: What code is relevant to this query?
+
+        Returns everything in one response:
+        - Local symbols with source code (no Read() needed)
+        - How external packages are used in this codebase
+        - Blast radius (tests, dependents, callers)
+        - Suggested follow-up queries
+
+        This is the primary tool to use when you need to understand code quickly.
+        Use search() only for specific symbol lookup by name.
+
+        Args:
+            query: What you're looking for (e.g., "gateway metadata")
+            context: Optional context (e.g., "I'm adding response header support")
+            intent: "plan" (default, cheap) or "precise" (full source)
+            limit: Max results per category
+
+        **Examples:**
+            explore("with_raw_response anthropic client")
+            explore("ChatAnthropic._create", context="I need to add middleware")
+            explore("how anthropic gets used")
+
+        **What you get back:**
+            - local_defined: Internal symbols with full context
+            - external_usage: Where external packages are called
+            - similar_patterns: Similar flows in the codebase
+            - suggestions: What to explore next
+        """
+        return engine().explore(query, context=context, intent=intent, limit=limit).as_dict()
+
+    @server.tool()
+    @guarded
     async def get_symbol(
         symbol: str, intent: str | None = None, **_: Any
     ) -> dict[str, Any]:

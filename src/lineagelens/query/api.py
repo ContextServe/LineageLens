@@ -568,6 +568,149 @@ class QueryEngine:
             "search", items, budget=budget, envelope=envelope, ranking="bm25",
         )
 
+    # ---- 11.5 explore (new, high-level API) --------------------------------
+
+    def explore(
+        self,
+        query: str,
+        context: str | None = None,
+        *,
+        intent: Intent | str | None = None,
+        limit: int | None = None,
+    ) -> QueryResult:
+        """One-shot answer: 'What code is relevant to this?'
+
+        Orchestrates internally to return everything in one response:
+        - Local symbols with source code (no Read() needed)
+        - External symbol usage sites
+        - Blast radius (tests, dependents, callers)
+        - Suggested follow-up queries
+
+        This is the primary tool for understanding code quickly without
+        orchestrating multiple individual searches.
+
+        Args:
+            query: What you're looking for
+            context: Optional context (e.g., "adding gateway metadata support")
+            intent: "plan" (default, cheap) or "precise" (includes full source)
+            limit: Max results per category
+
+        Returns:
+            QueryResult with everything bundled in one item
+        """
+        from .intent import detect_intent
+
+        resolved, budget, envelope = self._prepare(intent, Intent.PLAN, limit=limit)
+
+        # Detect what we're searching for
+        query_intent = detect_intent(query, self.store)
+
+        # Multi-strategy search
+        local_symbols = self.store.search(query, limit=budget.limit // 2)
+        external_usages = (
+            self.store.find_usage(query, limit=budget.limit // 2)
+            if not local_symbols
+            else []
+        )
+        similar = (
+            self.similar_flows(query, limit=3).items if local_symbols else []
+        )
+
+        # Enrich local symbols with source + callers + tests
+        enriched_local = []
+        for node in local_symbols:
+            # Get source code
+            sources = self._sources([node], resolved, budget)
+
+            # Get direct callers
+            callers_result = self.callers_of(
+                node.qualified_name,
+                kinds=None,
+                transitive=False,  # Direct callers only for speed
+                intent=Intent.PLAN,
+                limit=5,
+            )
+
+            # Get impact (tests, dependents)
+            impact = self.impact_of(
+                node.qualified_name,
+                intent=Intent.PLAN,
+                limit=10,
+            )
+
+            enriched_local.append({
+                "symbol": node.qualified_name,
+                "kind": node.kind.value,
+                "lang": node.lang,
+                "at": f"{node.file_path}:{node.span.start_line}",
+                "source": sources.get(node.id),
+                "signature": node.signature,
+                "docstring": (node.docstring or "").split("\n")[0],
+                "entry_point": node.has(NodeFlags.ENTRY_POINT),
+                "callers": callers_result.items if callers_result.items else [],
+                "impact_summary": {
+                    "tests_affected": len([i for i in impact.items if "test" in str(i).lower()]),
+                    "dependents_count": len(impact.items or []),
+                },
+            })
+
+        # Format external usage
+        external_formatted = []
+        for usage in external_usages[:budget.limit]:
+            external_formatted.append({
+                "symbol": usage["symbol_name"],
+                "usage_type": usage["usage_type"],
+                "file": usage["file_path"],
+                "line": usage["start_line"],
+                "context": usage["context_line"],
+            })
+
+        # Suggest follow-ups based on what we found
+        next_explores = []
+        if not local_symbols and query_intent.value == "external_usage":
+            # For external packages, suggest exploring component parts
+            tokens = query.split()
+            if tokens:
+                next_explores.extend([
+                    f"explore('{tokens[0]}')",
+                    f"explore('imports of {tokens[0]}')",
+                ])
+        elif local_symbols:
+            # Suggest exploring related symbols
+            for sym in local_symbols[:2]:
+                next_explores.extend([
+                    f"explore('{sym.qualified_name}')",
+                    f"trace_flow('{sym.qualified_name}')",
+                ])
+        next_explores = next_explores[:5]
+
+        # Bundle everything
+        result_item = {
+            "query_intent": query_intent.value,
+            "query_context": context,
+            "local_defined": enriched_local,
+            "external_usage": external_formatted,
+            "similar_patterns": similar,
+            "suggestions": {
+                "next_queries": next_explores,
+                "note": (
+                    "Local symbols above include source code, callers, and impact summary. "
+                    "External usage shows where packages are used in this codebase."
+                ),
+            },
+        }
+
+        return QueryResult.of(
+            "explore", [result_item],  # Single bundled result
+            budget=budget, envelope=envelope,
+            extra={
+                "intent_matched": query_intent.value,
+                "local_count": len(enriched_local),
+                "external_count": len(external_formatted),
+                "patterns_found": len(similar),
+            }
+        )
+
     # ---- 12. coverage_report ---------------------------------------------
 
     def coverage_report(self, scope: str | None = None) -> QueryResult:
