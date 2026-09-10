@@ -170,6 +170,7 @@ class Indexer:
 
         observations: list[Observation] = []
         lang_of_file: dict[str, str] = {}
+        usage_sites: list[dict[str, Any]] = []  # For Phase 3: usage site extraction
 
         for rel_path, content, dialect in self._walk():
             report.files_seen += 1
@@ -201,6 +202,29 @@ class Indexer:
             )
             observations.append(observation)
             lang_of_file[rel_path] = lang
+
+            # Phase 3: Extract usage sites for external symbol tracking
+            if lang == "python":  # Expand to other languages as needed
+                from .extract.usage_extractor import extract_usages
+                try:
+                    source_str = content.decode("utf-8", errors="ignore")
+                    sites = extract_usages(rel_path, source_str)
+                    for site in sites:
+                        usage_sites.append({
+                            "symbol_name": site.symbol_name,
+                            "usage_type": site.usage_type,
+                            "file_path": rel_path,
+                            "start_line": site.line_number,
+                            "end_line": site.line_number,
+                            "start_byte": 0,  # Approximate
+                            "end_byte": len(site.context_line),
+                            "context_line": site.context_line,
+                            "context_before": site.context_before,
+                            "context_after": site.context_after,
+                        })
+                except Exception:
+                    # Silently skip usage extraction errors
+                    pass
             report.languages[lang] = report.languages.get(lang, 0) + 1
 
             if observation.file.parse_status is ParseStatus.SKIPPED:
@@ -229,7 +253,7 @@ class Indexer:
 
         store = self._write(
             db_path or self.root / ".lineagelens" / DB_FILENAME,
-            services, observations, resolved,
+            services, observations, resolved, usage_sites=usage_sites,
         )
 
         counts = store.counts()
@@ -260,7 +284,7 @@ class Indexer:
 
     # ---- pieces -----------------------------------------------------------
 
-    def _write(self, db_path, services, observations, resolved) -> GraphStore:
+    def _write(self, db_path, services, observations, resolved, usage_sites=None) -> GraphStore:  # noqa: F821
         """Persist everything in a handful of batched statements.
 
         Writes are batched rather than per file. Writing per file issued three
@@ -305,6 +329,29 @@ class Indexer:
                 for path, coverage in resolved.coverage.items()
                 if path in file_ids
             ])
+
+            # Phase 3: Write usage sites for external symbol tracking
+            if usage_sites:
+                for site in usage_sites:
+                    file_id = file_ids.get(site["file_path"])
+                    if file_id:
+                        try:
+                            store.add_usage_site(
+                                symbol_name=site["symbol_name"],
+                                usage_type=site["usage_type"],
+                                file_id=file_id,
+                                file_path=site["file_path"],
+                                start_line=site["start_line"],
+                                end_line=site["end_line"],
+                                start_byte=site["start_byte"],
+                                end_byte=site["end_byte"],
+                                context_line=site["context_line"],
+                                context_before=site.get("context_before"),
+                                context_after=site.get("context_after"),
+                            )
+                        except Exception:
+                            # Skip individual usage site errors
+                            pass
         return store
 
     def _walk(self) -> Iterator[tuple[str, bytes, str]]:
