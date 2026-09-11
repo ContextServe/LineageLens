@@ -619,36 +619,67 @@ class GraphStore:
 
         BM25-ranked, replacing a linear substring scan that broke at the limit
         and therefore returned the first N matches in dict order.
+
+        Uses AND-then-OR fallback for multi-term queries:
+        1. First tries AND semantics (all terms must be in same document)
+        2. If AND returns 0 results, falls back to OR (any term matches)
+        This prevents multi-term queries from returning 0 hits when terms don't co-occur.
         """
         match = _fts_query(query)
         if match is None:
             return []
-        clauses = ["nodes_fts MATCH ?"]
-        params: list[Any] = [match]
+
+        # Build base clauses (kinds, lang, service_id filters)
+        base_clauses = []
+        base_params: list[Any] = []
         if kinds:
             kind_list = [str(k) for k in kinds]
-            clauses.append(f"n.kind IN ({','.join('?' * len(kind_list))})")
-            params.extend(kind_list)
+            base_clauses.append(f"n.kind IN ({','.join('?' * len(kind_list))})")
+            base_params.extend(kind_list)
         if lang:
-            clauses.append("n.lang = ?")
-            params.append(lang)
+            base_clauses.append("n.lang = ?")
+            base_params.append(lang)
         if service_id:
-            clauses.append("n.service_id = ?")
-            params.append(service_id)
-        params.append(limit)
+            base_clauses.append("n.service_id = ?")
+            base_params.append(service_id)
+
+        # Try AND first (exact multi-term match)
+        and_clauses = ["nodes_fts MATCH ?"] + base_clauses
+        and_params = [match] + base_params + [limit]
 
         # `clauses` holds only literals defined above; all values are in `params`.
         rows = self.conn.execute(
             f"""
             SELECT n.* FROM nodes_fts
             JOIN nodes n ON n.id = nodes_fts.node_id
-            WHERE {' AND '.join(clauses)}
+            WHERE {' AND '.join(and_clauses)}
             ORDER BY bm25(nodes_fts, 10.0, 5.0, 1.0, 2.0), n.id
             LIMIT ?
             """,  # noqa: S608
-            params,
+            and_params,
         )
-        return [_node_from_row(r) for r in rows]
+        results = [_node_from_row(r) for r in rows]
+
+        # If AND returned 0 results and query has multiple terms, try OR
+        if not results and " " in query:
+            or_match = _fts_query_or(query)  # Convert to OR semantics
+            if or_match:
+                or_clauses = ["nodes_fts MATCH ?"] + base_clauses
+                or_params = [or_match] + base_params + [limit]
+
+                rows = self.conn.execute(
+                    f"""
+                    SELECT n.* FROM nodes_fts
+                    JOIN nodes n ON n.id = nodes_fts.node_id
+                    WHERE {' AND '.join(or_clauses)}
+                    ORDER BY bm25(nodes_fts, 10.0, 5.0, 1.0, 2.0), n.id
+                    LIMIT ?
+                    """,  # noqa: S608
+                    or_params,
+                )
+                results = [_node_from_row(r) for r in rows]
+
+        return results
 
     def unresolved_for_file(self, file_path: str) -> list[UnresolvedRef]:
         rows = self.conn.execute(
@@ -949,7 +980,7 @@ def _file_from_row(row: sqlite3.Row) -> FileRecord:
 
 
 def _fts_query(text: str) -> str | None:
-    """Turn arbitrary user text into a safe FTS5 MATCH expression.
+    """Turn arbitrary user text into a safe FTS5 MATCH expression with AND semantics.
 
     FTS5 treats ``-``, ``*``, ``"``, ``:``, ``(``, ``)`` and ``^`` as syntax, so
     an identifier like ``get-user`` or ``foo:bar`` is a parse error rather than a
@@ -959,6 +990,8 @@ def _fts_query(text: str) -> str | None:
 
     A prefix wildcard is appended outside the quotes, which is what a symbol
     search wants: ``load_gr`` should find ``load_graph``.
+
+    Multiple tokens are AND'ed together (default FTS5 behavior).
 
     Returns ``None`` when nothing searchable remains. There is no MATCH
     expression that reliably means "match nothing" -- ``""`` is a syntax error
@@ -970,3 +1003,22 @@ def _fts_query(text: str) -> str | None:
     if not tokens:
         return None
     return " ".join(f'"{t}"*' for t in tokens)
+
+
+def _fts_query_or(text: str) -> str | None:
+    """Turn arbitrary user text into a safe FTS5 MATCH expression with OR semantics.
+
+    Like _fts_query, but tokens are OR'ed together instead of AND'ed.
+    Used as a fallback when AND semantics return 0 results.
+
+    Example:
+        "ServiceConfig export service" → ("ServiceConfig"* OR "export"* OR "service"*)
+
+    This allows multi-term queries to match documents containing ANY of the terms,
+    not requiring ALL terms to co-occur.
+    """
+    separators = str.maketrans(dict.fromkeys(':-*()^"', " "))
+    tokens = [t for t in text.translate(separators).split() if t]
+    if not tokens:
+        return None
+    return " OR ".join(f'"{t}"*' for t in tokens)
