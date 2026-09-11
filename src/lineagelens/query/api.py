@@ -93,6 +93,21 @@ def _coverage(node: Node, tokens: Sequence[str]) -> int:
     return sum(1 for t in set(tokens) if t in haystack)
 
 
+#: Edges that answer "what is this a kind of, and what else is". Absent these,
+#: a measured agent spent its second and third ``explore`` calls asking
+#: "AbstractServerTransportListener getStreamingDecoder" and then literally
+#: "class GrpcHttp2ServerTransportListener extends ..." -- the supertype was
+#: the one thing it could not get, and each retry rewrote the whole context.
+_EXPLORE_TYPE_EDGES = frozenset({"INHERITS", "IMPLEMENTS", "OVERRIDES"})
+_EXPLORE_MAX_SIBLINGS = 6
+
+
+def _leaf(qualified_name: str) -> str:
+    """The last readable segment of a qualified name."""
+    tail = qualified_name.rsplit("#", 1)[-1]
+    return tail.rsplit("/", 1)[-1] or qualified_name
+
+
 def _blast_radius(reports: Sequence[Any]) -> dict[str, Any]:
     """Dependents and tests from ``impact_of`` reports.
 
@@ -236,6 +251,33 @@ class QueryEngine:
         if not budget.wants_source(intent):
             return {}
         return source_for(self.store, nodes, self.project_root)
+
+    def _type_hierarchy(self, node: Node) -> list[str]:
+        """Supertypes and siblings of one symbol, as readable relations.
+
+        Both directions, because both drive edits: the supertype says where the
+        inherited behaviour is written, and the siblings say who else
+        implements the contract and so needs the same change.
+        """
+        lines: list[str] = []
+        name = _leaf(node.qualified_name)
+
+        for edge in self.store.edges_from(node.id, _EXPLORE_TYPE_EDGES):
+            target = self.store.get_node(edge.dst)
+            if target is not None:
+                lines.append(f"{name} {edge.kind.value.lower()} {_leaf(target.qualified_name)}")
+
+        siblings = self.store.edges_to(node.id, _EXPLORE_TYPE_EDGES)
+        others = []
+        for edge in siblings[:_EXPLORE_MAX_SIBLINGS]:
+            source = self.store.get_node(edge.src)
+            if source is not None:
+                others.append(_leaf(source.qualified_name))
+        if others:
+            more = len(siblings) - len(others)
+            tail = f" +{more} more" if more > 0 else ""
+            lines.append(f"{name} <- {', '.join(others)}{tail}")
+        return lines
 
     def _analyze_empty_search(self, query: str, query_intent: "QueryIntent") -> dict[str, Any]:  # noqa: F821
         """Analyze why a search returned empty and suggest next steps."""
@@ -759,7 +801,9 @@ class QueryEngine:
 
         enriched_local: list[dict[str, Any]] = []
         chains: list[str] = []
+        hierarchy: list[str] = []
         for node in local_symbols:
+            hierarchy.extend(self._type_hierarchy(node))
             callers_result = self.callers_of(
                 node.qualified_name,
                 kinds=None,
@@ -801,6 +845,7 @@ class QueryEngine:
         # Dedupe preserving first-seen order; the same chain surfaces from both
         # ends of an edge when both symbols are in the deep set.
         call_flow = list(dict.fromkeys(chains))[:_EXPLORE_MAX_CHAINS]
+        type_hierarchy = list(dict.fromkeys(hierarchy))[:_EXPLORE_MAX_CHAINS]
 
         result_item = {
             "query_intent": query_intent.value,
@@ -809,6 +854,7 @@ class QueryEngine:
             "returned_in_depth": len(enriched_local),
             "local_defined": enriched_local,
             "call_flow": call_flow,
+            "type_hierarchy": type_hierarchy,
             "external_usage": external_formatted,
             # Not a list of follow-up queries. Naming further calls invites
             # them, and turn count is what this API exists to cut.
