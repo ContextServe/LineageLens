@@ -26,6 +26,95 @@ from .budget import Budget, Envelope, QueryResult
 from .traverse import Traverser, kinds_for_intent, source_for
 
 
+#: How many symbols ``explore`` returns with source and flow attached.
+_EXPLORE_DEEP_N = 8
+_EXPLORE_MAX_CHAINS = 24
+
+#: Rank tiers for ``explore``, lowest first. BM25 alone ranks a field named
+#: ``streamingDecoder`` above the ``StreamingDecoder`` interface, and on a
+#: measured Dubbo query 24 of 40 hits were fields, parameters and variables --
+#: 60% of the payload spent on things that have no body to read. Callables and
+#: types come first because they are what a change actually edits.
+_EXPLORE_KIND_RANK = {
+    "method": 0, "function": 0,
+    "class": 0, "interface": 0, "struct": 0, "trait": 0,
+    "enum": 1, "annotation": 1, "constructor": 1,
+    "property": 2, "type_alias": 2, "contract": 2,
+    "module": 3, "file": 3, "package": 3, "service": 3,
+    "constant": 4, "enum_member": 4,
+    "field": 5, "parameter": 6, "variable": 6,
+}
+_EXPLORE_UNRANKED = 3
+
+#: Kinds worth returning a body for. A field, parameter or variable has no body
+#: -- its "source" is its own declaration line, which teaches the agent nothing
+#: and costs a row that could have held a method. Demoting them was not enough:
+#: because "streamingdecoder" is a substring of "grpcstreamingdecoder", every
+#: field in that class scored two query terms for free and outranked the class
+#: the change touches. So they are excluded from the deep set, not just sorted
+#: below it; they still count toward ``matched``.
+_EXPLORE_DEEP_KINDS = frozenset({
+    "method", "function", "class", "interface", "struct", "trait",
+    "enum", "annotation", "constructor", "property", "type_alias", "contract",
+})
+
+#: Closes the loop rather than opening it. The source above is verbatim, so
+#: re-reading the file is waste; and a second ``explore`` costs one turn where
+#: fanning out to the primitives costs one per symbol.
+_EXPLORE_NOTE = (
+    "The source above is verbatim and line-numbered -- treat it as already read; "
+    "do not open these files. call_flow holds the caller chains and blast_radius "
+    "the dependents, so callers_of/impact_of would repeat work already done here. "
+    "If something is missing, call explore again with the specific symbol names "
+    "rather than fanning out to the single-symbol tools."
+)
+
+
+def _kind_rank(node: Node) -> int:
+    return _EXPLORE_KIND_RANK.get(node.kind.value, _EXPLORE_UNRANKED)
+
+
+def _query_tokens(query: str) -> list[str]:
+    separators = str.maketrans(dict.fromkeys(':-*()^"_.#/', " "))
+    return [t for t in query.translate(separators).lower().split() if len(t) > 2]
+
+
+def _coverage(node: Node, tokens: Sequence[str]) -> int:
+    """How many distinct query terms this symbol accounts for.
+
+    ``search`` falls back from AND to OR when AND finds nothing, which buys
+    recall and spends precision: on a five-term Dubbo query the term "callback"
+    alone lifted ``CallbackServiceCodec`` -- ten hits, but one term out of five
+    -- above the file the change actually touches, which covered three. Ranking
+    on distinct terms covered restores what AND provided without reinstating
+    its all-or-nothing failure.
+    """
+    haystack = f"{node.qualified_name} {node.file_path}".lower()
+    return sum(1 for t in set(tokens) if t in haystack)
+
+
+def _blast_radius(reports: Sequence[Any]) -> dict[str, Any]:
+    """Dependents and tests from ``impact_of`` reports.
+
+    Reads the report's ``in_process`` entries rather than string-matching its
+    ``repr``, which counted the word "test" anywhere in the payload -- including
+    in the target's own path.
+    """
+    dependents: list[str] = []
+    for report in reports or []:
+        for entry in getattr(report, "in_process", None) or []:
+            node = entry.get("node") if isinstance(entry, dict) else None
+            if node:
+                dependents.append(node)
+    unique = list(dict.fromkeys(dependents))
+    tests = [d for d in unique if "test" in d.rsplit("/", 1)[-1].lower()]
+    return {
+        "dependents": len(unique),
+        "tests": len(tests),
+        "test_symbols": tests[:5],
+    }
+
+
 class QueryEngine:
     """Answers questions about one indexed project."""
 
@@ -630,42 +719,61 @@ class QueryEngine:
         from .intent import detect_intent
 
         resolved, budget, envelope = self._prepare(intent, Intent.PLAN, limit=limit)
-
-        # Detect what we're searching for
         query_intent = detect_intent(query, self.store)
 
-        # Multi-strategy search
-        local_symbols = self.store.search(query, limit=budget.limit // 2)
+        # Depth, not breadth. A measured agent transcript showed 30 shallow rows
+        # (no source, no flow) forced 5 get_symbol + 2 callers_of + 2 impact_of
+        # follow-ups, and each follow-up re-reads the whole conversation. Fewer
+        # symbols carrying source and flow answers in one turn instead.
+        deep_n = _EXPLORE_DEEP_N if limit is None else max(1, min(limit, 20))
+
+        # Cast a wide net for ranking, then keep only the top slice. The net is
+        # wide because `search` ranks by BM25 alone, which puts a field named
+        # `streamingDecoder` above the `StreamingDecoder` interface.
+        candidates = self.store.search(query, limit=max(40, deep_n * 5))
+        tokens = _query_tokens(query)
+        readable = [
+            (i, n) for i, n in enumerate(candidates)
+            if n.kind.value in _EXPLORE_DEEP_KINDS
+        ]
+        ranked = sorted(
+            readable,
+            key=lambda pair: (
+                -_coverage(pair[1], tokens),  # most query terms accounted for
+                _kind_rank(pair[1]),          # editable code over values
+                pair[0],                      # BM25 order within a tier
+            ),
+        )
+        local_symbols = [node for _, node in ranked[:deep_n]]
+
         external_usages = (
             self.store.find_usage(query, limit=budget.limit // 2)
-            if not local_symbols
+            if not candidates
             else []
         )
-        similar = (
-            self.similar_flows(query, limit=3).results if local_symbols else []
-        )
 
-        # Enrich local symbols with source + callers + tests
-        enriched_local = []
+        # Source unconditionally, whatever the caller's intent. At PLAN the
+        # budget sets include_source=False, which made every `source` field
+        # None -- the single reason the agent had to call get_symbol at all.
+        sources = source_for(self.store, local_symbols, self.project_root)
+
+        enriched_local: list[dict[str, Any]] = []
+        chains: list[str] = []
         for node in local_symbols:
-            # Get source code
-            sources = self._sources([node], resolved, budget)
-
-            # Get direct callers
             callers_result = self.callers_of(
                 node.qualified_name,
                 kinds=None,
-                transitive=False,  # Direct callers only for speed
+                transitive=False,
                 intent=Intent.PLAN,
                 limit=5,
             )
+            impact = self.impact_of(node.qualified_name, intent=Intent.PLAN, limit=10)
 
-            # Get impact (tests, dependents)
-            impact = self.impact_of(
-                node.qualified_name,
-                intent=Intent.PLAN,
-                limit=10,
-            )
+            # `callers_of` returns whole paths; the `chain` string is the call
+            # flow the agent was reconstructing by hand, so lift it out.
+            for path in callers_result.results or []:
+                if isinstance(path, dict) and path.get("chain"):
+                    chains.append(path["chain"])
 
             enriched_local.append({
                 "symbol": node.qualified_name,
@@ -676,57 +784,35 @@ class QueryEngine:
                 "signature": node.signature,
                 "docstring": (node.docstring or "").split("\n")[0],
                 "entry_point": node.has(NodeFlags.ENTRY_POINT),
-                "callers": callers_result.results if callers_result.results else [],
-                "impact_summary": {
-                    "tests_affected": len([i for i in impact.results if "test" in str(i).lower()]),
-                    "dependents_count": len(impact.results or []),
-                },
+                "blast_radius": _blast_radius(impact.results),
             })
 
-        # Format external usage
-        external_formatted = []
-        for usage in external_usages[:budget.limit]:
-            external_formatted.append({
+        external_formatted = [
+            {
                 "symbol": usage["symbol_name"],
                 "usage_type": usage["usage_type"],
                 "file": usage["file_path"],
                 "line": usage["start_line"],
                 "context": usage["context_line"],
-            })
+            }
+            for usage in external_usages[: budget.limit]
+        ]
 
-        # Suggest follow-ups based on what we found
-        next_explores = []
-        if not local_symbols and query_intent.value == "external_usage":
-            # For external packages, suggest exploring component parts
-            tokens = query.split()
-            if tokens:
-                next_explores.extend([
-                    f"explore('{tokens[0]}')",
-                    f"explore('imports of {tokens[0]}')",
-                ])
-        elif local_symbols:
-            # Suggest exploring related symbols
-            for sym in local_symbols[:2]:
-                next_explores.extend([
-                    f"explore('{sym.qualified_name}')",
-                    f"trace_flow('{sym.qualified_name}')",
-                ])
-        next_explores = next_explores[:5]
+        # Dedupe preserving first-seen order; the same chain surfaces from both
+        # ends of an edge when both symbols are in the deep set.
+        call_flow = list(dict.fromkeys(chains))[:_EXPLORE_MAX_CHAINS]
 
-        # Bundle everything
         result_item = {
             "query_intent": query_intent.value,
             "query_context": context,
+            "matched": len(candidates),
+            "returned_in_depth": len(enriched_local),
             "local_defined": enriched_local,
+            "call_flow": call_flow,
             "external_usage": external_formatted,
-            "similar_patterns": similar,
-            "suggestions": {
-                "next_queries": next_explores,
-                "note": (
-                    "Local symbols above include source code, callers, and impact summary. "
-                    "External usage shows where packages are used in this codebase."
-                ),
-            },
+            # Not a list of follow-up queries. Naming further calls invites
+            # them, and turn count is what this API exists to cut.
+            "note": _EXPLORE_NOTE,
         }
 
         return QueryResult.of(
@@ -736,7 +822,7 @@ class QueryEngine:
                 "intent_matched": query_intent.value,
                 "local_count": len(enriched_local),
                 "external_count": len(external_formatted),
-                "patterns_found": len(similar),
+                "chains_found": len(call_flow),
             }
         )
 

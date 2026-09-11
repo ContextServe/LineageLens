@@ -212,7 +212,12 @@ def create_server(root: Path | None = None) -> Any:
         max_depth: int | None = None,
         **_: Any,
     ) -> dict[str, Any]:
-        """Who reaches this symbol, each with the chain by which it does.
+        """Who reaches ONE symbol, each with the chain by which it does.
+
+        Narrow follow-up. explore() already returns the caller chains for
+        every symbol it matched, so calling this per symbol repeats work and
+        spends a turn each time. Use it when you need a deeper or
+        kind-filtered walk than explore's call_flow gives you.
 
         Every result carries its own route, so this answers "how is this
         called" and not merely "what can reach it". Set transitive=false for
@@ -252,6 +257,10 @@ def create_server(root: Path | None = None) -> Any:
         **_: Any,
     ) -> dict[str, Any]:
         """What changing something affects. Accepts a symbol or `file.py:412`.
+
+        For a plain symbol, explore() already reports this as blast_radius on
+        every match it returns; prefer it unless you need the `file:line` form
+        below, which this tool alone supports.
 
         A `file:line` target is the one to use when fixing a bug: it reports
         the operations written on that line, classifies the edit
@@ -360,27 +369,19 @@ def create_server(root: Path | None = None) -> Any:
         limit: int | None = None,
         **_: Any,
     ) -> dict[str, Any]:
-        """Ranked search over name, qualified name, docstring and signature.
+        """Name lookup only. Prefer explore() unless you know the exact name.
 
-        ⚠️  IMPORTANT: This searches only SYMBOLS DEFINED IN THIS PROJECT.
+        Returns matches WITHOUT source, so every hit you care about costs a
+        further get_symbol call, and each call re-reads the whole conversation.
+        explore() takes the same query and returns the bodies, the caller
+        chains and the blast radius in one turn.
 
-        For external packages (anthropic.Anthropic, openai.OpenAI, etc.),
-        use explore() instead — it shows where they're used in this codebase.
+        Searches only symbols defined in this project; for external packages
+        (anthropic.Anthropic, openai.OpenAI) explore() reports usage sites.
 
         BM25-ranked. kinds filters by node kind: class, interface, enum,
         struct, trait, function, method, constructor, property, field,
         parameter, variable, constant, module, contract.
-
-        **Returns:**
-        - If symbols found: matched results with source, metadata, and usage
-        - If empty: suggestions for alternative searches + tool recommendations
-
-        **Examples:**
-        - search('ChatAnthropic') → finds locally-defined class
-        - search('with_raw_response anthropic') → 0 hits + suggests:
-            * search('with_raw_response')
-            * search('anthropic')
-            * explore('with_raw_response anthropic')  ← better for external APIs
         """
         return engine().search(
             query, kinds=kinds, lang=lang, service=service,
@@ -396,33 +397,42 @@ def create_server(root: Path | None = None) -> Any:
         limit: int | None = None,
         **_: Any,
     ) -> dict[str, Any]:
-        """One-shot: What code is relevant to this query?
+        """START HERE. One call: the code relevant to a question, with bodies.
 
-        Returns everything in one response:
-        - Local symbols with source code (no Read() needed)
-        - How external packages are used in this codebase
-        - Blast radius (tests, dependents, callers)
-        - Suggested follow-up queries
+        Pass every name you care about in a single query -- it is scored on how
+        many of your terms each symbol accounts for, so more terms sharpen the
+        answer rather than narrowing it to nothing.
 
-        This is the primary tool to use when you need to understand code quickly.
-        Use search() only for specific symbol lookup by name.
+        Answers in one turn what search + get_symbol + callers_of + impact_of
+        answer in a dozen. That matters because each call re-reads the entire
+        conversation, so cost grows with the square of the number of calls, not
+        with the size of any one answer.
 
         Args:
-            query: What you're looking for (e.g., "gateway metadata")
-            context: Optional context (e.g., "I'm adding response header support")
-            intent: "plan" (default, cheap) or "precise" (full source)
-            limit: Max results per category
-
-        **Examples:**
-            explore("with_raw_response anthropic client")
-            explore("ChatAnthropic._create", context="I need to add middleware")
-            explore("how anthropic gets used")
+            query: The names and words at issue, together, e.g.
+                "GrpcStreamingDecoder LazyFindMethodListener close StreamingDecoder"
+            context: Optional note on what you intend to change
+            intent: "plan" (default) or "precise"
+            limit: How many symbols to return in depth (default 8, max 20)
 
         **What you get back:**
-            - local_defined: Internal symbols with full context
-            - external_usage: Where external packages are called
-            - similar_patterns: Similar flows in the codebase
-            - suggestions: What to explore next
+            - local_defined: the matched symbols, each with verbatim
+              line-numbered `source` -- treat these files as already read --
+              plus signature, location and `blast_radius` (dependent and test
+              counts, the impact_of answer)
+            - call_flow: the caller chains among them, the callers_of answer
+            - external_usage: where third-party packages are used, when the
+              query names one
+            - matched / returned_in_depth: how many hit, how many came back
+              deep, so a short list is never mistaken for the whole truth
+
+        Fields, parameters and variables are counted in `matched` but never
+        returned in depth: they have no body, and a row spent on one is a row
+        not spent on a method.
+
+        If the answer is incomplete, call explore again with the specific
+        names. A second explore costs one turn; fanning out to the
+        single-symbol tools costs one per symbol.
         """
         return engine().explore(query, context=context, intent=intent, limit=limit).as_dict()
 
@@ -431,7 +441,12 @@ def create_server(root: Path | None = None) -> Any:
     async def get_symbol(
         symbol: str, intent: str | None = None, **_: Any
     ) -> dict[str, Any]:
-        """One symbol with its signature, docstring, flags and verbatim source.
+        """ONE symbol with its signature, docstring, flags and verbatim source.
+
+        Narrow follow-up, for a name you already hold. explore() returns the
+        same line-numbered source for every symbol it matched, so a run of
+        get_symbol calls is the expensive way to reach the same place: each
+        one re-reads the whole conversation.
 
         At intent="precise" (the default) the response includes the
         line-numbered source, so there is no need to read the file.
