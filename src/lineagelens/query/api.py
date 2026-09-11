@@ -642,7 +642,7 @@ class QueryEngine:
             else []
         )
         similar = (
-            self.similar_flows(query, limit=3).items if local_symbols else []
+            self.similar_flows(query, limit=3).results if local_symbols else []
         )
 
         # Enrich local symbols with source + callers + tests
@@ -676,10 +676,10 @@ class QueryEngine:
                 "signature": node.signature,
                 "docstring": (node.docstring or "").split("\n")[0],
                 "entry_point": node.has(NodeFlags.ENTRY_POINT),
-                "callers": callers_result.items if callers_result.items else [],
+                "callers": callers_result.results if callers_result.results else [],
                 "impact_summary": {
-                    "tests_affected": len([i for i in impact.items if "test" in str(i).lower()]),
-                    "dependents_count": len(impact.items or []),
+                    "tests_affected": len([i for i in impact.results if "test" in str(i).lower()]),
+                    "dependents_count": len(impact.results or []),
                 },
             })
 
