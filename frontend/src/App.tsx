@@ -39,6 +39,16 @@ export function App() {
   const [testFilter, setTestFilter] = useState<'all' | 'source' | 'tests'>('all')
   const [verdictFilter, setVerdictFilter] = useState<VerdictFilter>('all')
 
+  const [legendFilters, setLegendFilters] = useState<Record<string, boolean>>({
+    entry_point: true,
+    risk: true,
+    dead: true,
+    probably_dead: true,
+    test_only: true,
+    dynamic_only: true,
+    duplicate: true,
+  })
+
   const [filters, setFilters] = useState<ScopeFilters>({
     showModules: true,
     showClasses: true,
@@ -68,6 +78,13 @@ export function App() {
     }
   }
 
+  function handleToggleLegendFilter(key: string) {
+    setLegendFilters(prev => ({
+      ...prev,
+      [key]: !prev[key],
+    }))
+  }
+
   function getFilteredGraphData(): GraphViewData | null {
     if (!graphData) return null
 
@@ -82,7 +99,17 @@ export function App() {
       const passesVerdictFilter =
         verdictFilter === 'all' || !node.verdict || node.verdict === verdictFilter
 
-      if (passesTestFilter && passesVerdictFilter) {
+      // Interactive legend filters
+      let passesLegendFilter = true
+      if (legendFilters.entry_point === false && node.entry_point) passesLegendFilter = false
+      if (legendFilters.risk === false && node.has_resiliency_flag) passesLegendFilter = false
+      if (legendFilters.dead === false && node.verdict === 'dead') passesLegendFilter = false
+      if (legendFilters.probably_dead === false && node.verdict === 'probably_dead') passesLegendFilter = false
+      if (legendFilters.test_only === false && node.verdict === 'test_only') passesLegendFilter = false
+      if (legendFilters.dynamic_only === false && node.verdict === 'dynamic_only') passesLegendFilter = false
+      if (legendFilters.duplicate === false && node.duplicate_name) passesLegendFilter = false
+
+      if (passesTestFilter && passesVerdictFilter && passesLegendFilter) {
         nodesToKeep.add(node.id)
       }
     }
@@ -135,10 +162,16 @@ export function App() {
             onTestFilterChange={setTestFilter}
             verdictFilter={verdictFilter}
             onVerdictFilterChange={setVerdictFilter}
+            legendFilters={legendFilters}
+            onToggleLegendFilter={handleToggleLegendFilter}
+            nodes={graphData?.nodes || []}
+            onSelectSymbol={setSelectedSymbol}
+            selectedSymbol={selectedSymbol}
+            onClearSelection={() => setSelectedSymbol(null)}
           />
 
           {activeGraph && (
-            <>
+            <div className="canvas-wrapper">
               <HUDPanels
                 nodes={activeGraph.nodes}
                 edges={activeGraph.edges}
@@ -154,7 +187,7 @@ export function App() {
                 onSelectSymbol={setSelectedSymbol}
                 filters={filters}
               />
-            </>
+            </div>
           )}
         </main>
 

@@ -1,27 +1,34 @@
+.toolbar-container {
+  position: relative;
+  z-index: 150;
+  background: #0f1621;
+  border-bottom: 1px solid #29364d;
+}
+
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 12px 16px;
-  background: #0f1621;
-  border-bottom: 1px solid #29364d;
+  gap: 12px;
+  padding: 10px 16px;
   flex-wrap: wrap;
 }
 
 .toolbar-group {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
 }
 
 .toolbar button {
-  padding: 8px 12px;
+  padding: 6px 12px;
   background: #182337;
   color: #bcd7ff;
   border: 1px solid #29364d;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
   white-space: nowrap;
+  transition: all 0.15s ease;
 }
 
 .toolbar button:hover {
@@ -29,8 +36,93 @@
   border-color: #3a4a68;
 }
 
-.toolbar button:active {
-  background: #1a2635;
+/* Integrated Search Input */
+.toolbar-search-wrapper {
+  position: relative;
+  flex: 1;
+  min-width: 240px;
+  max-width: 360px;
+}
+
+.toolbar-search-input {
+  width: 100%;
+  padding: 6px 30px 6px 10px;
+  background: #182337;
+  border: 1px solid #3a4a68;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+.toolbar-search-input:focus {
+  border-color: #3b82f6;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.search-clear-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none !important;
+  border: none !important;
+  color: #98a7bd !important;
+  font-size: 14px;
+  padding: 0 4px !important;
+  cursor: pointer;
+}
+
+.toolbar-search-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  background: #0f1419;
+  border: 1px solid #3a4a68;
+  border-radius: 6px;
+  list-style: none;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  z-index: 200;
+}
+
+.toolbar-search-dropdown li {
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  border-bottom: 1px solid #182337;
+}
+
+.toolbar-search-dropdown li:hover {
+  background: #182337;
+}
+
+.selected-target-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: rgba(59, 130, 246, 0.2);
+  border: 1px solid #3b82f6;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #bcd7ff;
+}
+
+.btn-clear-target {
+  background: #374151 !important;
+  color: #fff !important;
+  border: none !important;
+  padding: 2px 6px !important;
+  border-radius: 4px !important;
+  cursor: pointer;
 }
 
 /* Segmented control styling */
@@ -49,8 +141,9 @@
   border-radius: 0;
   border-right: 1px solid #29364d;
   background: transparent;
-  padding: 8px 12px;
+  padding: 6px 10px;
   margin: 0;
+  font-size: 11px;
 }
 
 .segmented-control button:last-child {
@@ -62,72 +155,73 @@
   color: white;
 }
 
-.segmented-control button:hover:not(.active) {
-  background: #1f2d3f;
-}
-
-/* Legend */
-.toolbar-legend {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  padding: 0 8px;
-  border-left: 1px solid #29364d;
-  border-right: 1px solid #29364d;
-}
-
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: #98a7bd;
-}
-
-.color-box {
-  width: 12px;
-  height: 12px;
-  border-radius: 2px;
-  flex-shrink: 0;
-}
-
-.color-box.entry-point {
-  background: #3b82f6;
-}
-
-.color-box.risk {
-  background: #f59e0b;
-}
-
-.color-box.dead-code {
-  background: #ef4444;
-}
-
-.color-box.duplicate {
-  border: 2px solid #8b5cf6;
-  background: transparent;
-}
-
-/* Reachability verdicts. Only `dead` is red: `probably_dead` and `test_only` are
-   real findings but not safe to act on unchecked, and painting them the same is
-   what made the previous single boolean flag misleading. */
-.color-box.probably-dead {
-  background: #f97316;
-}
-
-.color-box.test-only {
-  background: #a855f7;
-}
-
-.color-box.dynamic-only {
-  background: #0ea5e9;
-}
-
 .verdict-filter {
   background: #1f2937;
   color: #e5e7eb;
   border: 1px solid #374151;
   border-radius: 4px;
-  padding: 4px 8px;
-  font-size: 12px;
+  padding: 6px 8px;
+  font-size: 11px;
 }
+
+/* Interactive Legend Bar */
+.toolbar-legend-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: #0d121b;
+  border-top: 1px solid #1e293b;
+  flex-wrap: wrap;
+}
+
+.legend-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  margin-right: 4px;
+}
+
+.legend-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px !important;
+  font-size: 11px !important;
+  background: #182337 !important;
+  border: 1px solid #29364d !important;
+  border-radius: 4px !important;
+  cursor: pointer;
+  color: #cbd5e1 !important;
+  transition: all 0.15s ease !important;
+}
+
+.legend-btn.muted {
+  opacity: 0.35;
+  filter: grayscale(80%);
+}
+
+.legend-btn.active {
+  opacity: 1;
+  border-color: #475569 !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.legend-btn:hover {
+  background: #1e293b !important;
+}
+
+.color-box {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.color-box.entry-point { background: #3b82f6; }
+.color-box.risk { background: #f59e0b; }
+.color-box.dead-code { background: #ef4444; }
+.color-box.probably-dead { background: #f97316; }
+.color-box.test-only { background: #a855f7; }
+.color-box.dynamic-only { background: #0ea5e9; }
+.color-box.duplicate { border: 2px solid #8b5cf6; background: transparent; }
