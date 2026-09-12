@@ -12,24 +12,26 @@ export function DetailPanel({ symbolId }: DetailPanelProps) {
   useEffect(() => {
     if (!symbolId) return
 
+    setSymbol(null)
+    setImpact(null)
+    setReachability(null)
+
     // Fetch symbol details
     fetch(`/api/v1/symbols/${encodeURIComponent(symbolId)}`)
-      .then((r) => r.json())
-      .then(setSymbol)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => data && !data.detail && setSymbol(data))
       .catch(console.error)
 
     // Fetch impact analysis
     fetch(`/api/v1/symbols/${encodeURIComponent(symbolId)}/impact`)
-      .then((r) => r.json())
-      .then(setImpact)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => data && !data.detail && setImpact(data))
       .catch(console.error)
 
-    // Why is this considered reachable? The mechanism matters more than the
-    // verdict: a verdict you cannot audit is one you should not act on.
-    setReachability(null)
+    // Why is this considered reachable?
     fetch(`/api/v1/reachability/${encodeURIComponent(symbolId)}`)
-      .then((r) => r.json())
-      .then(setReachability)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => data && !data.detail && setReachability(data))
       .catch(console.error)
   }, [symbolId])
 
@@ -37,7 +39,7 @@ export function DetailPanel({ symbolId }: DetailPanelProps) {
 
   return (
     <div className="detail-panel">
-      <h2>{symbol.name}</h2>
+      <h2>{symbol.name || symbol.id}</h2>
       <div className="meta">
         <span className="kind">{symbol.kind}</span>
         {symbol.entry_point && <span className="entry-point">{symbol.entry_point}</span>}
@@ -98,7 +100,7 @@ export function DetailPanel({ symbolId }: DetailPanelProps) {
         </div>
       )}
 
-      {impact && (
+      {impact && Array.isArray(impact.affected) && (
         <div className="section">
           <h3>Impact</h3>
           <p>{impact.affected.length} symbols affected if changed</p>

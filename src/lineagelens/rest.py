@@ -261,36 +261,6 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
 
         return GraphView(nodes=nodes, edges=edges)
 
-    # GET /api/v1/symbols/{symbol_id} - full symbol detail
-    @router.get("/symbols/{symbol_id}", response_model=SymbolOut)
-    def get_symbol_detail(symbol_id: str) -> SymbolOut:
-        """Get full details for a symbol."""
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-        symbol = get_symbol(graph, symbol_id)
-        if not symbol:
-            raise HTTPException(status_code=404, detail=f"Symbol not found: {symbol_id}")
-
-        return SymbolOut(
-            id=symbol.id,
-            kind=symbol.kind,
-            name=symbol.name,
-            file=symbol.file,
-            line=symbol.line,
-            end_line=symbol.end_line,
-            module=symbol.module,
-            entry_point=symbol.entry_point,
-            async_=symbol.async_,
-            description=symbol.description,
-            inputs=symbol.inputs,
-            outputs=symbol.outputs,
-            decorators=symbol.decorators,
-        )
-
     # GET /api/v1/search - search symbols
     @router.get("/search", response_model=list[SymbolOut])
     def search(text: str, kind: str | None = None, limit: int = 30) -> list[SymbolOut]:
@@ -321,8 +291,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             for s in results
         ]
 
-    # GET /api/v1/symbols/{symbol_id}/callers - who calls this?
-    @router.get("/symbols/{symbol_id}/callers", response_model=list[RelationOut])
+    # GET /api/v1/symbols/{symbol_id:path}/callers - who calls this?
+    @router.get("/symbols/{symbol_id:path}/callers", response_model=list[RelationOut])
     def callers(symbol_id: str) -> list[RelationOut]:
         """Get all symbols that call this one."""
         try:
@@ -344,8 +314,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             for r in relations
         ]
 
-    # GET /api/v1/symbols/{symbol_id}/callees - what does this call?
-    @router.get("/symbols/{symbol_id}/callees", response_model=list[RelationOut])
+    # GET /api/v1/symbols/{symbol_id:path}/callees - what does this call?
+    @router.get("/symbols/{symbol_id:path}/callees", response_model=list[RelationOut])
     def callees(symbol_id: str) -> list[RelationOut]:
         """Get all symbols this one calls."""
         try:
@@ -367,8 +337,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             for r in relations
         ]
 
-    # GET /api/v1/symbols/{symbol_id}/lineage - transitive call path
-    @router.get("/symbols/{symbol_id}/lineage", response_model=list[LineageStepOut])
+    # GET /api/v1/symbols/{symbol_id:path}/lineage - transitive call path
+    @router.get("/symbols/{symbol_id:path}/lineage", response_model=list[LineageStepOut])
     def lineage(symbol_id: str, direction: str = "forward", max_depth: int = 5) -> list[LineageStepOut]:
         """Get transitive call path (forward or backward)."""
         try:
@@ -388,8 +358,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             for s in steps
         ]
 
-    # GET /api/v1/symbols/{symbol_id}/impact - what breaks if I change this?
-    @router.get("/symbols/{symbol_id}/impact", response_model=ImpactReportOut)
+    # GET /api/v1/symbols/{symbol_id:path}/impact - what breaks if I change this?
+    @router.get("/symbols/{symbol_id:path}/impact", response_model=ImpactReportOut)
     def impact(symbol_id: str, max_depth: int = 10) -> ImpactReportOut:
         """Backward transitive closure: what would be affected by changes here?"""
         try:
@@ -411,6 +381,53 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
                 for s in report.affected
             ],
             affected_entry_points=report.affected_entry_points,
+        )
+
+    # GET /api/v1/symbols/{symbol_id:path} - full symbol detail
+    @router.get("/symbols/{symbol_id:path}", response_model=SymbolOut)
+    def get_symbol_detail(symbol_id: str) -> SymbolOut:
+        """Get full details for a symbol."""
+        try:
+            index = load_index(project)
+            graph = index.graph
+        except GraphNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+        symbol = get_symbol(graph, symbol_id)
+        if not symbol:
+            if symbol_id in graph.containers:
+                c = graph.containers[symbol_id]
+                return SymbolOut(
+                    id=c.id,
+                    kind=c.kind,
+                    name=c.name,
+                    file=c.file or "",
+                    line=1,
+                    end_line=1,
+                    module=c.parent or "",
+                    entry_point=None,
+                    async_=False,
+                    description=f"Container ({c.kind}): {c.name}",
+                    inputs=[],
+                    outputs=[],
+                    decorators=[],
+                )
+            raise HTTPException(status_code=404, detail=f"Symbol or container not found: {symbol_id}")
+
+        return SymbolOut(
+            id=symbol.id,
+            kind=symbol.kind,
+            name=symbol.name,
+            file=symbol.file,
+            line=symbol.line,
+            end_line=symbol.end_line,
+            module=symbol.module,
+            entry_point=symbol.entry_point,
+            async_=symbol.async_,
+            description=symbol.description,
+            inputs=symbol.inputs,
+            outputs=symbol.outputs,
+            decorators=symbol.decorators,
         )
 
     # GET /api/v1/modules/{module}/overview - module summary
@@ -523,8 +540,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             ],
         }
 
-    # GET /api/v1/reachability/{symbol_id} - why is this alive?
-    @router.get("/reachability/{symbol_id}")
+    # GET /api/v1/reachability/{symbol_id:path} - why is this alive?
+    @router.get("/reachability/{symbol_id:path}")
     def reachability(symbol_id: str) -> dict[str, Any]:
         """Explain the verdict for one symbol.
 
@@ -540,6 +557,15 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             raise HTTPException(status_code=404, detail=str(e)) from e
 
         if symbol_id not in graph.symbols:
+            if symbol_id in graph.containers:
+                c = graph.containers[symbol_id]
+                return {
+                    "id": symbol_id,
+                    "verdict": "public_api",
+                    "scope": "container",
+                    "reason": f"Container ({c.kind}) containing submodules or class definitions",
+                    "rescue": None,
+                }
             raise HTTPException(status_code=404, detail=f"Symbol not found: {symbol_id}")
 
         candidate = compute_reachability(graph, index.config).explain(symbol_id)

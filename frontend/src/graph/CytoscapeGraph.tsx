@@ -19,23 +19,40 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
   const cyRef = useRef<CytoscapeLib.Core | null>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
 
+  // Listen for custom fit command from Toolbar
+  useEffect(() => {
+    function handleFit() {
+      if (cyRef.current) {
+        cyRef.current.animate({
+          fit: { eles: cyRef.current.elements(':visible'), padding: 30 },
+          duration: 300,
+        })
+      }
+    }
+    window.addEventListener('cy-fit', handleFit)
+    return () => window.removeEventListener('cy-fit', handleFit)
+  }, [])
+
+  // Initialize Cytoscape once when data changes
   useEffect(() => {
     if (!containerRef.current || !data) return
 
-    // Calculate nodes based on filters
+    const nodeIds = new Set(data.nodes.map((n: any) => n.id))
+
+    // Calculate elements
     const elements = [
       ...data.nodes.map((node: any) => {
         const loc = node.lines_of_code || 1
         const size = filters?.sizeByLoc
-          ? Math.min(120, Math.max(36, Math.round(Math.sqrt(loc) * 14)))
-          : 60
+          ? Math.min(100, Math.max(30, Math.round(Math.sqrt(loc) * 12)))
+          : 50
 
         return {
           data: {
             id: node.id,
             label: node.label,
             kind: node.kind,
-            parent: node.parent,
+            parent: node.parent && nodeIds.has(node.parent) ? node.parent : undefined,
             entry_point: node.entry_point,
             async_: node.async_,
             has_risk: node.has_resiliency_flag,
@@ -59,10 +76,13 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
       })),
     ]
 
-    // Initialize Cytoscape
+    // Fast, responsive Cytoscape initialization with WebGL texture acceleration
     const cy = CytoscapeLib({
       container: containerRef.current,
       elements,
+      hideEdgesOnViewport: true,
+      textureOnViewport: true,
+      pixelRatio: 'auto',
       style: [
         {
           selector: 'node',
@@ -106,7 +126,7 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
             'font-size': '12px',
             'color': '#9ca3af',
             'text-opacity': 1,
-            'padding': '10px',
+            'padding': '12px',
           },
         },
         {
@@ -122,8 +142,8 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
             'target-arrow-shape': 'triangle',
             'line-color': '#4b5563',
             'target-arrow-color': '#4b5563',
-            'width': 2,
-            'curve-style': 'bezier',
+            'width': 1.5,
+            'curve-style': 'straight',
           },
         },
         {
@@ -157,11 +177,27 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
       ],
       layout: {
         name: 'fcose',
-        randomize: false,
-        animationDuration: 400,
-        padding: 20,
+        quality: 'default',
+        randomize: true,
+        animate: false,
+        fit: true,
+        padding: 40,
+        nodeDimensionsIncludeLabels: true,
+        uniformNodeDimensions: false,
+        packComponents: true,
+        nodeRepulsion: 4500,
+        idealEdgeLength: 60,
+        edgeElasticity: 0.45,
+        nestingFactor: 0.1,
+        gravity: 0.25,
+        numIter: 2500,
+        tilingPaddingVertical: 20,
+        tilingPaddingHorizontal: 20,
       } as any,
     })
+
+    cy.resize()
+    cy.fit(undefined, 40)
 
     cyRef.current = cy
 
@@ -173,11 +209,11 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
 
       const pos = evt.renderedPosition
       tooltip.innerHTML = `
-        <div className="tooltip-title">${node.data('id')}</div>
-        <div className="tooltip-row">Kind: <strong>${node.data('kind')}</strong></div>
-        <div className="tooltip-row">LOC: <strong>${node.data('lines_of_code')}</strong></div>
-        ${node.data('verdict') ? `<div className="tooltip-row">Verdict: <strong>${node.data('verdict')}</strong></div>` : ''}
-        ${node.data('has_risk') ? `<div className="tooltip-row warning">⚠️ Risk signal detected</div>` : ''}
+        <div style="font-weight: bold; margin-bottom: 4px; color: #60a5fa;">${node.data('id')}</div>
+        <div>Kind: <strong>${node.data('kind')}</strong></div>
+        <div>LOC: <strong>${node.data('lines_of_code')}</strong></div>
+        ${node.data('verdict') ? `<div>Verdict: <strong>${node.data('verdict')}</strong></div>` : ''}
+        ${node.data('has_risk') ? `<div style="color: #f59e0b;">⚠️ Risk signal detected</div>` : ''}
       `
       tooltip.style.left = `${pos.x + 15}px`
       tooltip.style.top = `${pos.y + 15}px`
@@ -190,19 +226,19 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
       }
     })
 
-    // Click to select and highlight full lineage
+    // Click to select and highlight lineage (max_depth=10 for ultra-fast response)
     cy.on('tap', 'node', async (evt: any) => {
       const nodeId = evt.target.id()
       onSelectSymbol?.(nodeId)
 
       try {
         const [backwardRes, forwardRes] = await Promise.all([
-          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/lineage?direction=backward&max_depth=9999`),
-          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/lineage?direction=forward&max_depth=9999`),
+          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/lineage?direction=backward&max_depth=10`),
+          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/lineage?direction=forward&max_depth=10`),
         ])
 
-        const backwardSteps = await backwardRes.json()
-        const forwardSteps = await forwardRes.json()
+        const backwardSteps = backwardRes.ok ? await backwardRes.json() : []
+        const forwardSteps = forwardRes.ok ? await forwardRes.json() : []
 
         const reachableIds = new Set<string>([nodeId])
         if (Array.isArray(backwardSteps)) backwardSteps.forEach((step: any) => reachableIds.add(step.symbol_id))
@@ -223,7 +259,24 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
     return () => {
       cy.destroy()
     }
-  }, [data, onSelectSymbol, filters?.sizeByLoc])
+  }, [data])
+
+  // Update node sizing dynamically without destroying Cytoscape instance
+  useEffect(() => {
+    if (!cyRef.current || !data) return
+    const cy = cyRef.current
+
+    cy.batch(() => {
+      cy.nodes().forEach(node => {
+        const loc = node.data('lines_of_code') || 1
+        const size = filters?.sizeByLoc
+          ? Math.min(100, Math.max(30, Math.round(Math.sqrt(loc) * 12)))
+          : 50
+        node.style('width', `${size}px`)
+        node.style('height', `${size}px`)
+      })
+    })
+  }, [filters?.sizeByLoc, data])
 
   // Apply display scope filters (Show Modules, Classes, Functions, External)
   useEffect(() => {
@@ -261,7 +314,7 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
       cy.animate({
         center: { eles: targetNode },
         zoom: 1.5,
-        duration: 400,
+        duration: 300,
       })
     }
   }, [selectedSymbol])
