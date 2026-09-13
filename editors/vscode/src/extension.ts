@@ -18,8 +18,8 @@ export function activate(context: vscode.ExtensionContext) {
       outputChannel.show()
       outputChannel.appendLine('🔍 Running LineageLens analysis...')
 
-      // Run lineagelens analyze
-      const cmd = `lineagelens analyze "${workspaceFolder.uri.fsPath}"`
+      // Schema 4: one command, no init step and no config file.
+      const cmd = `lineagelens index "${workspaceFolder.uri.fsPath}"`
       const result = execSync(cmd, { encoding: 'utf-8' })
 
       outputChannel.appendLine(result)

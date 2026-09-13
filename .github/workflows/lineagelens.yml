@@ -17,8 +17,9 @@ jobs:
 
       # Editable, deliberately. A non-editable install shadows src/ and the test
       # suite then reports on the wheel rather than on the code under review.
+      # tests/conftest.py fails loudly if that happens anyway.
       - name: Install
-        run: pip install -e ".[dev,web,mcp]"
+        run: pip install -e ".[dev,mcp]"
 
       - name: Lint
         run: ruff check src tests
@@ -26,7 +27,7 @@ jobs:
       - name: Test
         run: pytest -q
 
-  analyze:
+  index:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,23 +39,42 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
 
-      # --strict fails on parse or read errors, which are analysis bugs rather
-      # than code-quality findings.
-      - name: Analyze
-        run: lineagelens analyze . --strict
+      # Indexes every language present in one graph. No init step and no config
+      # file: language is detected per file and services come from build
+      # manifests.
+      - name: Index
+        run: lineagelens index .
 
-      # Ratchet, not a gate: fails only on dead code that is new relative to the
-      # committed baseline, so it can be turned on without a cleanup first.
-      - name: Dead-code ratchet
-        run: lineagelens check . --fail-on dead
+      # The invariant that matters most (§16.1). Foreign keys make a dangling
+      # endpoint impossible, and `index` asserts the count is zero before
+      # returning -- but this is the defect that made the schema-3 Dubbo graph
+      # 100% non-traversable while reporting success, so CI checks it too.
+      - name: Coverage report
+        run: lineagelens coverage .
 
-      # graph.json is a build artifact, not source: it is large and changes on
-      # every commit. Publish it here so agents and dashboards can fetch a
-      # current copy without every developer committing one.
-      - name: Upload graph
-        if: always()
-        uses: actions/upload-artifact@v4
+      # Same commit must produce the same graph. Catches order dependence and
+      # any wall-clock or RNG value leaking into a stored row, which is the
+      # class of bug that hides best (§11).
+      - name: Determinism
+        run: lineagelens verify .
+
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          name: lineagelens-graph
-          path: .lineagelens/
-          retention-days: 14
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # The capability matrix served by `get_ontology` is a generated artifact.
+      # If the code has moved on and the matrix has not, agents read a stale
+      # contract -- which is the schema-3 ontology failure with a JSON file
+      # instead of a dict. Regenerating must produce no diff.
+      - name: Capability matrix is current
+        run: |
+          python -m lineagelens.conformance.runner
+          git diff --exit-code src/lineagelens/conformance/matrix.json

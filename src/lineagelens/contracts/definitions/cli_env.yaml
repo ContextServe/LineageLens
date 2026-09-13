@@ -1,0 +1,35 @@
+# Configuration surfaces: CLI commands, environment variables, feature flags.
+#
+# These matter for planning rather than for tracing: an env var read in three
+# services is a coupling that no call edge shows, and a flag with a reader but
+# no writer is a dead configuration surface.
+
+- id: click.command
+  lang: python
+  match: decorator
+  names: [click.command, click.group, app.command, cli.command]
+  contract: {kind: cli, role: exposes, key_arg: 0, key_name: name}
+
+- id: python.env
+  lang: python
+  match: call
+  names: [os.environ.get, environ.get, getenv, os.getenv]
+  contract: {kind: env, role: consumes, key_arg: 0}
+
+- id: java.env
+  lang: java
+  match: call
+  names: [getenv, getProperty]
+  contract: {kind: env, role: consumes, key_arg: 0}
+
+- id: js.env
+  lang: [javascript, typescript]
+  match: call
+  names: [process.env]
+  contract: {kind: env, role: consumes, key_arg: 0}
+
+- id: go.env
+  lang: go
+  match: call
+  names: [Getenv, LookupEnv]
+  contract: {kind: env, role: consumes, key_arg: 0}

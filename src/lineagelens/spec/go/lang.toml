@@ -1,0 +1,12 @@
+lang = "go"
+dialects = ["go"]
+
+# A Go method receiver is a declared parameter that plays no part in identity;
+# it is dropped before hashing so `func (s *Server) Handle()` and a plain
+# `Handle()` do not collide on arity alone.
+implicit_receivers = ["self", "s", "recv"]
+doc_prefixes = ["//"]
+
+# Go has no constructors; `New*` is a naming convention, not a language
+# rule, so nothing is claimed here.
+constructor_names = []
