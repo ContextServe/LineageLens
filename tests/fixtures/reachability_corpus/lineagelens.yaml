@@ -1,7 +1,0 @@
-# Config for the golden reachability corpus. Deliberately minimal: the corpus
-# exercises detection rules, so it must not lean on custom configuration to make
-# them fire.
-source_roots: [src]
-test_roots: [tests]
-script_roots: [scripts]
-frameworks: [fastapi, typer, celery]
