@@ -1,0 +1,32 @@
+name: Require Release Label
+
+# Runs whenever a PR targeting main is opened, edited, or its labels change.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+    branches: [main]
+
+jobs:
+  check-release-label:
+    name: Release label present
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for release label
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          echo "Labels on this PR: $LABELS"
+
+          if echo "$LABELS" | grep -qE '"release:(patch|minor|major)"'; then
+            echo "✓ Release label found — PR is ready to merge."
+            exit 0
+          else
+            echo ""
+            echo "✗ This PR must have exactly one of the following labels before it can be merged:"
+            echo "    release:patch  — backwards-compatible bug fixes"
+            echo "    release:minor  — new backwards-compatible features"
+            echo "    release:major  — breaking changes"
+            echo ""
+            echo "Add the label in the GitHub PR sidebar and this check will re-run automatically."
+            exit 1
+          fi
