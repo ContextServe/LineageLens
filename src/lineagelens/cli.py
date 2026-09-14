@@ -225,7 +225,7 @@ def run_check(project: Path, args: Any) -> int:
 
 
 
-def _run_auth(args: Any) -> None:  # noqa: C901 — intentionally a command dispatch
+def _run_auth(args: Any) -> None:
     """Handle all ``lineagelens auth`` subcommands."""
     from .auth_flow import (
         ENVIRONMENTS,
@@ -250,7 +250,7 @@ def _run_auth(args: Any) -> None:  # noqa: C901 — intentionally a command disp
             print(f"  Token valid until: {creds['expires_at']}")
             print()
             print("  To re-authenticate:          lineagelens auth login --reauth")
-            print(f"  To login to another env:     lineagelens auth login --env <env>")
+            print("  To login to another env:     lineagelens auth login --env <env>")
             return
 
         try:
@@ -295,8 +295,8 @@ def _run_auth(args: Any) -> None:  # noqa: C901 — intentionally a command disp
             print(f"  ✓ Token valid until: {creds['expires_at']}")
         print()
         print("  Next steps:")
-        print(f"    lineagelens auth switch-env prod   # switch environment")
-        print(f"    lineagelens auth status            # view all sessions")
+        print("    lineagelens auth switch-env prod   # switch environment")
+        print("    lineagelens auth status            # view all sessions")
 
     # ── logout ────────────────────────────────────────────────────────────────
     elif sub == "logout":
