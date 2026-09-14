@@ -224,7 +224,143 @@ def run_check(project: Path, args: Any) -> int:
     return 0
 
 
+
+def _run_auth(args: Any) -> None:  # noqa: C901 — intentionally a command dispatch
+    """Handle all ``lineagelens auth`` subcommands."""
+    from .auth_flow import (
+        ENVIRONMENTS,
+        LoginError,
+        LoginRejected,
+        LoginTimeout,
+        run_login,
+    )
+    from .credentials import CredentialsStore
+
+    store = CredentialsStore()
+    sub = args.auth_command
+
+    # ── login ─────────────────────────────────────────────────────────────────
+    if sub == "login":
+        env = args.env
+
+        if not args.reauth and store.is_token_valid(env):
+            creds = store.get(env)
+            print()
+            print(f"  ✓ Already logged in as {creds['email']} ({env})")
+            print(f"  Token valid until: {creds['expires_at']}")
+            print()
+            print("  To re-authenticate:          lineagelens auth login --reauth")
+            print(f"  To login to another env:     lineagelens auth login --env <env>")
+            return
+
+        try:
+            token_resp = run_login(
+                env=env,
+                no_browser=args.no_browser,
+                timeout=args.timeout,
+            )
+        except LoginTimeout as exc:
+            raise SystemExit(f"\n  ✗ {exc}") from exc
+        except LoginRejected as exc:
+            raise SystemExit(f"\n  ✗ {exc}") from exc
+        except LoginError as exc:
+            raise SystemExit(f"\n  ✗ {exc}") from exc
+
+        base_url = ENVIRONMENTS[env]
+        store.save(env, token_resp, base_url)
+
+        email = token_resp.get("email", "")
+        if not email:
+            # Fetch from /me if exchange didn't include it
+            try:
+                import httpx
+                with httpx.Client(base_url=base_url, timeout=10) as client:
+                    me = client.get(
+                        "/api/v1/auth/me",
+                        headers={"Authorization": f"Bearer {token_resp['access_token']}"},
+                    )
+                    if me.is_success:
+                        email = me.json().get("email", "")
+                        store.save(env, token_resp, base_url, email=email)
+            except Exception:
+                pass
+
+        print()
+        print(f"  ✓ Logged in as {email or '(unknown)'}")
+        print(f"  ✓ Environment : {env}")
+        print(f"  ✓ Organization: {token_resp.get('organization_name', '')}"
+              f"  ({token_resp.get('plan_tier', '')})")
+        creds = store.get(env)
+        if creds:
+            print(f"  ✓ Token valid until: {creds['expires_at']}")
+        print()
+        print("  Next steps:")
+        print(f"    lineagelens auth switch-env prod   # switch environment")
+        print(f"    lineagelens auth status            # view all sessions")
+
+    # ── logout ────────────────────────────────────────────────────────────────
+    elif sub == "logout":
+        if args.all:
+            store.remove_all()
+            print("  ✓ Logged out of all environments.")
+        else:
+            env = args.env
+            removed = store.remove(env)
+            if removed:
+                print(f"  ✓ Logged out of '{env}'.")
+            else:
+                print(f"  • No credentials found for '{env}'.")
+
+    # ── status ────────────────────────────────────────────────────────────────
+    elif sub == "status":
+        all_creds = store.all_envs()
+        active = store.active_env
+        all_envs = ["prod", "stage", "dev", "local"]
+
+        print()
+        print(f"  {'Environment':<10}  {'User':<30}  {'Status':<8}  Expires")
+        print(f"  {'─' * 10}  {'─' * 30}  {'─' * 8}  {'─' * 20}")
+        for env in all_envs:
+            creds = all_creds.get(env)
+            marker = "✓" if creds else "✗"
+            user_col = creds["email"] if creds else "(not authenticated)"
+            status_col = "active" if (creds and store.is_token_valid(env)) else ("expired" if creds else "")
+            expires_col = creds.get("expires_at", "") if creds else ""
+            active_marker = " ◀" if env == active else ""
+            print(f"  {env:<10}  {marker} {user_col:<28}  {status_col:<8}  {expires_col}{active_marker}")
+
+        print()
+        print(f"  Active environment: {active}")
+        print()
+
+    # ── token ─────────────────────────────────────────────────────────────────
+    elif sub == "token":
+        env = args.env
+        creds = store.get(env)
+        if not creds or not creds.get("access_token"):
+            raise SystemExit(
+                f"✗ Not authenticated for '{env}'. "
+                f"Run: lineagelens auth login --env {env}"
+            )
+        # Write only the raw token — no trailing newline noise for scripts
+        import sys
+        print(creds["access_token"], end="")
+        sys.stdout.flush()
+
+    # ── switch-env ────────────────────────────────────────────────────────────
+    elif sub == "switch-env":
+        env = args.env
+        store.set_active_env(env)
+        creds = store.get(env)
+        if creds:
+            print(f"  ✓ Active environment set to '{env}' ({creds['email']})")
+        else:
+            print(f"  ✓ Active environment set to '{env}'")
+            print(f"  ⚠  Not yet authenticated. Run: lineagelens auth login --env {env}")
+
+
 def main() -> None:
+
     parser = argparse.ArgumentParser(prog="lineagelens", description="Evidence-labelled Python code lineage for humans and coding agents")
     commands = parser.add_subparsers(dest="command", required=True, help="Command to run")
 
@@ -312,7 +448,40 @@ def main() -> None:
     sync_cmd.add_argument("file", type=str, help="Relative path to file to sync")
     sync_cmd.add_argument("project", type=Path, nargs="?", default=Path("."), help="Project directory")
 
+    # ── auth ──────────────────────────────────────────────────────────────────
+    _envs = ["prod", "stage", "dev", "local"]
+    auth_cmd = commands.add_parser("auth", help="Authenticate with ContextServe.ai")
+    auth_sub = auth_cmd.add_subparsers(dest="auth_command", required=True)
+
+    login_p = auth_sub.add_parser("login", help="Log in via browser + one-time code")
+    login_p.add_argument("--env", "-e", default="prod", choices=_envs,
+                         help="Target environment (default: prod)")
+    login_p.add_argument("--no-browser", action="store_true",
+                         help="Print URL instead of opening browser (useful over SSH)")
+    login_p.add_argument("--reauth", action="store_true",
+                         help="Re-authenticate even if a valid token already exists")
+    login_p.add_argument("--timeout", type=int, default=300,
+                         help="Seconds to wait for browser login (default: 300)")
+
+    logout_p = auth_sub.add_parser("logout", help="Revoke and remove stored credentials")
+    logout_p.add_argument("--env", "-e", default="prod", choices=_envs)
+    logout_p.add_argument("--all", action="store_true", help="Log out of all environments")
+
+    auth_sub.add_parser("status", help="Show authentication status for all environments")
+
+    token_p = auth_sub.add_parser("token", help="Print raw bearer token to stdout")
+    token_p.add_argument("--env", "-e", default="prod", choices=_envs)
+
+    switch_p = auth_sub.add_parser("switch-env", help="Change active environment")
+    switch_p.add_argument("env", choices=_envs)
+
     args = parser.parse_args()
+
+    # ── auth — handled before project-path validation (no project dir needed) ──
+    if args.command == "auth":
+        _run_auth(args)
+        return
+
     project = args.project.resolve()
 
     # Validate project path exists
@@ -320,6 +489,7 @@ def main() -> None:
         parser.error(f"Project directory does not exist: {project}")
     if not project.is_dir():
         parser.error(f"Not a directory: {project}")
+
 
     if args.command == "watch":
         from .watcher import LineageLensWatcher
