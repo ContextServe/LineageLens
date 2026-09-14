@@ -29,6 +29,7 @@ Schema (version 1)::
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import stat
@@ -79,17 +80,15 @@ class CredentialsStore:
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
         # Enforce 0600 before moving into place
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
-        except OSError:
-            pass  # best-effort on platforms that don't support chmod
 
         tmp.replace(self._path)
         self._data = data
 
     # ─── Public API ───────────────────────────────────────────────────────
 
-    def load(self) -> "CredentialsStore":
+    def load(self) -> CredentialsStore:
         """Read the credentials file from disk. Returns self for chaining."""
         self._data = self._load_raw()
         return self

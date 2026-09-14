@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import secrets
-import sys
 import time
 import uuid
 import webbrowser
@@ -250,14 +249,14 @@ def run_login(
 
     # 1. Register session
     try:
-        ttl = device_start(base_url, session_id, otp_raw, env)
-    except httpx.ConnectError:
+        device_start(base_url, session_id, otp_raw, env)
+    except httpx.ConnectError as exc:
         raise LoginError(
             f"Could not reach {base_url}.\n"
-            "  • Check your internet connection.\n"
-            "  • If using --env local, make sure ContextServe is running "
+            "  \u2022 Check your internet connection.\n"
+            "  \u2022 If using --env local, make sure ContextServe is running "
             "(docker compose up)."
-        )
+        ) from exc
 
     login_url = (
         f"{base_url}/cli-login"
@@ -265,10 +264,16 @@ def run_login(
         f"&env={env}"
     )
 
-    # 2. Print header and OTP box — the OTP stays in the terminal only
+    _dash = "\u2500"
+    _corner_tl = "\u250c"
+    _corner_tr = "\u2510"
+    _corner_bl = "\u2514"
+    _corner_br = "\u2518"
+    _pipe = "\u2502"
+
     print()
-    print(f"  ✦ LineageLens × ContextServe.ai")
-    print(f"  {'─' * 51}")
+    print("  \u2746 LineageLens \u00d7 ContextServe.ai")
+    print(f"  {_dash * 51}")
     print(f"  Environment : {env}  ({base_url})")
     print()
 
@@ -276,16 +281,16 @@ def run_login(
         print("  Open this URL in a browser to authenticate:")
         print(f"    {login_url}")
     else:
-        print("  Opening your browser for authentication…")
+        print("  Opening your browser for authentication\u2026")
         print("  If it didn't open automatically, visit:")
         print(f"    {login_url}")
         webbrowser.open(login_url)
 
     print()
-    print(f"  ┌{'─' * 41}┐")
-    print(f"  │   Your one-time code:  {otp:<16}   │")
-    print(f"  │   Enter this code in the browser tab   │")
-    print(f"  └{'─' * 41}┘")
+    print(f"  {_corner_tl}{_dash * 41}{_corner_tr}")
+    print(f"  {_pipe}   Your one-time code:  {otp:<16}   {_pipe}")
+    print(f"  {_pipe}   Enter this code in the browser tab   {_pipe}")
+    print(f"  {_corner_bl}{_dash * 41}{_corner_br}")
     print()
 
     # 3. Poll
