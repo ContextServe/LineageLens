@@ -1,0 +1,9 @@
+lang = "csharp"
+dialects = ["csharp"]
+
+implicit_receivers = []
+doc_prefixes = ["///", "//"]
+
+# constructor_declaration is its own grammar node, so nodes.scm assigns the
+# kind directly and no name-based promotion is needed.
+constructor_names = []

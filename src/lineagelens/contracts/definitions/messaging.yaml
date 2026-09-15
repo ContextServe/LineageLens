@@ -1,0 +1,49 @@
+# Message-queue contracts. A producer and a consumer that never call each other
+# still share a topic name, and that name is the contract.
+
+- id: kafka.listener
+  lang: java
+  match: annotation
+  names: [KafkaListener, RabbitListener, JmsListener, StreamListener]
+  contract: {kind: topic, role: consumes, key_arg: 0, key_name: topics}
+
+- id: kafka.send
+  lang: java
+  match: call
+  names: [send, convertAndSend]
+  contract: {kind: topic, role: exposes, key_arg: 0}
+
+- id: python.celery_task
+  lang: python
+  match: decorator
+  names: [app.task, celery.task, shared_task]
+  contract: {kind: topic, role: exposes, key_arg: 0, key_name: name}
+
+- id: python.kafka_produce
+  lang: python
+  match: call
+  names: [producer.send, producer.produce, producer.publish]
+  contract: {kind: topic, role: exposes, key_arg: 0}
+
+- id: python.kafka_subscribe
+  lang: python
+  match: call
+  names: [consumer.subscribe]
+  contract: {kind: topic, role: consumes, key_arg: 0}
+
+# Deliberately narrow. `emit` / `on` / `addEventListener` were tried and
+# removed: they match every DOM event handler in a frontend, so they would
+# manufacture a topic contract per listener. A fabricated contract is worse
+# than a missing one -- and a missing one is now reported as an unclaimed
+# framework anyway (§8.2).
+- id: js.sqs_sns
+  lang: [javascript, typescript]
+  match: call
+  names: [sendMessage, publishMessage, sns.publish, sqs.sendMessage]
+  contract: {kind: topic, role: exposes, key_arg: 0}
+
+- id: js.kafkajs
+  lang: [javascript, typescript]
+  match: call
+  names: [producer.send, consumer.subscribe]
+  contract: {kind: topic, role: exposes, key_arg: 0}

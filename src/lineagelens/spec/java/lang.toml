@@ -1,0 +1,14 @@
+lang = "java"
+dialects = ["java"]
+
+# Java has no implicit receiver parameter -- `this` is not declared. Overload
+# identity therefore uses the full declared parameter type list, which is
+# mandatory here: schema 3 keyed on name alone, so every overload of a method
+# collapsed onto one node and its callers merged (§6).
+implicit_receivers = []
+
+doc_prefixes = ["/**", "*", "//"]
+
+# constructor_declaration is its own grammar node, so nodes.scm assigns the
+# kind directly and no name-based promotion is needed.
+constructor_names = []

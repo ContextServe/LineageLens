@@ -32,7 +32,7 @@ except ImportError as exc:  # pragma: no cover
 # ─── Environment map ──────────────────────────────────────────────────────────
 
 ENVIRONMENTS: dict[str, str] = {
-    "prod":  "https://app.contextserve.ai",
+    "prod":  "https://contextserve.ai",
     "stage": "https://stage.contextserve.ai",
     "dev":   "https://dev.contextserve.ai",
     "local": os.environ.get("CONTEXTSERVE_LOCAL_URL", "http://localhost:5173"),

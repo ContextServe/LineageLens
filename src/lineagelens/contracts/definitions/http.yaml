@@ -1,0 +1,103 @@
+# HTTP route contracts.
+#
+# The flagship cross-framework join: a TypeScript `fetch('/api/users/42')` and a
+# Python `@app.get('/api/users/{id}')` both normalise to
+# `GET /api/users/{*}`, so both attach to one contract node and the frontend ->
+# backend path becomes a two-hop walk. Neither side knows the other exists.
+
+# ---- servers (exposes) ----------------------------------------------------
+
+- id: fastapi.route
+  lang: python
+  match: decorator
+  names: [app.get, app.post, app.put, app.patch, app.delete, app.websocket,
+          router.get, router.post, router.put, router.patch, router.delete,
+          router.websocket]
+  methods: [get, post, put, patch, delete, websocket]
+  contract: {kind: http_route, role: exposes, key_arg: 0}
+
+- id: flask.route
+  lang: python
+  match: decorator
+  names: [app.route, blueprint.route, bp.route]
+  methods: [any]
+  contract: {kind: http_route, role: exposes, key_arg: 0}
+
+- id: django.path
+  lang: python
+  match: call
+  names: [path, re_path, url]
+  methods: [any]
+  contract: {kind: http_route, role: exposes, key_arg: 0}
+
+- id: spring.mapping
+  lang: java
+  match: annotation
+  names: [RequestMapping, GetMapping, PostMapping, PutMapping, PatchMapping,
+          DeleteMapping]
+  methods: [get, post, put, patch, delete]
+  contract: {kind: http_route, role: exposes, key_arg: 0, key_name: value}
+
+- id: express.route
+  lang: [javascript, typescript]
+  match: call
+  names: [app.get, app.post, app.put, app.patch, app.delete, app.all,
+          router.get, router.post, router.put, router.patch, router.delete]
+  methods: [get, post, put, patch, delete, all]
+  contract: {kind: http_route, role: exposes, key_arg: 0}
+
+- id: nestjs.route
+  lang: typescript
+  match: decorator
+  names: [Get, Post, Put, Patch, Delete, All]
+  methods: [get, post, put, patch, delete, all]
+  contract: {kind: http_route, role: exposes, key_arg: 0}
+
+- id: aspnet.route
+  lang: csharp
+  match: annotation
+  names: [HttpGet, HttpPost, HttpPut, HttpPatch, HttpDelete, Route]
+  methods: [get, post, put, patch, delete]
+  contract: {kind: http_route, role: exposes, key_arg: 0}
+
+- id: go.mux
+  lang: go
+  match: call
+  names: [HandleFunc, Handle, Get, Post, Put, Patch, Delete]
+  methods: [get, post, put, patch, delete]
+  contract: {kind: http_route, role: exposes, key_arg: 0}
+
+# ---- clients (consumes) ---------------------------------------------------
+
+# fetch() with no explicit options is a GET; that is the HTTP default. Leaving
+# it as ANY would stop it joining a server-side GET route, which is the single
+# most common cross-framework pair there is.
+- id: js.fetch
+  lang: [javascript, typescript]
+  match: call
+  names: [fetch]
+  methods: [get]
+  contract: {kind: http_route, role: consumes, key_arg: 0}
+
+- id: js.axios
+  lang: [javascript, typescript]
+  match: call
+  names: [axios, axios.get, axios.post, axios.put, axios.patch, axios.delete,
+          axios.request]
+  methods: [get, post, put, patch, delete]
+  contract: {kind: http_route, role: consumes, key_arg: 0}
+
+- id: python.requests
+  lang: python
+  match: call
+  names: [requests.get, requests.post, requests.put, requests.patch,
+          requests.delete, httpx.get, httpx.post, client.get, client.post]
+  methods: [get, post, put, patch, delete]
+  contract: {kind: http_route, role: consumes, key_arg: 0}
+
+- id: java.resttemplate
+  lang: java
+  match: call
+  names: [getForObject, postForObject, getForEntity, postForEntity, exchange]
+  methods: [get, post]
+  contract: {kind: http_route, role: consumes, key_arg: 0}
