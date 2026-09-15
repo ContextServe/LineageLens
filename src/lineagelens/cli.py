@@ -1,231 +1,526 @@
-"""Command-line interface for creating and serving code context."""
+"""Command line interface.
+
+Six commands, replacing the schema-3 surface. Two are gone deliberately:
+
+* ``analyze`` -> ``index``. The old command dispatched on the *repository*
+  language with an early return, so a polyglot repo produced one language and
+  silently discarded the rest. Running it on this repository emitted 39
+  TypeScript symbols and zero Python, overwriting a good graph in place.
+* ``--engine`` is gone entirely. There is no user-selectable engine: extraction
+  is per-file and additive. ``--dataflow`` went the same way: data flow is
+  always computed, because deferring it dropped 69% of the data-flow edges to
+  save 3.2s, and its premise -- that a query touches a small slice -- does not
+  hold when resolution is global.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict, replace
+import logging
+import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
+from .core import SCHEMA_VERSION, Intent
+from .indexer import Indexer
+from .ontology import capability_matrix
+from .query import QueryEngine
+from .store import DB_FILENAME, GraphNotFound, GraphStore, SchemaMismatch
 
-from . import hooks
-from .analyzer import analyze
-from .config import ProjectConfig
-from .detect_config import detect_config
-from .model import CodeGraph
-from .queries import GraphNotFoundError, load_graph
-from .ratchet import BASELINE_NAME, SEVERITY, Baseline, evaluate, severity_at_or_above
-from .reachability import compute_reachability
-from .report import AnalysisReport
+logger = logging.getLogger(__name__)
 
 
-def _plain(value: Any) -> Any:
-    """Recursively convert tuples (from dataclass asdict) into YAML-friendly lists."""
-    if isinstance(value, dict):
-        return {key: _plain(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_plain(item) for item in value]
-    return value
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="lineagelens",
+        description=(
+            "Deterministic code graph: control flow, data flow and "
+            "cross-service contracts, for humans and coding agents."
+        ),
+    )
+    parser.add_argument("--version", action="version",
+                        version=f"lineagelens schema {SCHEMA_VERSION}")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="log extraction and resolution progress")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    _add_index(commands)
+    _add_query(commands)
+    _add_coverage(commands)
+    _add_verify(commands)
+    _add_ontology(commands)
+    _add_mcp(commands)
+    _add_auth(commands)
+
+    args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    return int(args.handler(args) or 0)
 
 
-def config_template(project: Path | None = None) -> tuple[str, list[str]]:
-    """Generate config template, optionally auto-detecting values.
+# ---------------------------------------------------------------------------
+# index
+# ---------------------------------------------------------------------------
 
-    Args:
-        project: Project directory for auto-detection (if None, uses defaults)
-
-    Returns:
-        (yaml_content, notes) tuple where notes are human-readable detection messages
-    """
-    if project and project.exists():
-        detection = detect_config(project)
-        config_dict = _plain(asdict(ProjectConfig(
-            source_roots=tuple(detection.source_roots),
-            test_roots=tuple(detection.test_roots),
-            frameworks=tuple(detection.frameworks),
-        )))
-        notes = detection.notes
-    else:
-        config_dict = _plain(asdict(ProjectConfig()))
-        notes = []
-
-    yaml_content = yaml.safe_dump(config_dict, sort_keys=False)
-    return yaml_content, notes
-
-
-def graph_path(project: Path, config: ProjectConfig) -> Path:
-    return project / config.output.directory / config.output.filename
+def _add_index(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "index",
+        help="build the graph for a project (all languages, one graph)",
+    )
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    cmd.add_argument(
+        "--require-tier-b", nargs="?", const="*", default="",
+        help=(
+            "SKIP languages that have no native type resolver, instead of "
+            "indexing them at Tier A. Pass a comma-separated list, or the flag "
+            "alone for every language. Use in CI when a partial graph must be "
+            "an error. By default every language is indexed and the resolution "
+            "tier is reported per language in the coverage envelope"
+        ),
+    )
+    cmd.add_argument("--force", action="store_true",
+                     help="rebuild even if the index looks current")
+    cmd.add_argument("--json", action="store_true", help="emit the report as JSON")
+    cmd.set_defaults(handler=_run_index)
 
 
-def report_path(project: Path, config: ProjectConfig) -> Path:
-    return project / config.output.directory / "report.json"
-
-
-def check_frontend_available() -> None:
-    """Check if frontend is available. Provide guidance if not."""
-    from .web import locate_frontend_dist
-
-    dist_dir = locate_frontend_dist()
-    if dist_dir:
-        return  # Frontend is ready
-
-    # Frontend not found — provide guidance
-    print("⚠️  Frontend UI not found.")
-    print()
-    print("To build the frontend locally, run:")
-    print("  cd frontend && npm install && npm run build")
-    print()
-    print("Alternatively, install a released version of lineagelens which includes")
-    print("the prebuilt frontend:")
-    print("  pip install lineagelens[web]  # from PyPI")
-    print()
-    print("For now, the REST API and GraphQL are still available at:")
-    print("  http://127.0.0.1:8717/api/v1")
-    print("  http://127.0.0.1:8717/graphql")
-
-
-def write_artifacts(
-    project: Path,
-    config: ProjectConfig,
-    graph: CodeGraph,
-    report: AnalysisReport,
-    quiet: bool = False,
-) -> tuple[Path, Path]:
-    """Persist an already-computed graph and report.
-
-    Split out of :func:`build` so that callers holding a graph in memory (the REST
-    and MCP trigger endpoints) can write it without analysing a second time.
-
-    Returns:
-        ``(graph_path, report_path)``
-    """
-    graph_file = graph_path(project, config)
-    graph_file.parent.mkdir(parents=True, exist_ok=True)
-    graph_file.write_text(json.dumps(graph.to_dict(), indent=2), encoding="utf-8")
-
-    db_file = project / config.output.directory / "index.sqlite"
+def _run_index(args: Any) -> int:
+    indexer = Indexer(
+        args.path,
+        require_tier_b=_tier_b_set(args.require_tier_b),
+    )
+    store, report = indexer.run()
     try:
-        from .db import SQLiteIndexDB
-        db = SQLiteIndexDB(db_file)
-        db.save_code_graph(graph)
-    except Exception as e:
-        print(f"⚠️  Could not populate index.sqlite: {e}")
-
-    report_file = report_path(project, config)
-    report_file.parent.mkdir(parents=True, exist_ok=True)
-    report_file.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
-
-    if not quiet:
-        for line in report.summary_lines():
-            print(line)
-
-    return graph_file, report_file
-
-
-def build(
-    project: Path, quiet: bool = False, jedi: bool | None = None, engine: str | None = None
-) -> tuple[Path, Path, AnalysisReport]:
-    """Analyze a project and write graph.json + report.json.
-
-    Returns:
-        ``(graph_path, report_path, report)``.
-    """
-    from .detect_config import is_java_project, is_js_project
-    from .java_bridge import run_java_analysis
-    from .js_bridge import run_js_analysis
-
-    config = ProjectConfig.load(project)
-    if engine is not None:
-        config = replace(config, analysis=replace(config.analysis, engine=engine))
-
-    # Check if target project is JS/TS and using default compiler engine
-    if config.analysis.engine == "compiler" and (is_js_project(project) or getattr(config, "language", None) in ("javascript", "typescript", "js", "ts")):
-        graph_file = run_js_analysis(project)
-        report_file = report_path(project, config)
-        report = AnalysisReport(
-            project_root=str(project),
-            started_at="",
-            finished_at="",
-            files_scanned=1,
-            files_skipped=0,
-            symbols_found=0,
-            relations_found=0,
-            containers_found=0,
-        )
-        if not quiet:
-            print(f"✓ JavaScript/TypeScript analysis complete. Graph written to {graph_file}")
-        return graph_file, report_file, report
-
-    # Check if target project is Java and using default compiler engine
-    if config.analysis.engine == "compiler" and (is_java_project(project) or getattr(config, "language", None) == "java"):
-        graph_file = run_java_analysis(project)
-        report_file = report_path(project, config)
-        report = AnalysisReport(
-            project_root=str(project),
-            started_at="",
-            finished_at="",
-            files_scanned=1,
-            files_skipped=0,
-            symbols_found=0,
-            relations_found=0,
-            containers_found=0,
-        )
-        if not quiet:
-            print(f"✓ Java analysis complete. Graph written to {graph_file}")
-        return graph_file, report_file, report
-
-    if jedi is not None and jedi != config.analysis.jedi:
-        config = replace(config, analysis=replace(config.analysis, jedi=jedi))
-    graph, report = analyze(project, config)
-    graph_file, report_file = write_artifacts(project, config, graph, report, quiet=quiet)
-    return graph_file, report_file, report
-
-
-
-def run_check(project: Path, args: Any) -> int:
-    """Compare current dead-code candidates against the baseline. Returns an exit code."""
-    config = ProjectConfig.load(project)
-
-    if args.analyze:
-        graph, report = analyze(project, config)
-        write_artifacts(project, config, graph, report, quiet=True)
-    else:
-        try:
-            graph = load_graph(project)
-        except GraphNotFoundError as e:
-            print(f"✗ {e}")
-            return 1
-
-    candidates = compute_reachability(graph, config).candidates()
-    baseline_path = args.baseline or (project / config.output.directory / BASELINE_NAME)
-
-    if args.update_baseline:
-        considered = severity_at_or_above(args.fail_on)
-        updated = Baseline(
-            entries={c.symbol.id: c.verdict for c in candidates if c.verdict in considered}
-        )
-        updated.save(baseline_path)
-        print(f"✓ Baseline written to {baseline_path} ({len(updated.entries)} entries)")
-        return 0
-
-    result = evaluate(candidates, Baseline.load(baseline_path), fail_on=args.fail_on)
-    for line in result.summary_lines():
-        print(line)
-
-    if result.failed(args.max_new):
-        print(
-            "\n✗ New dead code introduced. Remove it, or -- if it is reached by "
-            "reflection or config-driven dispatch that static analysis cannot see -- "
-            "mark it `# lineagelens: keep` and re-run with --update-baseline."
-        )
-        return 1
+        if args.json:
+            print(json.dumps(report.as_dict(), indent=2))
+        else:
+            _print_index_report(report, store)
+    finally:
+        store.close()
     return 0
 
 
+def _tier_b_set(raw: str) -> frozenset[str]:
+    """Parse ``--require-tier-b``. Bare flag means every language."""
+    if not raw:
+        return frozenset()
+    if raw == "*":
+        from .extract import supported_languages
+        return supported_languages()
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
-def _run_auth(args: Any) -> None:
+
+def _print_index_report(report: Any, store: GraphStore) -> None:
+    data = report.as_dict()
+    files = data["files"]
+    graph = data["graph"]
+
+    print(f"indexed {data['project_root']}")
+    print(
+        f"  files     {files['parsed']:,} parsed"
+        + (f", {files['skipped']:,} skipped" if files["skipped"] else "")
+        + (f", {files['failed']:,} failed" if files["failed"] else "")
+    )
+    langs = ", ".join(f"{k} {v:,}" for k, v in data["languages"].items())
+    print(f"  languages {langs or 'none'}")
+    print(f"  services  {data['services']:,}")
+    print(f"  graph     {graph['nodes']:,} nodes, {graph['edges']:,} edges")
+    print(
+        f"  contracts {data['contracts']:,}"
+        f"   unresolved {graph['unresolved_refs']:,}"
+        f"   boundaries {graph['boundaries']:,}"
+    )
+    print(f"  digest    {data['build_digest'][:16]}  ({data['duration_seconds']}s)")
+
+    if data.get("tier_a_only"):
+        print(
+            f"  tier A only: {', '.join(data['tier_a_only'])}"
+            f"  (no type resolver; more refs ambiguous, none guessed)"
+        )
+
+    if data["skipped_reasons"]:
+        print("  skipped:")
+        for reason, count in data["skipped_reasons"].items():
+            print(f"    {reason:20s} {count:,}")
+
+    # A framework nobody wrote an adapter for is a coverage gap, so it is
+    # surfaced as a work list rather than left silent (§8.2).
+    unclaimed = data.get("unclaimed_frameworks") or []
+    if unclaimed:
+        print("\n  frameworks present but unmodelled (no contract adapter):")
+        for entry in unclaimed[:5]:
+            print(
+                f"    {entry['name']:24s} {entry['uses']:>4} uses"
+                f"   e.g. {entry['example']}  {entry.get('sample_key', '')}"
+            )
+        print("    add an adapter under .lineagelens/adapters/ to link these")
+
+
+# ---------------------------------------------------------------------------
+# query
+# ---------------------------------------------------------------------------
+
+def _add_query(commands: Any) -> None:
+    cmd = commands.add_parser("query", help="ask the graph a question")
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+
+    # The shared flags are attached to every primitive as a parent parser, not
+    # only to `query`. argparse consumes options positionally, so declaring
+    # them once on the parent would force `query --json . impact f.py:4` --
+    # nobody writes that, and `query . impact f.py:4 --json` would fail with an
+    # unrecognised-argument error that gives no hint why.
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument("--json", action="store_true", help="emit raw JSON")
+    shared.add_argument("--intent", choices=[i.value for i in Intent],
+                        help="precise (debugging) or plan (surveying)")
+    shared.add_argument("--limit", type=int)
+    shared.add_argument("--max-depth", type=int)
+    shared.add_argument("--kinds", help="comma-separated edge kinds to follow")
+
+    cmd.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    cmd.add_argument("--intent", choices=[i.value for i in Intent],
+                     help=argparse.SUPPRESS)
+    cmd.add_argument("--limit", type=int, help=argparse.SUPPRESS)
+    cmd.add_argument("--max-depth", type=int, help=argparse.SUPPRESS)
+    cmd.add_argument("--kinds", help=argparse.SUPPRESS)
+
+    sub = cmd.add_subparsers(dest="primitive", required=True)
+
+    def add(name: str, help_text: str, *arguments: str) -> Any:
+        parser = sub.add_parser(name, help=help_text, parents=[shared])
+        for argument in arguments:
+            parser.add_argument(argument)
+        return parser
+
+    add("paths", "the call chains between two symbols", "from_symbol", "to_symbol")
+    add("trace", "a call tree rooted at one symbol", "entry")
+    add("callers", "who reaches this symbol, with chains", "symbol")
+    add("callees", "what this symbol reaches, with chains", "symbol")
+    add("impact", "what changing a symbol or file:line affects", "target")
+    add("dataflow", "where a value comes from and goes", "symbol")
+    add("similar", "how this repo already wires a flow like this", "exemplar")
+    add("explain", "why two symbols are believed related", "from_symbol", "to_symbol")
+    add("symbol", "one symbol with signature, docs and source", "symbol")
+    add("search", "ranked search over the graph", "text")
+    add("entrypoints", "symbols exposing a contract")
+    add("contracts", "who exposes and consumes what")
+
+    stack = sub.add_parser("stacktrace", parents=[shared],
+                           help="map a stack trace onto the graph")
+    stack.add_argument("file", nargs="?", help="file containing the trace; "
+                                               "reads stdin when omitted")
+
+    diff = sub.add_parser("diff", parents=[shared],
+                          help="impact of a unified diff")
+    diff.add_argument("file", nargs="?", help="diff file; reads stdin when omitted")
+
+    cmd.set_defaults(handler=_run_query)
+
+
+def _run_query(args: Any) -> int:
+    try:
+        engine = QueryEngine.open(args.path)
+    except (GraphNotFound, SchemaMismatch) as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+
+    kinds = (
+        [k.strip() for k in args.kinds.split(",") if k.strip()]
+        if args.kinds else None
+    )
+    shared = {"intent": args.intent, "limit": args.limit}
+    walk = {**shared, "kinds": kinds, "max_depth": args.max_depth}
+    name = args.primitive
+
+    if name == "paths":
+        result = engine.find_paths(args.from_symbol, args.to_symbol, **walk)
+    elif name == "trace":
+        result = engine.trace_flow(args.entry, **walk)
+    elif name == "callers":
+        result = engine.callers_of(args.symbol, **walk)
+    elif name == "callees":
+        result = engine.callees_of(args.symbol, **walk)
+    elif name == "impact":
+        result = engine.impact_of(
+            args.target, intent=args.intent, limit=args.limit,
+            max_depth=args.max_depth,
+        )
+    elif name == "dataflow":
+        result = engine.dataflow_of(
+            args.symbol, intent=args.intent, limit=args.limit,
+            max_depth=args.max_depth,
+        )
+    elif name == "similar":
+        result = engine.similar_flows(args.exemplar, limit=args.limit)
+    elif name == "explain":
+        result = engine.explain(args.from_symbol, args.to_symbol)
+    elif name == "symbol":
+        result = engine.get_node(args.symbol, intent=args.intent)
+    elif name == "search":
+        result = engine.search(args.text, kinds=kinds, **shared)
+    elif name == "entrypoints":
+        result = engine.entry_points(limit=args.limit)
+    elif name == "contracts":
+        result = engine.contract_map(limit=args.limit)
+    elif name == "stacktrace":
+        result = engine.map_stacktrace(_read_input(args.file), limit=args.limit)
+    elif name == "diff":
+        result = engine.impact_of_diff(
+            _read_input(args.file), intent=args.intent, limit=args.limit
+        )
+    else:  # pragma: no cover - argparse rejects anything else
+        print(f"unknown primitive: {name}", file=sys.stderr)
+        return 2
+
+    payload = result.as_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        _print_result(payload)
+    engine.store.close()
+    return 1 if payload.get("error") else 0
+
+
+def _read_input(path: str | None) -> str:
+    if path:
+        return Path(path).read_text("utf-8", errors="replace")
+    return sys.stdin.read()
+
+
+def _print_result(payload: dict[str, Any]) -> None:
+    """Human-readable rendering. JSON stays the machine contract."""
+    if payload.get("error"):
+        print(f"error: {payload['error']}", file=sys.stderr)
+        if payload.get("remedy"):
+            print(f"  {payload['remedy']}", file=sys.stderr)
+        return
+
+    header = payload["kind"]
+    if payload["total_available"]:
+        header += f"  {payload['returned']} of {payload['total_available']}"
+        if payload["truncated"]:
+            header += " (truncated -- raise --limit)"
+    print(header)
+
+    for item in payload["results"]:
+        print()
+        if isinstance(item, dict) and "chain" in item:
+            print(f"  [{item['length']} hop{'s' if item['length'] != 1 else ''}] "
+                  f"{item['chain']}")
+            for hop in item.get("hops", []):
+                via = f" via {hop['via']}" if hop.get("via") else ""
+                print(f"      {hop['depth']}. {hop['node']}  ({hop['at']}){via}")
+        else:
+            print(_indent(json.dumps(item, indent=2, default=str), "  "))
+
+    coverage = payload.get("coverage", {})
+    if coverage:
+        print()
+        state = "complete" if coverage.get("complete") else "qualified"
+        print(f"  coverage: {state}  (intent={coverage.get('intent')})")
+        for entry in coverage.get("boundary_detail", [])[:5]:
+            print(f"    boundary {entry['kind']}: {entry['detail']}")
+        if coverage.get("degraded"):
+            print(f"    degraded (Tier A only): {', '.join(coverage['degraded'])}")
+
+
+def _indent(text: str, prefix: str) -> str:
+    return "\n".join(prefix + line for line in text.splitlines())
+
+
+# ---------------------------------------------------------------------------
+# coverage / verify / ontology / mcp
+# ---------------------------------------------------------------------------
+
+def _add_coverage(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "coverage", help="what the index does and does not cover"
+    )
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    cmd.add_argument("--scope", help="restrict the per-file detail to a path prefix")
+    cmd.add_argument("--json", action="store_true")
+    cmd.set_defaults(handler=_run_coverage)
+
+
+def _run_coverage(args: Any) -> int:
+    try:
+        engine = QueryEngine.open(args.path)
+    except (GraphNotFound, SchemaMismatch) as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+
+    payload = engine.coverage_report(scope=args.scope).as_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        counts = payload["counts"]
+        print(f"nodes {counts['nodes']:,}   edges {counts['edges']:,}   "
+              f"unresolved {counts['unresolved_refs']:,}   "
+              f"boundaries {counts['boundaries']:,}")
+        print("\nnode kinds:")
+        for kind, count in payload["node_kinds"].items():
+            print(f"  {kind:14s} {count:,}")
+        print("\nedge kinds:")
+        for kind, count in payload["edge_kinds"].items():
+            print(f"  {kind:14s} {count:,}")
+        coverage = payload["coverage"]
+        if coverage.get("refs"):
+            refs = coverage["refs"]
+            print(f"\nreferences: {refs['total']:,} observed  "
+                  f"{refs['exact']:.0%} exact  {refs['inferred']:.0%} inferred  "
+                  f"{refs['unresolved']:.0%} unresolved")
+            print("  unresolved is mostly genuinely external (stdlib, "
+                  "third-party) plus ambiguities recorded with candidates")
+        if coverage.get("files"):
+            print("files: " + "  ".join(
+                f"{k} {v:,}" for k, v in coverage["files"].items()
+            ))
+        if coverage.get("degraded"):
+            print(f"degraded (Tier A only): {', '.join(coverage['degraded'])}")
+    engine.store.close()
+    return 0
+
+
+def _add_verify(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "verify",
+        help="rebuild twice and confirm the graph is byte-identical (§11)",
+    )
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    cmd.add_argument("--require-tier-b", nargs="?", const="*", default="")
+    cmd.set_defaults(handler=_run_verify)
+
+
+def _run_verify(args: Any) -> int:
+    """Determinism check (§11, §16.24).
+
+    Two independent builds of the same tree must produce the same digest. A
+    grammar upgrade, an unsorted iteration, or a wall-clock value leaking into
+    a stored row would all break this -- which is the point of checking rather
+    than intending.
+    """
+    import tempfile
+
+    allow = _tier_b_set(args.require_tier_b)
+    digests: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for run in (1, 2):
+            store, report = Indexer(
+                args.path, require_tier_b=allow,
+            ).run(db_path=Path(tmp) / f"run{run}" / DB_FILENAME)
+            digests.append(report.build_digest)
+            store.close()
+            print(f"  build {run}: {report.build_digest}")
+
+    if digests[0] != digests[1]:
+        print("\nFAIL: two builds of the same tree differ.", file=sys.stderr)
+        print("Something order-dependent or time-dependent reached the store.",
+              file=sys.stderr)
+        return 1
+    print("\nOK: deterministic.")
+
+    return 0
+
+
+def _add_ontology(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "ontology", help="what this build can express, measured not declared"
+    )
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    cmd.add_argument("--json", action="store_true")
+    cmd.set_defaults(handler=_run_ontology)
+
+
+def _run_ontology(args: Any) -> int:
+    matrix = capability_matrix(Path(args.path))
+    if args.json:
+        print(json.dumps(matrix, indent=2, default=str))
+        return 0
+
+    print(f"schema {matrix['schema_version']}   "
+          f"{len(matrix['node_kinds'])} node kinds   "
+          f"{len(matrix['relation_kinds'])} relation kinds")
+    if not matrix["generated"]:
+        print("\nconformance matrix not generated; per-language capability is "
+              "reported as 'untested'")
+
+    columns = ("nodes", "calls", "inherits", "implements", "dataflow", "contracts")
+    symbols = {True: "yes", "partial": "part", "untested": "?", False: "-",
+               "n/a": "n/a"}
+    header = "  ".join(f"{name[:9]:>9s}" for name in columns)
+    print(f"\n{'language':11s} {'type resolver':26s} {header}")
+    for lang, entry in matrix["languages"].items():
+        caps = entry.get("capabilities", {})
+        marks = "  ".join(
+            f"{symbols.get(caps.get(name), '-'):>9s}" for name in columns
+        )
+        print(f"{lang:11s} {entry['tier_b'][:26]:26s} {marks}")
+    print("\n  'n/a' means the language has no such construct; 'part' is a "
+          "documented partial (see `--json` for the reason).")
+
+    project = matrix.get("project", {})
+    if project.get("indexed"):
+        print(f"\nthis index: {project['counts']['nodes']:,} nodes, "
+              f"languages {', '.join(project['languages_present'])}")
+        if project.get("languages_skipped"):
+            print("  skipped: " + ", ".join(
+                f"{k} ({v})" for k, v in project["languages_skipped"].items()
+            ))
+    return 0
+
+
+def _add_mcp(commands: Any) -> None:
+    cmd = commands.add_parser("mcp", help="run the MCP server over stdio")
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    cmd.set_defaults(handler=_run_mcp)
+
+
+def _run_mcp(args: Any) -> int:
+    from .mcp.server import create_server
+
+    create_server(Path(args.path)).run()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# auth
+# ---------------------------------------------------------------------------
+
+def _add_auth(commands: Any) -> None:
+    _envs = ["prod", "stage", "dev", "local"]
+    auth_cmd = commands.add_parser("auth", help="Authenticate with ContextServe.ai")
+    auth_sub = auth_cmd.add_subparsers(dest="auth_command", required=True)
+
+    login_p = auth_sub.add_parser("login", help="Log in via browser + one-time code")
+    login_p.add_argument("--env", "-e", default="prod", choices=_envs,
+                         help="Target environment (default: prod → contextserve.ai)")
+    login_p.add_argument("--no-browser", action="store_true",
+                         help="Print URL instead of opening browser (useful over SSH)")
+    login_p.add_argument("--reauth", action="store_true",
+                         help="Re-authenticate even if a valid token already exists")
+    login_p.add_argument("--timeout", type=int, default=300,
+                         help="Seconds to wait for browser login (default: 300)")
+
+    logout_p = auth_sub.add_parser("logout", help="Revoke and remove stored credentials")
+    logout_p.add_argument("--env", "-e", default="prod", choices=_envs)
+    logout_p.add_argument("--all", action="store_true",
+                          help="Log out of all environments")
+
+    auth_sub.add_parser("status", help="Show authentication status for all environments")
+
+    token_p = auth_sub.add_parser("token", help="Print raw bearer token to stdout")
+    token_p.add_argument("--env", "-e", default="prod", choices=_envs)
+
+    switch_p = auth_sub.add_parser("switch-env", help="Change active environment")
+    switch_p.add_argument("env", choices=_envs)
+
+    auth_cmd.set_defaults(handler=_run_auth)
+
+
+def _run_auth(args: Any) -> int:
     """Handle all ``lineagelens auth`` subcommands."""
     from .auth_flow import (
         ENVIRONMENTS,
@@ -246,12 +541,12 @@ def _run_auth(args: Any) -> None:
         if not args.reauth and store.is_token_valid(env):
             creds = store.get(env)
             print()
-            print(f"  ✓ Already logged in as {creds['email']} ({env})")
+            print(f"  \u2713 Already logged in as {creds['email']} ({env})")
             print(f"  Token valid until: {creds['expires_at']}")
             print()
             print("  To re-authenticate:          lineagelens auth login --reauth")
             print("  To login to another env:     lineagelens auth login --env <env>")
-            return
+            return 0
 
         try:
             token_resp = run_login(
@@ -260,11 +555,11 @@ def _run_auth(args: Any) -> None:
                 timeout=args.timeout,
             )
         except LoginTimeout as exc:
-            raise SystemExit(f"\n  ✗ {exc}") from exc
+            raise SystemExit(f"\n  \u2717 {exc}") from exc
         except LoginRejected as exc:
-            raise SystemExit(f"\n  ✗ {exc}") from exc
+            raise SystemExit(f"\n  \u2717 {exc}") from exc
         except LoginError as exc:
-            raise SystemExit(f"\n  ✗ {exc}") from exc
+            raise SystemExit(f"\n  \u2717 {exc}") from exc
 
         base_url = ENVIRONMENTS[env]
         store.save(env, token_resp, base_url)
@@ -286,13 +581,13 @@ def _run_auth(args: Any) -> None:
                 pass
 
         print()
-        print(f"  ✓ Logged in as {email or '(unknown)'}")
-        print(f"  ✓ Environment : {env}")
-        print(f"  ✓ Organization: {token_resp.get('organization_name', '')}"
+        print(f"  \u2713 Logged in as {email or '(unknown)'}")
+        print(f"  \u2713 Environment : {env}")
+        print(f"  \u2713 Organization: {token_resp.get('organization_name', '')}"
               f"  ({token_resp.get('plan_tier', '')})")
         creds = store.get(env)
         if creds:
-            print(f"  ✓ Token valid until: {creds['expires_at']}")
+            print(f"  \u2713 Token valid until: {creds['expires_at']}")
         print()
         print("  Next steps:")
         print("    lineagelens auth switch-env prod   # switch environment")
@@ -302,14 +597,14 @@ def _run_auth(args: Any) -> None:
     elif sub == "logout":
         if args.all:
             store.remove_all()
-            print("  ✓ Logged out of all environments.")
+            print("  \u2713 Logged out of all environments.")
         else:
             env = args.env
             removed = store.remove(env)
             if removed:
-                print(f"  ✓ Logged out of '{env}'.")
+                print(f"  \u2713 Logged out of '{env}'.")
             else:
-                print(f"  • No credentials found for '{env}'.")
+                print(f"  \u2022 No credentials found for '{env}'.")
 
     # ── status ────────────────────────────────────────────────────────────────
     elif sub == "status":
@@ -319,15 +614,23 @@ def _run_auth(args: Any) -> None:
 
         print()
         print(f"  {'Environment':<10}  {'User':<30}  {'Status':<8}  Expires")
-        print(f"  {'─' * 10}  {'─' * 30}  {'─' * 8}  {'─' * 20}")
+        _dash10 = "\u2500" * 10
+        _dash30 = "\u2500" * 30
+        _dash8  = "\u2500" * 8
+        _dash20 = "\u2500" * 20
+        print(f"  {_dash10}  {_dash30}  {_dash8}  {_dash20}")
         for env in all_envs:
             creds = all_creds.get(env)
-            marker = "✓" if creds else "✗"
+            marker = "\u2713" if creds else "\u2717"
             user_col = creds["email"] if creds else "(not authenticated)"
-            status_col = "active" if (creds and store.is_token_valid(env)) else ("expired" if creds else "")
+            status_col = (
+                "active" if (creds and store.is_token_valid(env))
+                else ("expired" if creds else "")
+            )
             expires_col = creds.get("expires_at", "") if creds else ""
-            active_marker = " ◀" if env == active else ""
-            print(f"  {env:<10}  {marker} {user_col:<28}  {status_col:<8}  {expires_col}{active_marker}")
+            active_marker = " \u25c0" if env == active else ""
+            print(f"  {env:<10}  {marker} {user_col:<28}  {status_col:<8}  "
+                  f"{expires_col}{active_marker}")
 
         print()
         print(f"  Active environment: {active}")
@@ -339,11 +642,10 @@ def _run_auth(args: Any) -> None:
         creds = store.get(env)
         if not creds or not creds.get("access_token"):
             raise SystemExit(
-                f"✗ Not authenticated for '{env}'. "
+                f"\u2717 Not authenticated for '{env}'. "
                 f"Run: lineagelens auth login --env {env}"
             )
         # Write only the raw token — no trailing newline noise for scripts
-        import sys
         print(creds["access_token"], end="")
         sys.stdout.flush()
 
@@ -353,265 +655,14 @@ def _run_auth(args: Any) -> None:
         store.set_active_env(env)
         creds = store.get(env)
         if creds:
-            print(f"  ✓ Active environment set to '{env}' ({creds['email']})")
+            print(f"  \u2713 Active environment set to '{env}' ({creds['email']})")
         else:
-            print(f"  ✓ Active environment set to '{env}'")
-            print(f"  ⚠  Not yet authenticated. Run: lineagelens auth login --env {env}")
+            print(f"  \u2713 Active environment set to '{env}'")
+            print(f"  \u26a0  Not yet authenticated. "
+                  f"Run: lineagelens auth login --env {env}")
+
+    return 0
 
 
-def main() -> None:
-
-    parser = argparse.ArgumentParser(prog="lineagelens", description="Evidence-labelled Python code lineage for humans and coding agents")
-    commands = parser.add_subparsers(dest="command", required=True, help="Command to run")
-
-    init_cmd = commands.add_parser("init", help="Initialize lineagelens.yaml")
-    init_cmd.add_argument("project", type=Path, help="Project directory")
-
-    analyze_cmd = commands.add_parser("analyze", help="Analyze Python code and build graph")
-    analyze_cmd.add_argument("project", type=Path, help="Project directory")
-    analyze_cmd.add_argument(
-        "--engine",
-        choices=["compiler", "tree-sitter", "scip", "hybrid"],
-        default=None,
-        help="AST analysis engine (default: compiler or value from lineagelens.yaml)",
-    )
-    analyze_cmd.add_argument("--strict", action="store_true", help="Exit with nonzero code if any failures occur")
-
-    analyze_cmd.add_argument(
-        "--no-jedi",
-        action="store_true",
-        help="Skip type inference. Faster, resolves fewer dynamic calls (useful on PR-time CI runs)",
-    )
-    analyze_cmd.add_argument("--quiet", action="store_true", help="Do not print the analysis summary")
-
-    serve_cmd = commands.add_parser("serve", help="Start local web UI and GraphQL server")
-    serve_cmd.add_argument("project", type=Path, help="Project directory")
-
-    check_cmd = commands.add_parser(
-        "check",
-        help="Fail on newly introduced dead code (CI ratchet)",
-        description=(
-            "Compare dead-code candidates against a committed baseline and exit 1 only "
-            "on ones that are new. A ratchet is adoptable on day one, where an absolute "
-            "gate would fail every existing codebase and get switched off."
-        ),
-    )
-    check_cmd.add_argument("project", type=Path, help="Project directory")
-    check_cmd.add_argument(
-        "--baseline",
-        type=Path,
-        default=None,
-        help="Baseline file (default: <output dir>/dead-code-baseline.json)",
-    )
-    check_cmd.add_argument(
-        "--update-baseline",
-        action="store_true",
-        help="Rewrite the baseline from the current state and exit 0",
-    )
-    check_cmd.add_argument(
-        "--fail-on",
-        choices=list(SEVERITY),
-        default="dead",
-        help="Least severe verdict that should fail (default: dead)",
-    )
-    check_cmd.add_argument(
-        "--max-new",
-        type=int,
-        default=0,
-        help="Tolerate this many new candidates before failing (default: 0)",
-    )
-    check_cmd.add_argument(
-        "--analyze",
-        action="store_true",
-        help="Re-run the analysis first instead of using the stored graph",
-    )
-
-    hook_cmd = commands.add_parser("hook", help="Manage the git hook that keeps the graph current")
-    hook_cmd.add_argument("action", choices=["install", "uninstall", "status"])
-    hook_cmd.add_argument("project", type=Path, nargs="?", default=Path("."), help="Project directory")
-    hook_cmd.add_argument(
-        "--pre-commit",
-        action="store_true",
-        help="Use pre-commit instead of post-commit (adds seconds to every commit)",
-    )
-    hook_cmd.add_argument(
-        "--force", action="store_true", help="Append to a hook LineageLens did not create"
-    )
-
-    watch_cmd = commands.add_parser("watch", help="Run background watcher daemon to update index on file save")
-    watch_cmd.add_argument("project", type=Path, nargs="?", default=Path("."), help="Project directory")
-    watch_cmd.add_argument("--daemon", action="store_true", help="Run as detached background daemon")
-    watch_cmd.add_argument("--stop", action="store_true", help="Stop running background daemon")
-    watch_cmd.add_argument("--status", action="store_true", help="Check running status of background watcher daemon")
-
-    sync_cmd = commands.add_parser("sync", help="Incrementally sync a single file into SQLite index")
-    sync_cmd.add_argument("file", type=str, help="Relative path to file to sync")
-    sync_cmd.add_argument("project", type=Path, nargs="?", default=Path("."), help="Project directory")
-
-    # ── auth ──────────────────────────────────────────────────────────────────
-    _envs = ["prod", "stage", "dev", "local"]
-    auth_cmd = commands.add_parser("auth", help="Authenticate with ContextServe.ai")
-    auth_sub = auth_cmd.add_subparsers(dest="auth_command", required=True)
-
-    login_p = auth_sub.add_parser("login", help="Log in via browser + one-time code")
-    login_p.add_argument("--env", "-e", default="prod", choices=_envs,
-                         help="Target environment (default: prod)")
-    login_p.add_argument("--no-browser", action="store_true",
-                         help="Print URL instead of opening browser (useful over SSH)")
-    login_p.add_argument("--reauth", action="store_true",
-                         help="Re-authenticate even if a valid token already exists")
-    login_p.add_argument("--timeout", type=int, default=300,
-                         help="Seconds to wait for browser login (default: 300)")
-
-    logout_p = auth_sub.add_parser("logout", help="Revoke and remove stored credentials")
-    logout_p.add_argument("--env", "-e", default="prod", choices=_envs)
-    logout_p.add_argument("--all", action="store_true", help="Log out of all environments")
-
-    auth_sub.add_parser("status", help="Show authentication status for all environments")
-
-    token_p = auth_sub.add_parser("token", help="Print raw bearer token to stdout")
-    token_p.add_argument("--env", "-e", default="prod", choices=_envs)
-
-    switch_p = auth_sub.add_parser("switch-env", help="Change active environment")
-    switch_p.add_argument("env", choices=_envs)
-
-    args = parser.parse_args()
-
-    # ── auth — handled before project-path validation (no project dir needed) ──
-    if args.command == "auth":
-        _run_auth(args)
-        return
-
-    project = args.project.resolve()
-
-    # Validate project path exists
-    if not project.exists():
-        parser.error(f"Project directory does not exist: {project}")
-    if not project.is_dir():
-        parser.error(f"Not a directory: {project}")
-
-
-    if args.command == "watch":
-        from .watcher import LineageLensWatcher
-        watcher = LineageLensWatcher(project)
-        if args.stop:
-            stopped = watcher.stop()
-            if stopped:
-                print(f"✓ Stopped LineageLens watcher for {project}")
-            else:
-                print("LineageLens watcher is not currently running.")
-            return
-        if args.status:
-            st = watcher.get_status()
-            if st["running"]:
-                print(f"✓ LineageLens watcher active (PID {st['pid']})")
-            else:
-                print("• LineageLens watcher is not running.")
-            return
-
-        print(f"🚀 Starting LineageLens watcher daemon for {project}...")
-        watcher.start(daemon=args.daemon)
-        return
-
-    if args.command == "sync":
-        from .db import DB_NAME, SQLiteIndexDB
-        from .incremental import IncrementalAnalyzer
-        db = SQLiteIndexDB(project / ".lineagelens" / DB_NAME)
-        analyzer = IncrementalAnalyzer()
-        ok = analyzer.sync_file(project, args.file, db)
-        if ok:
-            print(f"✓ Incremental sync complete: {args.file}")
-        else:
-            print(f"• File skipped or failed to sync: {args.file}")
-        return
-
-    if args.command == "init":
-        destination = project / "lineagelens.yaml"
-        if destination.exists():
-            parser.error(f"{destination} already exists")
-        yaml_content, notes = config_template(project)
-        destination.write_text(yaml_content, encoding="utf-8")
-
-        # Print summary
-        print(f"✓ Created {destination}\n")
-
-        if notes:
-            print("Auto-detection results:")
-            for note in notes:
-                print(f"  {note}")
-
-        # Parse the YAML to show what was written
-        config = ProjectConfig.load(project, destination)
-        print("\nConfiguration written:")
-        print(f"  source_roots: {list(config.source_roots)}")
-        print(f"  test_roots: {list(config.test_roots)}")
-        print(f"  frameworks: {list(config.frameworks)}")
-
-        print("\nNext steps:")
-        print("  1. Review the configuration in lineagelens.yaml")
-        print("  2. Run: lineagelens analyze .")
-        print("  3. Optionally run: lineagelens serve . (for web UI)")
-
-        return
-
-    if args.command == "hook":
-        kind = "pre-commit" if args.pre_commit else "post-commit"
-        try:
-            if args.action == "install":
-                path = hooks.install(project, kind=kind, force=args.force)
-                print(f"✓ Installed {kind} hook at {path}")
-                if kind == "pre-commit":
-                    print("  Note: this runs on every commit and will add a few seconds each time.")
-                print("\n  Add .lineagelens/ to .gitignore -- the graph is a build artifact,")
-                print("  not source. Publish it from CI if agents need it centrally.")
-            elif args.action == "uninstall":
-                removed = hooks.uninstall(project, kind=kind)
-                print(f"✓ Removed the managed block from the {kind} hook" if removed
-                      else f"No LineageLens block found in the {kind} hook")
-            else:
-                for name, present in hooks.status(project).items():
-                    print(f"  {name:12s} {'installed' if present else '-'}")
-        except hooks.HookError as e:
-            raise SystemExit(f"✗ {e}") from e
-        return
-
-    if args.command == "check":
-        raise SystemExit(run_check(project, args))
-
-    # analyze and serve commands
-    config = ProjectConfig.load(project)
-    _graph_file, _report_file, analysis_report = build(
-        project,
-        quiet=getattr(args, "quiet", False),
-        jedi=False if getattr(args, "no_jedi", False) else None,
-        engine=getattr(args, "engine", None),
-    )
-
-
-    if args.command == "serve":
-        # Check if frontend is available (provide guidance if not, but don't block)
-        check_frontend_available()
-
-        try:
-            import uvicorn
-
-            from .web import create_app
-        except ImportError as exc:
-            raise SystemExit("Install LineageLens with `pip install -e '.[web]'` to serve the UI and GraphQL API.") from exc
-
-        print(f"\n🚀 Starting LineageLens server at http://{config.server.host}:{config.server.port}")
-        print("   Press Ctrl+C to stop\n")
-        uvicorn.run(create_app(project, config), host=config.server.host, port=config.server.port)
-
-    # Check for failures if --strict is set
-    if (
-        args.command == "analyze"
-        and args.strict
-        and analysis_report is not None
-        and analysis_report.has_failures()
-    ):
-        raise SystemExit(1)
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

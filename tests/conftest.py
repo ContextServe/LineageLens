@@ -1,12 +1,10 @@
-"""Shared pytest configuration for the LineageLens test suite.
+"""Shared pytest configuration.
 
 ``pythonpath = ["src"]`` in ``pyproject.toml`` is the primary mechanism that
-makes ``import lineagelens`` resolve to the working tree. This module is the
-belt-and-braces version for anyone invoking pytest from an unusual cwd, and it
-exposes the fixture-corpus paths that the golden reachability tests use.
-
-See ``test_import_hygiene.py`` for the guard that fails loudly when a stale
-installed wheel shadows ``src/``.
+makes ``import lineagelens`` resolve to the working tree. This is the
+belt-and-braces version for anyone invoking pytest from an unusual cwd, plus a
+guard against a stale installed wheel shadowing ``src/`` -- which silently
+tests the wrong code.
 """
 
 from __future__ import annotations
@@ -18,29 +16,22 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-# The golden corpus contains its own conftest.py and test_*.py. Those files are
-# *data* -- input to the analyzer -- and must never be collected as real tests.
-collect_ignore_glob = ["fixtures/*"]
 
+@pytest.fixture(scope="session", autouse=True)
+def _assert_working_tree_is_under_test() -> None:
+    """Fail loudly if an installed copy shadows the working tree."""
+    import lineagelens
 
-@pytest.fixture(scope="session")
-def repo_root() -> Path:
-    """Absolute path to the repository root."""
-    return REPO_ROOT
-
-
-@pytest.fixture(scope="session")
-def fixtures_root() -> Path:
-    """Absolute path to ``tests/fixtures``."""
-    return FIXTURES
-
-
-@pytest.fixture(scope="session")
-def corpus_root() -> Path:
-    """Absolute path to the golden reachability corpus project root."""
-    return FIXTURES / "reachability_corpus"
+    loaded = Path(lineagelens.__file__).resolve()
+    try:
+        loaded.relative_to(SRC_ROOT)
+    except ValueError:  # pragma: no cover - only on a misconfigured env
+        pytest.fail(
+            f"lineagelens imported from {loaded}, not {SRC_ROOT}. "
+            f"An installed wheel is shadowing the working tree; "
+            f"run `pip install -e .` or unset PYTHONPATH."
+        )

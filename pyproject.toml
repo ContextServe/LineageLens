@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lineagelens"
-version = "0.1.0"
-description = "Evidence-labelled Python code lineage for humans and coding agents."
+version = "0.2.0"
+description = "Deterministic multi-language code graph: control flow, data flow and cross-service contracts, for humans and coding agents."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -16,24 +16,43 @@ classifiers = [
 ]
 dependencies = [
   "PyYAML>=6.0",
+  # jedi is the vendored Tier B resolver for Python (§7.2): a wheel, so Python
+  # needs no external toolchain.
   "jedi>=0.19",
-  "fastapi>=0.110",
-  "strawberry-graphql[fastapi]>=0.235",
-  "uvicorn>=0.29",
-  "pydantic>=2.0",
-  "watchdog>=3.0.0",
   "httpx>=0.27",
   "tomli>=2.0; python_version<'3.11'",
+
+  # Tier A extraction is not optional (issue #51 §7.1), so tree-sitter and every
+  # grammar is a hard dependency rather than an extra. Previously `tree-sitter`
+  # sat behind an extra and *no grammar package was declared at all*, so
+  # `_get_tree_sitter_parser` returned None for all 12 advertised languages and
+  # every non-Python file silently fell through to a regex line scanner. On
+  # Apache Dubbo that produced 4,297 "classes" matched from `"class " in line`
+  # and five "methods" that were string literals from a switch statement.
+  #
+  # Versions are pinned exactly, not floored. A grammar upgrade changes parse
+  # output, which must invalidate the index rather than silently alter results;
+  # the pinned set's digest is recorded in graph_meta.grammar_digest (§11).
+  # A `>=` floor here would make `--verify-determinism` unenforceable.
+  "tree-sitter==0.26.0",
+  "tree-sitter-python==0.25.0",
+  "tree-sitter-java==0.23.5",
+  "tree-sitter-javascript==0.25.0",
+  "tree-sitter-typescript==0.23.2",
+  "tree-sitter-go==0.25.0",
+  "tree-sitter-rust==0.24.2",
+  "tree-sitter-c-sharp==0.23.5",
 ]
 
 [project.optional-dependencies]
-web = ["fastapi>=0.110", "strawberry-graphql[fastapi]>=0.235", "uvicorn>=0.29", "pydantic>=2.0"]
 auth = ["httpx>=0.27"]
 mcp = ["mcp>=1.0"]
-llm = ["httpx>=0.27"]
-treesitter = ["tree-sitter>=0.21.0"]
+watch = ["watchdog>=3.0.0"]
+# SCIP is a Tier B resolver oracle (§7.2), not a graph producer, so it stays
+# optional. Gone: `treesitter` and `hybrid` (tree-sitter is now core and there
+# is no user-selectable engine), `web` (the GraphQL/UI surface was built on the
+# schema-3 core), and `llm` (§11 forbids an LLM in the extraction path).
 scip = ["protobuf>=4.25.0"]
-hybrid = ["tree-sitter>=0.21.0", "protobuf>=4.25.0"]
 
 # ruff is pinned to a minor range, not just a floor. Its default rule set
 # widened between releases, which turned CI lint into a moving target that
@@ -43,16 +62,16 @@ dev = ["pytest>=8.0", "ruff>=0.16,<0.17"]
 
 [project.scripts]
 lineagelens = "lineagelens.cli:main"
-lineagelens-mcp = "lineagelens.mcp_server:main"
+lineagelens-mcp = "lineagelens.mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lineagelens"]
 
-# Include pre-built frontend in the wheel
-# Frontend must be built before packaging: cd frontend && npm install && npm run build
-# Then commit frontend/dist to git before running python -m build .
-[tool.hatch.build.targets.wheel.force-include]
-"frontend/dist" = "lineagelens/frontend/dist"
+# No force-include needed: hatchling ships every file under the package
+# directory, so the extraction specs (*.scm), contract adapters (*.yaml) and the
+# capability matrix (*.json) are included as package data. They are data the
+# package needs at *runtime* -- without them the wheel installs an engine with
+# nothing to run -- so the wheel contents are asserted in tests/test_packaging.py.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -60,11 +79,10 @@ pythonpath = ["src"]
 
 
 [tool.ruff]
-# The reachability corpus is fixture *data*: it is deliberately written to look
-# like real-world code (forward-ref annotations, Optional, a shadowed builtin
-# name) so the analyzer sees realistic input. Linting it would mean rewriting
-# fixtures to satisfy a linter rather than to exercise the analyzer.
-extend-exclude = ["tests/fixtures"]
+# Conformance corpora are fixture *data*, written to look like real-world code
+# so the extractor sees realistic input. Linting them would mean rewriting
+# fixtures to satisfy a linter rather than to exercise the extractor.
+extend-exclude = ["tests/fixtures", "src/lineagelens/conformance/corpus"]
 target-version = "py310"
 
 [tool.ruff.lint]
@@ -88,11 +106,10 @@ select = [
 ]
 
 ignore = [
-  # The analyzer's documented contract is that it never aborts on a bad input
-  # file: a syntax error, an encoding problem or an unexpected AST shape must be
-  # recorded in the report and analysis must continue on the next file. That is
-  # implemented with broad excepts on purpose, and each one records a
-  # FileFailure or a SymbolWarning rather than swallowing the error silently.
+  # Extraction never aborts on a bad input file: a syntax error, an encoding
+  # problem or an unexpected tree shape is recorded in the file's ledger row and
+  # extraction continues. That needs broad excepts, and each one records a
+  # ParseError or a Boundary rather than swallowing the failure silently.
   "BLE001",
   # Same reasoning where the recovery genuinely is "carry on": probing an
   # optional third-party API surface that varies by version.
@@ -112,3 +129,6 @@ ignore = [
 # Tests assert on hard-coded fixture values and build throwaway projects in
 # tmp_path; neither is a security finding.
 "tests/*" = ["S101", "S108"]
+# test_comprehensive.py lives inside the src/ tree (query sub-package) but is
+# a test file with the same exemption requirements.
+"src/**/*test*.py" = ["S101", "S108", "B009"]
