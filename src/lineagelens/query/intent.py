@@ -76,12 +76,10 @@ def detect_intent(query: str, store: GraphStore | None = None) -> QueryIntent:
             return QueryIntent.SEARCH
 
     # 5. Check if it's unambiguously a single symbol (qualified name)
-    if "/" not in query and " " not in query and len(query) > 3:
-        # Could be a symbol we didn't find - try qualified name lookup
-        if store is not None:
-            by_qname = store.nodes_by_qualified_name(query)
-            if by_qname:
-                return QueryIntent.SYMBOL_LOOKUP
+    if "/" not in query and " " not in query and len(query) > 3 and store is not None:
+        by_qname = store.nodes_by_qualified_name(query)
+        if by_qname:
+            return QueryIntent.SYMBOL_LOOKUP
 
     # 6. Default: high-level exploration
     return QueryIntent.EXPLORE

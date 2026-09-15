@@ -644,8 +644,8 @@ class GraphStore:
             base_params.append(service_id)
 
         # Try AND first (exact multi-term match)
-        and_clauses = ["nodes_fts MATCH ?"] + base_clauses
-        and_params = [match] + base_params + [limit]
+        and_clauses = ["nodes_fts MATCH ?", *base_clauses]
+        and_params = [match, *base_params, limit]
 
         # `clauses` holds only literals defined above; all values are in `params`.
         rows = self.conn.execute(
@@ -664,8 +664,8 @@ class GraphStore:
         if not results and " " in query:
             or_match = _fts_query_or(query)  # Convert to OR semantics
             if or_match:
-                or_clauses = ["nodes_fts MATCH ?"] + base_clauses
-                or_params = [or_match] + base_params + [limit]
+                or_clauses = ["nodes_fts MATCH ?", *base_clauses]
+                or_params = [or_match, *base_params, limit]
 
                 rows = self.conn.execute(
                     f"""
@@ -853,7 +853,7 @@ class GraphStore:
         Returns verbatim source with line numbers.
         """
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, encoding='utf-8') as f:
                 lines = f.readlines()
         except (FileNotFoundError, UnicodeDecodeError):
             return ""

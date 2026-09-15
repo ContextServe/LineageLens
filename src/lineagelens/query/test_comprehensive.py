@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from .intent import QueryIntent, detect_intent, suggest_tool
 
 
@@ -49,13 +47,10 @@ class TestPhase2EnhancedSearch:
 
     def test_empty_search_analysis_structure(self):
         """Empty search analysis has required fields."""
-        from ..query.api import QueryEngine
-        from ..store import GraphStore
 
         # This would need a real store for full testing
         # Here we verify the _analyze_empty_search structure
         # In integration tests, this is verified with actual store
-        pass
 
 
 class TestPhase3UsageExtraction:
@@ -119,15 +114,13 @@ class TestPhase4Explore:
         from ..api import QueryEngine
 
         assert hasattr(QueryEngine, "explore")
-        assert callable(getattr(QueryEngine, "explore"))
+        assert callable(QueryEngine.explore)
 
     def test_explore_returns_query_result(self):
         """explore() returns a QueryResult object."""
-        from ..budget import QueryResult
 
         # This would need a real store for full testing
         # In integration tests, this is verified with actual store
-        pass
 
 
 class TestPhase5DualModeSearch:
@@ -137,7 +130,6 @@ class TestPhase5DualModeSearch:
         """search() falls back to external usage when local returns 0."""
         # This requires a real store with usage_sites populated
         # Tested in integration tests
-        pass
 
 
 class TestPhase6Integration:
@@ -181,7 +173,6 @@ class TestPhase6Integration:
         # - search() dual-mode (Phase 5) works
 
         # In practice, this is tested with a real store in integration tests
-        pass
 
 
 # Benchmark structure (for later testing)

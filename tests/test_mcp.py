@@ -35,6 +35,7 @@ EXPECTED_TOOLS = {
     "contract_map",
     "list_entry_points",
     "search",
+    "explore",
     "get_symbol",
     "explain",
     "map_stacktrace",
