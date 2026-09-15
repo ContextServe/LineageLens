@@ -170,7 +170,7 @@ class Indexer:
 
         observations: list[Observation] = []
         lang_of_file: dict[str, str] = {}
-        usage_sites: list[dict[str, Any]] = []  # For Phase 3: usage site extraction
+        usage_sites: list[dict] = []  # For Phase 3: usage site extraction
 
         for rel_path, content, dialect in self._walk():
             report.files_seen += 1
@@ -284,7 +284,7 @@ class Indexer:
 
     # ---- pieces -----------------------------------------------------------
 
-    def _write(self, db_path, services, observations, resolved, usage_sites=None) -> GraphStore:  # noqa: F821
+    def _write(self, db_path, services, observations, resolved, usage_sites=None) -> GraphStore:
         """Persist everything in a handful of batched statements.
 
         Writes are batched rather than per file. Writing per file issued three
@@ -335,7 +335,8 @@ class Indexer:
                 for site in usage_sites:
                     file_id = file_ids.get(site["file_path"])
                     if file_id:
-                        try:
+                        import contextlib
+                        with contextlib.suppress(Exception):
                             store.add_usage_site(
                                 symbol_name=site["symbol_name"],
                                 usage_type=site["usage_type"],
@@ -349,9 +350,6 @@ class Indexer:
                                 context_before=site.get("context_before"),
                                 context_after=site.get("context_after"),
                             )
-                        except Exception:
-                            # Skip individual usage site errors
-                            pass
         return store
 
     def _walk(self) -> Iterator[tuple[str, bytes, str]]:

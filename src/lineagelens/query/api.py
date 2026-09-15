@@ -25,7 +25,6 @@ from .analysis import Analyser
 from .budget import Budget, Envelope, QueryResult
 from .traverse import Traverser, kinds_for_intent, source_for
 
-
 #: How many symbols ``explore`` returns with source and flow attached.
 _EXPLORE_DEEP_N = 8
 _EXPLORE_MAX_CHAINS = 24
@@ -170,53 +169,12 @@ class QueryEngine:
             "       sum(refs_unresolved) u FROM coverage"
         ).fetchone()
         if totals and totals["t"]:
-            # `unresolved` is dominated by genuinely external references --
-            # stdlib and third-party names that are correctly not in the graph --
-            # plus ambiguities recorded with their candidate sets. Nothing here
-            # is "not attempted": data flow is always computed.
             total = totals["t"]
-            exact_ratio = round(totals["e"] / total, 3)
-            inferred_ratio = round(totals["i"] / total, 3)
-            unresolved_ratio = round(totals["u"] / total, 3)
-
-            # Get actual count of searchable symbols
-            searchable_count = self.store.conn.execute(
-                "SELECT COUNT(DISTINCT id) FROM nodes"
-            ).fetchone()[0] or 0
-
-            # Get usage site count
-            usage_count = self.store.conn.execute(
-                "SELECT COUNT(*) FROM usage_sites"
-            ).fetchone()[0] or 0
-
-            # Categorize: estimate split between external and ambiguous/typos
-            # For now, assume ~70% of unresolved are external (okay), ~30% are issues
-            external_resolved = round(exact_ratio * 0.8, 3)  # Conservative estimate
-
             envelope.refs = {
-                "total_references": total,
-                "local_defined": {
-                    "exact": exact_ratio,
-                    "inferred": inferred_ratio,
-                    "searchable_count": searchable_count,
-                },
-                "external_packages": {
-                    "resolved": external_resolved,
-                    "unresolved": unresolved_ratio,
-                    "usage_sites_tracked": usage_count,
-                },
-                "searchability": {
-                    "note": (
-                        f"Search indexes {searchable_count} symbols defined in this project. "
-                        f"Coverage shows {unresolved_ratio:.1%} unresolved references "
-                        f"(mostly external packages and stdlib, which is correct)."
-                    ),
-                    "for_external_symbols": (
-                        "Use explore() to find where external packages are used. "
-                        "Search only indexes locally-defined symbols."
-                    ),
-                    "recommend_explore": unresolved_ratio > 0.3,  # High external usage
-                },
+                "total": total,
+                "exact": round(totals["e"] / total, 3),
+                "inferred": round(totals["i"] / total, 3),
+                "unresolved": round(totals["u"] / total, 3),
             }
 
         for row in self.store.conn.execute(
@@ -279,7 +237,7 @@ class QueryEngine:
             lines.append(f"{name} <- {', '.join(others)}{tail}")
         return lines
 
-    def _analyze_empty_search(self, query: str, query_intent: "QueryIntent") -> dict[str, Any]:  # noqa: F821
+    def _analyze_empty_search(self, query: str, query_intent: QueryIntent) -> dict[str, Any]:  # noqa: F821
         """Analyze why a search returned empty and suggest next steps."""
         from .intent import suggest_tool
 
@@ -760,7 +718,7 @@ class QueryEngine:
         """
         from .intent import detect_intent
 
-        resolved, budget, envelope = self._prepare(intent, Intent.PLAN, limit=limit)
+        _resolved, budget, envelope = self._prepare(intent, Intent.PLAN, limit=limit)
         query_intent = detect_intent(query, self.store)
 
         # Depth, not breadth. A measured agent transcript showed 30 shallow rows
