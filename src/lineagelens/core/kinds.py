@@ -231,6 +231,11 @@ class SkipReason(str, Enum):
     EXCLUDED = "excluded"
     MISSING_GRAMMAR = "missing_grammar"
     MISSING_TIER_B = "missing_tier_b"
+    #: The language's capability level is below the floor `--require-level`
+    #: asked for (#56). A data fact on the file row, matching how
+    #: MISSING_TIER_B works, so the degradation survives into the coverage
+    #: envelope instead of being a log line nobody reads.
+    BELOW_REQUIRED_LEVEL = "below_required_level"
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return self.value

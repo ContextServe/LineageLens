@@ -18,6 +18,7 @@
       "files": 1,
       "implements": true,
       "inherits": true,
+      "level": "L2",
       "missing_nodes": [],
       "node_kinds": {
         "class": 3,
@@ -56,6 +57,7 @@
       "implements": "partial",
       "implements_note": "interface satisfaction is structural; requires whole-program method-set matching (\u00a715)",
       "inherits": true,
+      "level": "L2",
       "missing_nodes": [],
       "node_kinds": {
         "constant": 1,
@@ -90,6 +92,7 @@
       "files": 1,
       "implements": true,
       "inherits": true,
+      "level": "L2",
       "missing_nodes": [],
       "node_kinds": {
         "annotation": 1,
@@ -126,6 +129,7 @@
       "files": 1,
       "implements": "n/a",
       "inherits": true,
+      "level": "L2",
       "missing_nodes": [],
       "node_kinds": {
         "class": 3,
@@ -160,6 +164,7 @@
       "files": 1,
       "implements": "n/a",
       "inherits": true,
+      "level": "L2",
       "missing_nodes": [],
       "node_kinds": {
         "class": 4,
@@ -195,6 +200,7 @@
       "implements": "partial",
       "implements_note": "blanket impls have no single resolvable target (\u00a715)",
       "inherits": "n/a",
+      "level": "L2",
       "missing_nodes": [],
       "node_kinds": {
         "constant": 1,
@@ -232,6 +238,7 @@
       "files": 1,
       "implements": true,
       "inherits": true,
+      "level": "L2",
       "missing_nodes": [],
       "node_kinds": {
         "class": 3,

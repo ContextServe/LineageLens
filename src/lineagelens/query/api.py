@@ -191,6 +191,20 @@ class QueryEngine:
         ).fetchall()
         envelope.degraded = [r["lang"] for r in skipped]
 
+        # Capability level per language present (#56). Read from the specs
+        # loaded by *this build*, not stored at index time, so an index read by
+        # a build whose specs have moved on reports what the reader can
+        # actually deliver rather than what the writer could.
+        from ..extract.spec import SpecRegistry
+
+        levels = SpecRegistry().levels()
+        envelope.levels = {
+            row["lang"]: levels.get(row["lang"], "unknown")
+            for row in self.store.conn.execute(
+                "SELECT DISTINCT lang FROM files WHERE lang IS NOT NULL"
+            )
+        }
+
     def _node(self, ref: str) -> Node | None:
         """Resolve a node id, a qualified name, or a unique search hit."""
         node = self.store.get_node(ref)
