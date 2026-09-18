@@ -39,6 +39,11 @@ export function DetailPanel({ symbolId }: DetailPanelProps) {
     setImpact(null)
     setCallers(null)
 
+    // `symbolId` comes from the graph view, where node ids are content
+    // hashes with no URL-special characters. Encoded anyway: the panel can
+    // also be opened with a qualified name, which contains `#` — and an
+    // unencoded `#` is a fragment the server never receives, so it would
+    // silently answer about the enclosing module instead (#67).
     const id = encodeURIComponent(symbolId)
 
     queryOne(`/api/v1/symbols/${id}?intent=precise`).then(setSymbol).catch(console.error)

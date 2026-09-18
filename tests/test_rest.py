@@ -90,6 +90,23 @@ def a_qualified_name(client, needle):
     return exact[0]["node"]
 
 
+def strip_transport_additions(payload):
+    """Remove what the HTTP layer adds, leaving the engine's own answer.
+
+    Only ``node_id`` / ``target_id`` (#67) and the ``note`` hint. Kept as one
+    function so a future addition has to be added here deliberately, rather
+    than quietly widening what the route is permitted to invent.
+    """
+    if isinstance(payload, dict):
+        return {
+            k: strip_transport_additions(v) for k, v in payload.items()
+            if k not in ("node_id", "target_id", "note")
+        }
+    if isinstance(payload, list):
+        return [strip_transport_additions(v) for v in payload]
+    return payload
+
+
 def sym(client, needle):
     """A URL-safe path segment for one symbol.
 
@@ -183,7 +200,14 @@ class TestAnswersMatchTheEngine:
         assert response.status_code == 422
 
     def test_impact_matches_the_engine_exactly(self, client, indexed):
-        """The route must not be a second traversal. Assert byte equality."""
+        """The route must not be a second traversal.
+
+        Compared for equality once the transport's own additions are stripped.
+        REST adds a ``node_id`` beside every symbol name (#67) so an answer can
+        be turned into the next URL without encoding; that is a projection
+        concern and the only thing the route is allowed to add. Everything
+        else must come from the engine verbatim, or the two surfaces can drift.
+        """
         from lineagelens.query import QueryEngine
 
         name = a_qualified_name(client, "submit")
@@ -196,7 +220,7 @@ class TestAnswersMatchTheEngine:
             direct = engine.impact_of(name).as_dict()
         finally:
             engine.store.close()
-        assert over_http == direct
+        assert strip_transport_additions(over_http) == direct
 
     def test_unknown_symbol_is_404_not_an_empty_200(self, client):
         """The engine reports a miss in the payload; HTTP says it in the status."""
@@ -305,18 +329,16 @@ class TestDeclaredButNotAnswerable:
         assert client.post("/api/v1/analyze").status_code in (404, 405)
         assert client.get("/api/v1/modules/app/overview").status_code == 404
 
-    def test_an_unencoded_id_silently_resolves_the_wrong_symbol(self, client):
-        """Documents a hazard the server cannot defend against.
+    def test_an_unencoded_id_resolves_the_wrong_symbol_but_says_so(self, client):
+        """The hazard, and the hint that makes it survivable (#67).
 
         Every schema-4 qualified name contains ``#``, which is a URL fragment.
         A client that forgets ``encodeURIComponent`` sends only the part before
         it, so the server receives a valid request for the *module* and answers
-        it correctly -- a confidently wrong answer with nothing to detect.
-
-        Asserted rather than fixed, because there is no server-side fix: the
-        wrong request is indistinguishable from a right one. This test exists so
-        that anyone who breaks the encoding in ``frontend/`` finds the
-        consequence written down.
+        it correctly. The request that arrives is indistinguishable from one
+        that meant the module, so it cannot be rejected -- but it can be
+        annotated, and a hint on a correct answer costs nothing next to
+        silence on a possibly wrong one.
         """
         name = a_qualified_name(client, "save")
         assert "#" in name, "the hazard depends on # being in the name"
@@ -328,6 +350,8 @@ class TestDeclaredButNotAnswerable:
         # The unencoded form answers about the module, not the method.
         assert unencoded["results"][0]["node"] == name.split("#")[0]
         assert unencoded != encoded
+        assert "percent-encode" in unencoded["note"]
+        assert "note" not in encoded, "a correct request must not be annotated"
 
     def test_subresource_routes_are_registered_before_the_bare_route(self, client):
         """The mechanism that stops ``/callers`` being read as part of an id.
@@ -391,3 +415,89 @@ class TestNoIndex:
         response = client.get("/api/v1/coverage")
         assert response.status_code == 404
         assert "lineagelens index" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# node_id, the URL-safe identifier (#67)
+# ---------------------------------------------------------------------------
+
+
+class TestNodeIdRoundTrip:
+    """A client should never have to encode anything.
+
+    Node ids are content hashes with no URL-special characters, so the fix for
+    the truncation hazard is not validation -- it is handing the safe form back
+    in every answer, so the next URL can be built from the last one.
+    """
+
+    def test_search_results_carry_node_id(self, client):
+        first = client.get(
+            "/api/v1/search", params={"text": "save"}
+        ).json()["results"][0]
+        assert "node_id" in first
+        assert "#" not in first["node_id"]
+        assert "/" not in first["node_id"]
+
+    @pytest.mark.parametrize("suffix", ["", "/callers", "/callees", "/impact",
+                                        "/dataflow", "/lineage"])
+    def test_a_raw_node_id_works_on_every_route(self, client, suffix):
+        """No encoding, no escaping, no `#` to lose."""
+        node_id = client.get(
+            "/api/v1/search", params={"text": "save"}
+        ).json()["results"][0]["node_id"]
+        assert client.get(f"/api/v1/symbols/{node_id}{suffix}").status_code == 200
+
+    def test_the_round_trip_returns_the_same_node(self, client):
+        first = client.get(
+            "/api/v1/search", params={"text": "save"}
+        ).json()["results"][0]
+        again = client.get(
+            f"/api/v1/symbols/{first['node_id']}"
+        ).json()["results"][0]
+        assert again["node"] == first["node"]
+
+    def test_nested_shapes_are_annotated_too(self, client):
+        """The reason the annotator walks the payload instead of projecting.
+
+        ``callers_of`` returns paths with a ``hops`` list and ``impact_of``
+        nests dependents under three keys. A per-primitive projection is where
+        the next shape gets forgotten.
+        """
+        node_id = client.get(
+            "/api/v1/search", params={"text": "submit"}
+        ).json()["results"][0]["node_id"]
+
+        hop = client.get(
+            f"/api/v1/symbols/{node_id}/callers"
+        ).json()["results"][0]["hops"][0]
+        assert hop["node_id"]
+
+        impact = client.get(
+            f"/api/v1/symbols/{node_id}/impact"
+        ).json()["results"][0]
+        assert impact["target_id"]
+        assert all(d["node_id"] for d in impact.get("in_process", []))
+
+    def test_an_unresolvable_name_gets_no_null_id(self, client):
+        """Absence, not a falsy value a caller has to special-case."""
+        from lineagelens.rest import _annotate_ids
+
+        annotated = _annotate_ids(
+            {"node": "nothing/here", "results": []}, lambda _name: None
+        )
+        assert "node_id" not in annotated
+
+    def test_control_characters_are_rejected(self, client):
+        """No correct client produces these; a fuzzy match would be worse."""
+        response = client.get("/api/v1/symbols/bad%00id")
+        assert response.status_code == 400
+        assert "control characters" in response.json()["detail"]["error"]
+
+    def test_a_legitimate_module_query_is_not_annotated_forever(self, client):
+        """The note fires on shape, not on every container.
+
+        Asked with a `#` in it, an id is unambiguous and must not be second
+        guessed.
+        """
+        member = sym(client, "save")
+        assert "note" not in client.get(f"/api/v1/symbols/{member}").json()
