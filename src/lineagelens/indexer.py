@@ -362,6 +362,12 @@ class Indexer:
                 replace(edge, file_id=file_ids.get(edge.file_path or ""))
                 for edge in resolved.edges
             ])
+            # ENTRY_POINT mirrors the existence of an EXPOSES edge, so it can
+            # only be derived once those edges exist -- contracts are detected
+            # after nodes are persisted. Inside this transaction, so the flag
+            # and the edge cannot be committed in disagreement.
+            store.derive_entry_point_flags()
+
             store.write_unresolved([
                 replace(ref, file_id=file_ids.get(ref.file_path))
                 for ref in resolved.unresolved
