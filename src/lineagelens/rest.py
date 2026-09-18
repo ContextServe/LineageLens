@@ -18,14 +18,23 @@ land in #60. Answering ``[]`` would be indistinguishable from "analysed, found
 nothing" -- the single failure mode this codebase spends the most effort
 avoiding.
 
-**Symbol ids must be percent-encoded.** Every schema-4 qualified name contains
-``/`` and ``#`` -- ``shop/python/repo#Repository/save``. An unencoded ``#`` is a
-URL *fragment*, so a client that forgets to encode sends only
-``shop/python/repo``; the server receives a valid request for the *module* and
-answers it correctly. The result is a confidently wrong answer that no
-server-side check can catch, because nothing arrived to look wrong. Clients must
-send ``encodeURIComponent(id)``, as ``frontend/`` already does; ``sym()`` in
-``tests/test_rest.py`` is the same thing for tests.
+**Use ``node_id`` in URLs, not a qualified name.** Every schema-4 qualified
+name contains ``/`` and ``#`` -- ``shop/python/repo#Repository/save``. An
+unencoded ``#`` is a URL *fragment*, so a client that forgets to encode sends
+only ``shop/python/repo``; the server receives a valid request for the *module*
+and answers it correctly. Nothing arrives that looks wrong, so no amount of
+validation can catch it.
+
+The fix is to stop requiring the fragile form. Node ids are content hashes and
+contain no URL-special characters, so every query result carries ``node_id``
+alongside ``node`` and any answer can be turned into the next URL with no
+encoding at all (#67). Qualified names still work, percent-encoded, because
+they are what a human reads.
+
+Two safety nets for the cases that remain: a request whose id resolves to a
+container although the caller did not ask for one carries a ``note`` saying the
+id may have been truncated, and an id containing raw control characters is
+rejected outright, since no correct client produces one.
 
 FastAPI is an optional dependency (``pip install lineagelens[rest]``). Import
 this module only when serving.
@@ -146,6 +155,63 @@ def _not_implemented(capability: str, issue: str) -> HTTPException:
     )
 
 
+#: Node kinds that contain other nodes. A request that resolved to one of
+#: these, from an id with no ``#``, is the shape a fragment-truncated id takes.
+_CONTAINER_KINDS: frozenset[str] = frozenset({
+    "module", "package", "namespace", "file", "class", "interface",
+})
+
+#: Keys in a query result whose value is a symbol name a client may want to
+#: turn back into a URL. Annotated with a sibling ``node_id``.
+_NAME_KEYS: tuple[str, ...] = ("node", "target")
+
+#: Characters that cannot appear in a correctly-encoded path segment. A raw
+#: newline or NUL in an id means the client built the URL by string
+#: concatenation without escaping, so the id is not trustworthy -- better a 400
+#: than a fuzzy match through the engine's search fallback.
+_ILLEGAL = frozenset(chr(c) for c in (*range(0x20), 0x7F))
+
+
+def _reject_control_characters(symbol_id: str) -> None:
+    bad = sorted(_ILLEGAL & set(symbol_id))
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "symbol id contains raw control characters",
+                "codepoints": [hex(ord(c)) for c in bad],
+                "hint": "percent-encode the id, or use the node_id form",
+            },
+        )
+
+
+def _annotate_ids(payload: Any, resolve: Any) -> Any:
+    """Add ``node_id`` beside every symbol name in a result.
+
+    Walks the whole payload rather than special-casing each primitive, because
+    the shapes genuinely differ -- ``get_node`` returns one flat object,
+    ``callers_of`` returns paths with a ``hops`` list, ``impact_of`` nests
+    dependents under three separate keys -- and a per-primitive projection
+    would be the place the next shape gets forgotten.
+
+    Only annotates names that resolve. An unresolvable name is left alone
+    rather than given a null id: a client checking ``if node_id`` should see
+    absence, not a falsy value it has to special-case.
+    """
+    if isinstance(payload, dict):
+        out = {}
+        for key, value in payload.items():
+            out[key] = _annotate_ids(value, resolve)
+            if key in _NAME_KEYS and isinstance(value, str):
+                node_id = resolve(value)
+                if node_id is not None:
+                    out[f"{key}_id"] = node_id
+        return out
+    if isinstance(payload, list):
+        return [_annotate_ids(item, resolve) for item in payload]
+    return payload
+
+
 def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     """Build the ``/api/v1`` router for one indexed project.
 
@@ -184,8 +250,9 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     guarded = [Depends(verify_api_key)]
     dep = Depends(engine)
 
-    def _result(payload: Any) -> dict[str, Any]:
-        """Serialise a QueryResult, surfacing a resolution failure as 404.
+    def _result(payload: Any, eng: QueryEngine,
+                requested: str | None = None) -> dict[str, Any]:
+        """Serialise a QueryResult, add ``node_id``s, and 404 a miss.
 
         The engine reports an unknown symbol in ``extra['error']`` rather than
         raising, because an MCP client wants the envelope alongside the miss.
@@ -194,7 +261,54 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         out = payload.as_dict()
         if "error" in out:
             raise HTTPException(status_code=404, detail=out["error"])
+
+        cache: dict[str, str | None] = {}
+
+        def resolve(name: str) -> str | None:
+            # One lookup per distinct name per request. A hub answer repeats
+            # the same qualified name across dozens of hops.
+            if name not in cache:
+                node = eng.store.get_node(name)
+                if node is None:
+                    matches = eng.store.nodes_by_qualified_name(name)
+                    node = matches[0] if len(matches) == 1 else None
+                cache[name] = node.id if node else None
+            return cache[name]
+
+        out = _annotate_ids(out, resolve)
+        note = _truncation_note(eng, requested, out)
+        if note:
+            out["note"] = note
         return out
+
+    def _truncation_note(
+        eng: QueryEngine, requested: str | None, out: dict[str, Any]
+    ) -> str | None:
+        """Warn when an id may have lost its ``#`` to a URL fragment.
+
+        Cannot be an error. A caller may legitimately ask about a module, and
+        the request that arrives is indistinguishable from one that meant a
+        member -- that is the whole difficulty. So it is a hint on an otherwise
+        correct answer, which costs nothing, rather than silence on a possibly
+        wrong one, which is what #67 is about.
+
+        Only fires when the requested id has no ``#`` and resolved to a
+        container, so a genuine module query is not annotated on every call.
+        """
+        if not requested or "#" in requested:
+            return None
+        node = eng.store.get_node(requested)
+        if node is None:
+            matches = eng.store.nodes_by_qualified_name(requested)
+            node = matches[0] if len(matches) == 1 else None
+        if node is None or node.kind.value not in _CONTAINER_KINDS:
+            return None
+        return (
+            f"resolved to a {node.kind.value}; the requested id has no '#'. "
+            f"If you meant a member, percent-encode the id "
+            f"(encodeURIComponent) or use the node_id form -- an unencoded '#' "
+            f"is a URL fragment and never reaches the server."
+        )
 
     # ---- visualisation ----------------------------------------------------
 
@@ -279,7 +393,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
             eng.search(
                 text, kinds=kinds, lang=lang, service=service,
                 intent=intent, limit=limit,
-            )
+            ),
+            eng,
         )
 
     @router.get("/symbols/{symbol_id:path}/callers", dependencies=guarded)
@@ -291,9 +406,11 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         max_depth: int | None = None,
         eng: QueryEngine = dep,
     ) -> dict[str, Any]:
+        _reject_control_characters(symbol_id)
         return _result(
             eng.callers_of(symbol_id, transitive=transitive, intent=intent,
-                           limit=limit, max_depth=max_depth)
+                           limit=limit, max_depth=max_depth),
+            eng, symbol_id,
         )
 
     @router.get("/symbols/{symbol_id:path}/callees", dependencies=guarded)
@@ -305,9 +422,11 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         max_depth: int | None = None,
         eng: QueryEngine = dep,
     ) -> dict[str, Any]:
+        _reject_control_characters(symbol_id)
         return _result(
             eng.callees_of(symbol_id, transitive=transitive, intent=intent,
-                           limit=limit, max_depth=max_depth)
+                           limit=limit, max_depth=max_depth),
+            eng, symbol_id,
         )
 
     @router.get("/symbols/{symbol_id:path}/lineage", dependencies=guarded)
@@ -326,10 +445,12 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         be reconstructed from the response. This answers the question the
         frontend was actually asking, with real distances.
         """
+        _reject_control_characters(symbol_id)
         walk = eng.callees_of if direction == "forward" else eng.callers_of
         out = _result(
             walk(symbol_id, transitive=True, intent=intent,
-                 limit=limit, max_depth=max_depth)
+                 limit=limit, max_depth=max_depth),
+            eng, symbol_id,
         )
         out["direction"] = direction
         return out
@@ -342,8 +463,11 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         max_depth: int | None = None,
         eng: QueryEngine = dep,
     ) -> dict[str, Any]:
+        _reject_control_characters(symbol_id)
         return _result(
-            eng.impact_of(symbol_id, intent=intent, limit=limit, max_depth=max_depth)
+            eng.impact_of(symbol_id, intent=intent, limit=limit,
+                          max_depth=max_depth),
+            eng, symbol_id,
         )
 
     @router.get("/symbols/{symbol_id:path}/dataflow", dependencies=guarded)
@@ -355,9 +479,11 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         max_depth: int | None = None,
         eng: QueryEngine = dep,
     ) -> dict[str, Any]:
+        _reject_control_characters(symbol_id)
         return _result(
             eng.dataflow_of(symbol_id, direction=direction, intent=intent,
-                            limit=limit, max_depth=max_depth)
+                            limit=limit, max_depth=max_depth),
+            eng, symbol_id,
         )
 
     # Registered last: ``{symbol_id:path}`` would otherwise swallow the
@@ -366,7 +492,8 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def symbol(
         symbol_id: str, intent: str | None = None, eng: QueryEngine = dep
     ) -> dict[str, Any]:
-        return _result(eng.get_node(symbol_id, intent=intent))
+        _reject_control_characters(symbol_id)
+        return _result(eng.get_node(symbol_id, intent=intent), eng, symbol_id)
 
     # ---- whole-graph questions -------------------------------------------
 
@@ -374,7 +501,7 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     def entry_points(
         kind: str | None = None, limit: int | None = None, eng: QueryEngine = dep
     ) -> dict[str, Any]:
-        return _result(eng.entry_points(kind=kind, limit=limit))
+        return _result(eng.entry_points(kind=kind, limit=limit), eng)
 
     @router.get("/contracts", dependencies=guarded)
     def contracts(
@@ -385,7 +512,9 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
         eng: QueryEngine = dep,
     ) -> dict[str, Any]:
         return _result(
-            eng.contract_map(service=service, kind=kind, intent=intent, limit=limit)
+            eng.contract_map(service=service, kind=kind, intent=intent,
+                             limit=limit),
+            eng,
         )
 
     @router.get("/paths", dependencies=guarded)
@@ -400,18 +529,19 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     ) -> dict[str, Any]:
         return _result(
             eng.find_paths(start, goal, intent=intent, limit=limit,
-                           max_depth=max_depth, max_paths=max_paths)
+                           max_depth=max_depth, max_paths=max_paths),
+            eng,
         )
 
     @router.get("/explain", dependencies=guarded)
     def explain(src: str, dst: str, eng: QueryEngine = dep) -> dict[str, Any]:
-        return _result(eng.explain(src, dst))
+        return _result(eng.explain(src, dst), eng)
 
     @router.get("/coverage", dependencies=guarded)
     def coverage(
         scope: str | None = None, eng: QueryEngine = dep
     ) -> dict[str, Any]:
-        return _result(eng.coverage_report(scope))
+        return _result(eng.coverage_report(scope), eng)
 
     # ---- declared, not yet answerable ------------------------------------
 
