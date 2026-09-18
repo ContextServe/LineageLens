@@ -1,4 +1,5 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
+import type { GraphNode } from '../types'
 
 export interface ScopeFilters {
   showModules: boolean
@@ -9,20 +10,9 @@ export interface ScopeFilters {
   linkKinds: Record<string, boolean>
 }
 
-export interface NodeItem {
-  id: string
-  label: string
-  kind: string
-  parent?: string
-  entry_point?: string
-  async_: boolean
-  has_resiliency_flag: boolean
-  is_test: boolean
-  verdict?: string
-  scope?: string
-  duplicate_name: boolean
-  lines_of_code?: number
-}
+// One definition, in `types.ts`. This alias stays so existing imports of
+// `NodeItem` keep working; the fields live with the API shape they mirror.
+export type NodeItem = GraphNode
 
 interface HUDPanelsProps {
   nodes: NodeItem[]
@@ -40,8 +30,12 @@ export function HUDPanels({
   onSelectSymbol,
   filters,
   onFiltersChange,
-  selectedSymbol,
-  onClearSelection,
+  // Accepted and unused. `DetailPanel` owns the selected symbol, so these are
+  // vestiges of an earlier split where the HUD did. Kept in the signature so
+  // `App.tsx` does not change shape, underscored so the compiler stops
+  // reporting them and a reader knows it is deliberate rather than a bug.
+  selectedSymbol: _selectedSymbol,
+  onClearSelection: _onClearSelection,
 }: HUDPanelsProps) {
   // Collapsible states
   const [collapsedPanels, setCollapsedPanels] = useState<Record<string, boolean>>({
@@ -53,7 +47,9 @@ export function HUDPanels({
 
   // Massive objects state
   const [locThreshold, setLocThreshold] = useState(50)
-  const [massiveKinds, setMassiveKinds] = useState({
+  // Never updated: the kind filter is fixed for now, and a setter nothing
+  // calls is what a UI control was meant to use.
+  const [massiveKinds] = useState({
     module: true,
     class: true,
     function: true,
@@ -71,8 +67,18 @@ export function HUDPanels({
   const totalModules = nodes.filter(n => n.kind === 'module' || n.kind === 'package').length
   const totalClasses = nodes.filter(n => n.kind === 'class').length
   const totalFunctions = nodes.filter(n => n.kind === 'function' || n.kind === 'method').length
-  const totalRisks = nodes.filter(n => n.has_resiliency_flag).length
-  const deadCodeCount = nodes.filter(n => n.verdict === 'dead' || n.verdict === 'probably_dead').length
+  // Both of these are null on every node until #60 and #49 land. Counting
+  // them would render a confident `0`, which reads as "analysed, none found"
+  // -- the one thing an unanalysed field must never look like. `null` here is
+  // rendered as an em dash instead (#64).
+  const risksComputed = nodes.some(n => n.has_resiliency_flag !== null)
+  const verdictsComputed = nodes.some(n => n.verdict !== null)
+  const totalRisks = risksComputed
+    ? nodes.filter(n => n.has_resiliency_flag).length
+    : null
+  const deadCodeCount = verdictsComputed
+    ? nodes.filter(n => n.verdict === 'dead' || n.verdict === 'probably_dead').length
+    : null
 
   // Calculate massive objects
   const massiveObjects = nodes
@@ -106,8 +112,16 @@ export function HUDPanels({
               <div className="stat-item"><span className="stat-num">{totalClasses}</span><span className="stat-lbl">Classes</span></div>
               <div className="stat-item"><span className="stat-num">{totalFunctions}</span><span className="stat-lbl">Functions</span></div>
               <div className="stat-item"><span className="stat-num">{edges.length}</span><span className="stat-lbl">Relations</span></div>
-              <div className="stat-item danger"><span className="stat-num">{deadCodeCount}</span><span className="stat-lbl">Dead Code</span></div>
-              <div className="stat-item warning"><span className="stat-num">{totalRisks}</span><span className="stat-lbl">Risks</span></div>
+              <div className={`stat-item ${deadCodeCount === null ? 'unsupported' : 'danger'}`}
+                   title={deadCodeCount === null ? 'Not computed yet (#49)' : undefined}>
+                <span className="stat-num">{deadCodeCount ?? '\u2014'}</span>
+                <span className="stat-lbl">Dead Code</span>
+              </div>
+              <div className={`stat-item ${totalRisks === null ? 'unsupported' : 'warning'}`}
+                   title={totalRisks === null ? 'Not computed yet (#60)' : undefined}>
+                <span className="stat-num">{totalRisks ?? '\u2014'}</span>
+                <span className="stat-lbl">Risks</span>
+              </div>
             </div>
           )}
         </div>
