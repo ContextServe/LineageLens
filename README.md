@@ -188,12 +188,52 @@ usually no follow-up file read. Every one is budgeted and reports truncation.
 ```
 lineagelens index [path]      build the graph (all languages, one graph)
   --require-tier-b[=LANGS]    skip languages with no type resolver (CI strictness)
+  --require-level=SPEC        skip languages below a capability level: L2, or
+                              kotlin:L0,java:L2
+  --upload                    publish the graph to ContextServe (opt-in)
+  --upload-required           make a publish failure fatal
+  --dry-run                   print the exact payload, send nothing
 lineagelens query [path] ...  the twelve primitives; --json for machine output
 lineagelens coverage [path]   what the index does and does not cover
 lineagelens verify [path]     rebuild twice, confirm identical
 lineagelens ontology [path]   measured capability for this installation
 lineagelens mcp [path]        run the MCP server over stdio
+lineagelens serve [path]      HTTP surface for the dashboard (loopback default)
+lineagelens auth ...          login, logout, status, token, switch-env
 ```
+
+## Publishing a graph
+
+Indexing is local and offline. `--upload` is the only thing that sends
+anything, and a test fails on any outbound socket during a plain `index`.
+
+```
+lineagelens auth login                      once, per environment
+lineagelens index --upload                  build, then publish
+LINEAGELENS_TOKEN=… lineagelens index --upload      for CI
+```
+
+Two properties worth knowing before you point it at private code.
+
+**You can read the payload before it leaves.** `--dry-run` prints the exact
+bytes to stdout and sends nothing:
+
+```
+lineagelens index --dry-run | jq '.graph_data | keys'
+```
+
+**Source text does not go.** Nodes carry a signature and a docstring — that is
+the interface, and it is structure. File contents do not: `usage_sites` holds
+verbatim lines (`context_before` / `context_line` / `context_after`) and those
+columns are excluded, with an assertion over the payload keys that raises
+rather than silently strips. Uploading source into a context product is a
+materially different proposition from uploading its structure, and the
+difference is visible in `src/lineagelens/upload.py`.
+
+**A failed upload is not a failed build.** Offline, expired token, plan limit,
+server outage — all print a diagnostic and exit 0 if the index succeeded. The
+graph is the product; publication is a side effect. Use `--upload-required`
+when you want CI to disagree.
 
 ## Scale
 
@@ -222,6 +262,8 @@ index at Tier A and the coverage envelope says so on every query. Use
 
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — architecture, adding a language,
   writing an adapter, the invariants and where they are enforced
+- [docs/ADDING-A-LANGUAGE.md](docs/ADDING-A-LANGUAGE.md) — the capability
+  ladder and the exact artifacts a new language needs
 - Design rationale and measured baselines: issue #51
 
 ## Licence
