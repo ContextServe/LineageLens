@@ -52,7 +52,37 @@ watch = ["watchdog>=3.0.0"]
 # optional. Gone: `treesitter` and `hybrid` (tree-sitter is now core and there
 # is no user-selectable engine), `web` (the GraphQL/UI surface was built on the
 # schema-3 core), and `llm` (§11 forbids an LLM in the extraction path).
-scip = ["protobuf>=4.25.0"]
+# No longer needed: `resolve/scip/reader.py` parses the wire format directly,
+# so SCIP ingestion has no runtime dependency at all (#47). Kept as an empty
+# extra so `pip install lineagelens[scip]` does not break for anyone who
+# followed earlier documentation.
+scip = []
+
+# Grammar waves (#61). The core seven are hard dependencies because Tier A
+# extraction is not optional (§7.1); breadth grammars are extras, because fifty
+# hard dependencies is a large install for someone who works in one language.
+#
+# The trade-off this accepts, stated because it is real: `detect_dialect` can
+# now return a dialect with no loadable grammar, so a missing grammar is a
+# routine runtime state rather than an error. It is recorded per file as
+# `skip_reason = 'missing_grammar'` and surfaces in the coverage envelope -- a
+# file that could not be parsed stays a reported fact, never a silent gap.
+#
+# Pins are exact for the same reason the core seven are: a grammar upgrade
+# changes parse output and must invalidate the index rather than quietly alter
+# results.
+wave1 = [
+  "tree-sitter-c==0.24.2",
+  "tree-sitter-ruby==0.23.1",
+  "tree-sitter-bash==0.25.1",
+  "tree-sitter-kotlin==1.1.0",
+]
+all = [
+  "tree-sitter-c==0.24.2",
+  "tree-sitter-ruby==0.23.1",
+  "tree-sitter-bash==0.25.1",
+  "tree-sitter-kotlin==1.1.0",
+]
 
 # The HTTP surface. Optional because the CLI and MCP are the primary
 # interfaces and neither needs a web framework; `frontend/` and anything

@@ -504,7 +504,23 @@ class Indexer:
             return SkipReason.GENERATED
         if not self.specs.has(lang):
             return SkipReason.MISSING_GRAMMAR
+        # A spec can exist while its grammar is not installed, now that
+        # wave-1 grammars live behind extras (#61). Treated as a reported
+        # skip rather than an exception: a missing grammar is a routine
+        # runtime state on a partial install, and the coverage envelope is
+        # where a caller acts on it.
+        if not self.parsers.can_parse(self._dialect_for(lang)):
+            return SkipReason.MISSING_GRAMMAR
         return None
+
+    def _dialect_for(self, lang: str) -> str:
+        """The first dialect registered for ``lang``. Dialects share a spec."""
+        from .extract.langs import GRAMMARS
+
+        for grammar in GRAMMARS:
+            if grammar.lang == lang:
+                return grammar.dialect
+        return lang
 
     def _module_path(self, rel_path: str, service_root: str) -> str:
         """Dotted module path for a file, relative to its service.
