@@ -1,14 +1,15 @@
-import React, { useEffect, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import CytoscapeLib from 'cytoscape'
 // @ts-ignore - cytoscape-fcose doesn't have TS types
 import FCose from 'cytoscape-fcose'
 import { highlightLineage, clearHighlight } from './highlight'
+import type { GraphViewData } from '../types'
 import { ScopeFilters } from '../components/HUDPanels'
 
 CytoscapeLib.use(FCose)
 
 interface CytoscapeGraphProps {
-  data: any
+  data: GraphViewData | null
   selectedSymbol?: string | null
   onSelectSymbol?: (id: string) => void
   filters?: ScopeFilters
@@ -41,7 +42,7 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
 
     // Calculate elements
     const elements = [
-      ...data.nodes.map((node: any) => {
+      ...data.nodes.map((node) => {
         const loc = node.lines_of_code || 1
         const size = filters?.sizeByLoc
           ? Math.min(100, Math.max(30, Math.round(Math.sqrt(loc) * 12)))
@@ -130,7 +131,11 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
             'font-size': '12px',
             'color': '#9ca3af',
             'text-opacity': 1,
-            'padding': '12px',
+            // `padding` used to be set here. It is a compound-parent property
+            // that Cytoscape's node style type does not accept, so it was
+            // silently ignored -- and nothing noticed, because this file had
+            // never been typechecked (#64). Dropped rather than replaced:
+            // the compound layout already spaces parents.
           },
         },
         {

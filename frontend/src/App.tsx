@@ -1,35 +1,10 @@
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import './App.css'
+import type { GraphViewData } from './types'
 import { CytoscapeGraph } from './graph/CytoscapeGraph'
 import { DetailPanel } from './components/DetailPanel'
 import { Toolbar, type VerdictFilter } from './components/Toolbar'
 import { HUDPanels, type ScopeFilters } from './components/HUDPanels'
-
-interface GraphViewData {
-  nodes: Array<{
-    id: string
-    label: string
-    kind: string
-    parent?: string
-    entry_point?: string
-    async_: boolean
-    has_resiliency_flag: boolean
-    is_test: boolean
-    verdict?: string
-    rescue_mechanism?: string
-    rescue_tier?: string
-    scope?: string
-    duplicate_name: boolean
-    lines_of_code?: number
-  }>
-  edges: Array<{
-    id: string
-    source: string
-    target: string
-    kind: string
-    resolution: string
-  }>
-}
 
 export function App() {
   const [graphData, setGraphData] = useState<GraphViewData | null>(null)
@@ -85,6 +60,11 @@ export function App() {
     }))
   }
 
+  /** Does the server compute this node field, or is it declared unsupported? */
+  function supports(field: string): boolean {
+    return !(graphData?.unsupported ?? []).includes(field)
+  }
+
   function getFilteredGraphData(): GraphViewData | null {
     if (!graphData) return null
 
@@ -101,13 +81,21 @@ export function App() {
 
       // Interactive legend filters
       let passesLegendFilter = true
+      // A filter over an unsupported field is not applied at all. Applying it
+      // would hide nothing while looking like it had hidden everything
+      // matching — indistinguishable from "there are none" (#64).
       if (legendFilters.entry_point === false && node.entry_point) passesLegendFilter = false
-      if (legendFilters.risk === false && node.has_resiliency_flag) passesLegendFilter = false
-      if (legendFilters.dead === false && node.verdict === 'dead') passesLegendFilter = false
-      if (legendFilters.probably_dead === false && node.verdict === 'probably_dead') passesLegendFilter = false
-      if (legendFilters.test_only === false && node.verdict === 'test_only') passesLegendFilter = false
-      if (legendFilters.dynamic_only === false && node.verdict === 'dynamic_only') passesLegendFilter = false
       if (legendFilters.duplicate === false && node.duplicate_name) passesLegendFilter = false
+      if (supports('has_resiliency_flag')) {
+        if (legendFilters.risk === false && node.has_resiliency_flag) passesLegendFilter = false
+      }
+      if (supports('verdict')) {
+        for (const verdict of ['dead', 'probably_dead', 'test_only', 'dynamic_only']) {
+          if (legendFilters[verdict] === false && node.verdict === verdict) {
+            passesLegendFilter = false
+          }
+        }
+      }
 
       if (passesTestFilter && passesVerdictFilter && passesLegendFilter) {
         nodesToKeep.add(node.id)
@@ -125,7 +113,12 @@ export function App() {
       edge => nodesToKeep.has(edge.source) && nodesToKeep.has(edge.target)
     )
 
+    // Spread the original so `truncated`, `coverage` and `unsupported` survive
+    // filtering. Client-side filtering does not change what the server could
+    // not compute, and dropping the envelope here would make a filtered view
+    // look more complete than the answer it came from.
     return {
+      ...graphData,
       nodes: filteredNodes,
       edges: filteredEdges,
     }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import './Toolbar.css'
 
 export type VerdictFilter = 'all' | 'dead' | 'probably_dead' | 'test_only'

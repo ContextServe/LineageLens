@@ -678,3 +678,17 @@ input:focus {
   margin: 8px 0;
 }
 
+
+/*
+ * A statistic with no producer. Rendered as an em dash rather than a zero:
+ * a confident `0` reads as "analysed, none found", which is exactly what an
+ * unanalysed field must not look like (#64).
+ */
+.stat-item.unsupported {
+  opacity: 0.45;
+}
+
+.stat-item.unsupported .stat-num {
+  color: #6b7280;
+  cursor: help;
+}
