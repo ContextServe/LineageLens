@@ -38,6 +38,7 @@ from .extract import (
 )
 from .ontology import ontology_digest
 from .resolve import OracleRegistry, Resolver, SymbolIndex
+from .resolve.oracles import default_oracles
 from .services import IGNORED_DIRS, ServiceLocator, discover_services
 from .store import DB_FILENAME, GraphStore
 
@@ -80,6 +81,8 @@ class IndexReport:
     #: separately from `levels` because it is a refusal, not a description:
     #: the caller asked not to be given answers below a level and got none.
     level_refused: dict[str, str] = field(default_factory=dict)
+    #: What a SCIP index contributed, or why it did not (#47).
+    scip: dict[str, object] = field(default_factory=dict)
     languages: dict[str, int] = field(default_factory=dict)
     #: Framework-shaped declarations no adapter claimed, commonest first (§8.2).
     unclaimed_frameworks: list[dict[str, object]] = field(default_factory=list)
@@ -105,6 +108,7 @@ class IndexReport:
             **({"tier_a_only": self.tier_a_only} if self.tier_a_only else {}),
             **({"levels": self.levels} if self.levels else {}),
             **({"level_refused": self.level_refused} if self.level_refused else {}),
+            **({"scip": self.scip} if self.scip else {}),
             "skipped_reasons": dict(sorted(self.skipped_reasons.items())),
             "build_digest": self.build_digest,
             "duration_seconds": round(self.duration_seconds, 3),
@@ -120,6 +124,7 @@ class Indexer:
         *,
         require_tier_b: frozenset[str] = frozenset(),
         require_level: dict[str, str] | None = None,
+        scip_index: Path | None = None,
     ) -> None:
         self.root = project_root.resolve()
         #: Languages to SKIP unless a Tier B type resolver is available.
@@ -144,6 +149,8 @@ class Indexer:
         self.require_tier_b = require_tier_b
         #: ``{lang: level}`` floors, ``"*"`` for every language (#56).
         self.require_level = dict(require_level or {})
+        #: A SCIP index to resolve through, ahead of every other oracle (#47).
+        self.scip_index = scip_index
         self.specs = SpecRegistry()
         self.parsers = ParserRegistry()
         self.extractor = SpecExtractor(specs=self.specs, parsers=self.parsers)
@@ -158,7 +165,10 @@ class Indexer:
         locator = ServiceLocator(services)
         report.services = len(services)
 
-        oracles = OracleRegistry(project_root=self.root)
+        oracles = OracleRegistry(
+            project_root=self.root,
+            oracles=default_oracles(self.root, self.scip_index),
+        )
         without_tier_b = set(oracles.languages_without_tier_b())
         refused = without_tier_b & set(self.require_tier_b)
         if refused:
@@ -266,9 +276,22 @@ class Indexer:
         all_nodes = [n for o in observations for n in o.nodes]
         index = SymbolIndex(all_nodes)
         adapters = AdapterRegistry(project_adapter_roots(self.root))
+        # Content hashes let ScipOracle refuse per file when the index was
+        # built against different source. Passed in rather than read by the
+        # oracle: an oracle does not touch the store.
+        resolved_oracles = default_oracles(
+            self.root, self.scip_index,
+            content_hashes={
+                o.file.path: o.file.content_hash for o in observations
+            },
+        )
         resolver = Resolver(
             index,
-            oracles=OracleRegistry(project_root=self.root, lang_of_file=lang_of_file),
+            oracles=OracleRegistry(
+                project_root=self.root,
+                lang_of_file=lang_of_file,
+                oracles=resolved_oracles,
+            ),
             adapters=adapters,
             project_root=self.root,
         )
@@ -278,6 +301,12 @@ class Indexer:
             db_path or self.root / ".lineagelens" / DB_FILENAME,
             services, observations, resolved, usage_sites=usage_sites,
         )
+
+        if self.scip_index is not None:
+            for oracle in resolved_oracles:
+                if getattr(oracle, "name", "") == "scip":
+                    report.scip = oracle.status()
+                    break
 
         report.levels = {
             lang: spec_levels[lang]

@@ -42,6 +42,7 @@ import os
 import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass
+from dataclasses import field as dcfield
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -255,9 +256,210 @@ class ToolchainOracle(_Base):
         return found
 
 
-def default_oracles(project_root: Path) -> list[ResolverOracle]:
-    """Every oracle this build knows about, in the order §7.2 prescribes."""
-    return [
+@dataclass(slots=True)
+class ScipOracle(_Base):
+    """Compiler-verified resolution from a SCIP index (#47).
+
+    An *oracle*, not a merger. The original design built a parallel graph from
+    SCIP and reconciled two graphs by ``(file, line, col)``; implementing this
+    protocol instead inherits the evidence tiers, the availability matrix,
+    ``--require-tier-b`` semantics and ``unresolved_refs`` as a ready-made work
+    list. SCIP answers "what does this name point at", which is exactly and
+    only what an oracle is asked.
+
+    **Staleness is a hard gate, per file.** An index built against a different
+    commit than the working tree is refused rather than trusted: each SCIP
+    document's text is hashed against ``files.content_hash`` and a file whose
+    hash differs gets no SCIP answers and falls back to Tier A. Without this,
+    SCIP would reintroduce precisely the failure #51 was written to eliminate --
+    confident edges that do not correspond to the code on disk.
+
+    **Nothing is subprocessed.** LineageLens does not run ``scip-java`` or
+    ``scip-typescript``. Running a build tool inside ``index`` would make
+    indexing network-dependent, slow and non-deterministic, and
+    ``verify --determinism`` could not hold. When a toolchain is detected and no
+    index is present, the CLI prints the command to generate one.
+    """
+
+    name: str = "scip"
+    languages: frozenset[str] = frozenset()
+    index_path: Path | None = None
+    #: ``{(path, line, col): symbol}`` for every occurrence.
+    _occurrences: dict[tuple[str, int, int], str] = dcfield(default_factory=dict)
+    #: ``{symbol: (path, line, col)}`` for definition occurrences only.
+    _definitions: dict[str, tuple[str, int, int]] = dcfield(default_factory=dict)
+    #: Files whose SCIP text does not match what is on disk. Answers refused.
+    _stale: frozenset[str] = frozenset()
+    _tool: str = ""
+    _loaded: bool = False
+    _error: str = ""
+    #: ``{path: content_hash}`` from the store, supplied by the indexer so the
+    #: oracle can gate on staleness without reaching into the database itself.
+    content_hashes: dict[str, str] = dcfield(default_factory=dict)
+
+    def available(self) -> str:
+        self._load()
+        if self._error or not self._occurrences:
+            return OracleAvailability.MISSING
+        return OracleAvailability.DETECTED
+
+    def can_resolve(self) -> bool:
+        return self.available() != OracleAvailability.MISSING
+
+    def version(self) -> str:
+        self._load()
+        return self._tool or "unknown"
+
+    def status(self) -> dict[str, object]:
+        """What this index covers, for the coverage envelope and `ontology`."""
+        self._load()
+        return {
+            "tool": self._tool,
+            "occurrences": len(self._occurrences),
+            "definitions": len(self._definitions),
+            "documents": self._documents,
+            "stale_files": sorted(self._stale),
+            "error": self._error,
+        }
+
+    _documents: int = 0
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        if self.index_path is None:
+            self._error = "no index path"
+            return
+
+        from .scip import ScipParseError, read_index
+
+        try:
+            index = read_index(self.index_path)
+        except ScipParseError as exc:
+            # Recorded, not raised. A bad SCIP index must degrade to Tier A,
+            # not fail the whole build -- but it must say so rather than
+            # silently contributing nothing.
+            self._error = str(exc)
+            logger.warning("SCIP index unusable, falling back to Tier A: %s", exc)
+            return
+
+        self._tool = index.tool
+        self._documents = len(index.documents)
+        stale: set[str] = set()
+
+        for document in index.documents:
+            path = self._normalise(document.relative_path)
+            if self._is_stale(path, document.text):
+                stale.add(path)
+                continue
+            for occurrence in document.occurrences:
+                key = (path, occurrence.line, occurrence.column)
+                self._occurrences[key] = occurrence.symbol
+                if occurrence.is_definition:
+                    self._definitions.setdefault(occurrence.symbol, key)
+
+        self._stale = frozenset(stale)
+        if stale:
+            logger.warning(
+                "SCIP index is stale for %d file(s); those fall back to Tier A",
+                len(stale),
+            )
+
+    def _normalise(self, relative_path: str) -> str:
+        """SCIP paths are project-root-relative with forward slashes."""
+        return relative_path.replace("\\", "/").lstrip("./")
+
+    def _is_stale(self, path: str, text: str) -> bool:
+        """Does this document describe the file currently on disk?
+
+        Only decidable when SCIP carried the text *and* the store recorded a
+        hash. When either is absent the file is trusted -- an unverifiable
+        index is not evidence of staleness, and refusing everything
+        unverifiable would make SCIP useless against indexers that omit text.
+        """
+        if not text:
+            return False
+        expected = self.content_hashes.get(path)
+        if not expected:
+            return False
+        import hashlib
+
+        actual = hashlib.blake2b(text.encode(), digest_size=16).hexdigest()
+        return actual != expected
+
+    def resolve(self, ref: UnresolvedRef) -> ResolvedTarget | None:
+        self._load()
+        path = self._normalise(ref.file_path)
+        if path in self._stale:
+            return None
+
+        symbol = self._occurrences.get(
+            (path, ref.span.start_line, ref.span.start_col)
+        )
+        if symbol is None:
+            return None
+
+        definition = self._definitions.get(symbol)
+        if definition is None:
+            # SCIP saw the reference but not a definition: it points into a
+            # dependency this index did not define. Reporting it as external
+            # is strictly better than reporting nothing -- "definitely
+            # external" and "unknown" are different answers.
+            return ResolvedTarget(
+                qualified_name=symbol,
+                is_external=True,
+                evidence=Evidence.fact("scip_external"),
+                resolution=Resolution.EXTERNAL,
+            )
+
+        def_path, def_line, _ = definition
+        return ResolvedTarget(
+            qualified_name=f"{def_path}:{def_line}",
+            evidence=Evidence.fact("scip_resolve"),
+            resolution=Resolution.EXACT,
+        )
+
+    def type_of(self, span: Span, file_path: str) -> str | None:
+        """The SCIP symbol at a span.
+
+        Covers the TypeScript structural-type and Java overload cases Tier A
+        cannot reach, because the symbol string encodes the resolved type
+        rather than the written one.
+        """
+        self._load()
+        path = self._normalise(file_path)
+        if path in self._stale:
+            return None
+        return self._occurrences.get((path, span.start_line, span.start_col))
+
+
+def default_oracles(
+    project_root: Path,
+    scip_index: Path | None = None,
+    scip_languages: frozenset[str] | None = None,
+    content_hashes: dict[str, str] | None = None,
+) -> list[ResolverOracle]:
+    """Every oracle this build knows about, in the order §7.2 prescribes.
+
+    SCIP goes first when an index is present: a compiler-verified fact
+    outranks a static-analysis inference, so it answers before jedi even for
+    Python. ``OracleRegistry.resolve`` takes the first answer, so order *is*
+    the precedence rule -- this is the one place #47 changes existing
+    behaviour.
+    """
+    oracles: list[ResolverOracle] = []
+    if scip_index is not None:
+        oracles.append(ScipOracle(
+            project_root=project_root,
+            index_path=scip_index,
+            languages=scip_languages or frozenset(
+                {"java", "typescript", "javascript", "python", "go",
+                 "rust", "csharp"}
+            ),
+            content_hashes=dict(content_hashes or {}),
+        ))
+    oracles.extend([
         JediOracle(project_root=project_root),
         ToolchainOracle(project_root=project_root, name="javac",
                         languages=frozenset({"java"}),
@@ -271,7 +473,8 @@ def default_oracles(project_root: Path) -> list[ResolverOracle]:
                         languages=frozenset({"rust"}), executable="rust-analyzer"),
         ToolchainOracle(project_root=project_root, name="roslyn",
                         languages=frozenset({"csharp"}), executable="dotnet"),
-    ]
+    ])
+    return oracles
 
 
 class OracleRegistry:
