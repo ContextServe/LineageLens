@@ -413,11 +413,20 @@ def create_router(project: Path, api_key: str | None = None) -> APIRouter:
     ) -> dict[str, Any]:
         return _result(eng.coverage_report(scope))
 
-    # ---- declared, not yet answerable ------------------------------------
+    # ---- risk detection ---------------------------------------------------
 
     @router.get("/resiliency", dependencies=guarded)
-    def resiliency() -> dict[str, Any]:
-        raise _not_implemented("resiliency risk signals", "#60")
+    def resiliency(
+        min_severity: str | None = None,
+        limit: int | None = None,
+        max_depth: int | None = None,
+        eng: QueryEngine = dep,
+    ) -> dict[str, Any]:
+        from .query.risks import list_risks
+        return _result(list_risks(eng, min_severity=min_severity, limit=limit,
+                                  max_depth=max_depth))
+
+    # ---- declared, not yet answerable ------------------------------------
 
     @router.get("/dead-code", dependencies=guarded)
     def dead_code() -> dict[str, Any]:
