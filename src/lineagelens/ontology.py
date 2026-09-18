@@ -79,10 +79,18 @@ def ontology_digest() -> str:
     which would invalidate indexes for no reason and train people to pass
     ``--force``.
     """
+    from .extract.spec import SpecRegistry
+
     h = hashlib.blake2b(digest_size=16)
     h.update(f"schema={SCHEMA_VERSION}\n".encode())
     for label, kinds in (("nodes", node_kinds()), ("edges", relation_kinds())):
         h.update(f"{label}:{','.join(kinds)}\n".encode())
+    # Capability levels participate: promoting a language from L1 to L2 changes
+    # what the graph contains, so an index built before the promotion is stale
+    # and must be refused rather than silently trusted (#56 criterion 5).
+    levels = SpecRegistry().levels()
+    h.update(("levels:" + ",".join(f"{k}={v}" for k, v in sorted(levels.items()))
+              + "\n").encode())
     return h.hexdigest()
 
 
@@ -141,12 +149,18 @@ def installed_tiers() -> dict[str, dict[str, str]]:
 
 def capability_matrix(project: Path | None = None) -> dict[str, Any]:
     """The full, measured capability report served by ``get_ontology``."""
+    from .extract.spec import LEVEL_MEANING, SpecRegistry
+
     measured = measured_matrix()
     installed = installed_tiers()
+    spec_levels = SpecRegistry().levels()
 
     languages: dict[str, Any] = {}
     for lang in sorted(set(measured) | set(installed)):
         entry: dict[str, Any] = {
+            # Derived from which spec files loaded, never declared (#56).
+            "level": spec_levels.get(lang, "unknown"),
+            "level_means": LEVEL_MEANING.get(spec_levels.get(lang, ""), ""),
             "tier_a": installed.get(lang, {}).get("tier_a", "missing"),
             "tier_b": installed.get(lang, {}).get("tier_b", "missing"),
         }
