@@ -175,8 +175,45 @@ to ContextServe over the existing token auth.
 4. Offline and unauthenticated runs stay first-class: `--upload` is opt-in and
    its failure never fails the index.
 
-**Blocked on:** the POST ingest contract (route, headers, payload schema).
-Read-side `/api/v1/graphs/repos` and `/api/v1/orgs/api-keys` are known to exist.
+**The contract, as it exists today.** `ContextServe/ContextServeWebsite`
+implements `POST /api/v1/graphs/upload` in `backend/app/routers/graph_router.py`:
+
+```python
+class GraphUploadRequest(BaseModel):
+    repo_name: str
+    graph_data: dict
+```
+
+Authentication is the `X-API-Key` header, checked as a SHA-256 hash against the
+`api_keys` table; `generate_api_key()` mints keys in the `ll_live_<6>_<rest>`
+form, which is the form the marketing copy shows. So the key in that copy is a
+real credential shape — but it is a header, never a CLI flag, and `--key` is
+therefore not the right surface. `LINEAGELENS_TOKEN` and the stored credential
+remain the path.
+
+Three mismatches to resolve, none of them client-side bugs:
+
+1. **Vocabulary.** The handler reads `graph_data["symbols"]` and
+   `graph_data["relations"]`, and looks for `symbol["entry_point"]` and
+   `symbol["resiliency"]`. That is schema-3 vocabulary. Schema 4 emits `nodes`
+   and `edges`, and entry-point status lives in `NodeFlags` / `EXPOSES`. Either
+   the server learns schema 4 or the client ships a lossy projection; the first
+   is correct, because a projection would discard exactly the evidence tiers and
+   coverage envelope that make the graph worth trusting.
+2. **Transport.** The body is one unbounded JSON object with no
+   `Content-Encoding` and no digest pre-check. This repository's graph is a
+   16 MB SQLite file. Gzip and idempotency on `build_digest` are server-side
+   prerequisites for §5's step 3.
+3. **A metric with no measurement.** The handler derives `dead_code_ratio` as
+   `(total_symbols - entry_points * 3) / total_symbols`, commented in the source
+   as a simulation. Dead code is out of scope for v1.1 precisely because the
+   schema-3 implementation measured 71% false positives; a formula is not a
+   smaller version of that measurement, it is an unfounded number on a
+   dashboard. It should be null until a producer exists.
+
+Read-side `/api/v1/graphs/repos` and `/api/v1/orgs/api-keys` also exist, and use
+a different auth header (`X-Auth-Token: Bearer`) from the upload route. Worth
+unifying server-side.
 
 ## §6 Telemetry and cost attribution
 
@@ -199,6 +236,34 @@ and the same event stream as the metering substrate for the managed service
    is where an agent's tokens are actually spent.
 5. Document every field. An open-source tool that phones home has to be
    auditable from its own README.
+
+**The contract, as it exists today.** `POST /api/v1/telemetry/tokens` accepts:
+
+```python
+class TokenTelemetryCreateRequest(BaseModel):
+    raw_tokens: int
+    optimized_tokens: int
+    query_type: str = "mcp_context_query"
+    repo_name: str | None = None
+    model_name: str = "gpt-4o"
+```
+
+The server derives `tokens_saved`, an efficiency percentage and
+`cost_saved_usd` at a hardcoded blended $0.015 per 1k tokens.
+
+Two consequences for step 4:
+
+- **There is no `branch` and no `commit_sha`.** "Spend on this branch to date"
+  is the stated differentiator and the current schema cannot express it. The
+  client can send the fields once #57 populates them, but the column has to
+  exist first. Same for `tool` and `duration_ms` — without `tool`, the question
+  "which primitive dominates cost" is unanswerable.
+- **`raw_tokens` asks the client for a counterfactual.** It is the token count
+  the agent *would* have spent without LineageLens, and the CLI cannot know it.
+  Either it becomes a server-side model against a documented baseline, or the
+  field is retired in favour of reporting actual spend. Reporting a saving the
+  client invented would be the same category of error as the simulated
+  `dead_code_ratio`.
 
 ## §7 Resiliency signals on schema 4
 
@@ -285,3 +350,65 @@ to match makes the gateway concrete instead of aspirational.
 - Wiring javac/tsserver/gopls/rust-analyzer individually — superseded by §3.
 - The managed service backend itself; §5–§6 build only the client side.
 - Any LLM in the extraction path (#51 §11).
+
+## §11 Repository boundary: what lands where
+
+Two repositories, and the line between them is load-bearing: everything in this
+one is Apache-2.0 and ungated, so anything that must not be removable by a fork
+cannot live here.
+
+### This repository — `ContextServe/LineageLens`
+
+All eight v1.1 issues. Every one of them is client-side: extraction, query,
+CLI, MCP, the local dashboard's HTTP surface, and the *emitting* half of upload
+and telemetry. No issue in this repository reads a plan, checks an entitlement,
+or branches on a tier.
+
+### `ContextServe/ContextServeWebsite` — needs its own issues
+
+These block or shadow v1.1 work but are not LineageLens changes:
+
+| Server work | Blocks |
+| --- | --- |
+| Ingest accepts schema 4 (`nodes`/`edges`/`flags`/envelope) instead of schema-3 `symbols`/`relations` | #58 |
+| Gzip body and `build_digest` pre-check on `POST /graphs/upload` | #58 step 3 |
+| Null out the simulated `dead_code_ratio` until a producer exists | #58, epic out-of-scope |
+| `branch`, `commit_sha`, `tool`, `duration_ms` columns on `token_telemetry` | #59 step 4 |
+| Decide `raw_tokens`: server-side baseline, or retire it | #59 |
+| Unify auth headers (`X-API-Key` on write, `X-Auth-Token: Bearer` on read) | both |
+| Enforce `plan_tier` — set by Stripe, read for display, checked nowhere | §8 |
+| The managed MCP endpoint | §8 |
+| Copy: `analyze --upload --key=` → `index --upload`; language claim → the ladder; Tier 2 scope | — |
+
+The last row is a documentation change, not an engineering one, but it is the
+one a reader encounters first.
+
+### How tier enforcement actually works
+
+Three server-side chokepoints, and nothing else:
+
+1. **Ingest.** `POST /graphs/upload` already resolves an `Organization` from the
+   API key, so it already has `org.plan_tier` in hand. Repo count, graph size
+   and retention are enforced here, as a FastAPI dependency
+   (`enforce_repo_quota(org)`) rather than conditionals inside the handler, so
+   the check cannot be forgotten on a new route.
+2. **The managed MCP endpoint.** Seats, rate, and cross-repo joins.
+3. **Read APIs.** History window on `/telemetry/summary` and `/graphs/repos`.
+
+A rejection is an HTTP status the CLI renders, never a decision the CLI makes:
+`402` for a plan limit, `403` for a seat or policy gate, each with a message and
+a remedy. The CLI's only job is to print it and exit 0 if the local index
+succeeded.
+
+**Why a fork cannot route around this.** The paid capability is not a flag; it
+is a corpus. `contract_map` across 40 services needs all 40 graphs, always
+warm — that is storage, scheduled indexing and a central ledger, none of which
+a de-gated client can synthesise. Cost attribution has the same shape: a
+per-developer CLI cannot total an organisation's spend because it only ever
+sees its own. Deleting a check from a fork yields an unlimited client talking to
+a server that still counts.
+
+The corollary is that the free tier has to be genuinely good, and v1.1 makes it
+so: blast radius, resiliency signals and SCIP ingestion all run locally at no
+cost. That is the acquisition path, and it only works if nothing in this
+repository is crippled on purpose.
