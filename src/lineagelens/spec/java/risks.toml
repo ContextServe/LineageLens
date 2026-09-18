@@ -1,0 +1,43 @@
+# Resiliency rules for Java (#60).
+#
+# Java has no `async` keyword, so the async context cannot be a flag lookup the
+# way it is in Python. It is inferred from the enclosing construct: a
+# CompletableFuture supplier, an @Async annotation, an ExecutorService submit,
+# or a reactive operator. This is the language the product advertises for this
+# rule and the one needing the most care, so it is deliberately not deferred
+# for being hardest.
+#
+# NOTE: `async_markers` must stay above the first [[rule]]. A bare key after a
+# table header belongs to that table, so placing it below would silently make
+# it a rule field and leave the marker list empty.
+
+# How an async frame is recognised without a keyword. Matched against a node's
+# decorators and against the call targets inside it.
+async_markers = [
+  "Async",
+  "org.springframework.scheduling.annotation.Async",
+  "CompletableFuture.supplyAsync",
+  "CompletableFuture.runAsync",
+  "ExecutorService.submit",
+  "ExecutorService.execute",
+  "Mono.fromCallable",
+  "Flux.fromIterable",
+]
+
+[[rule]]
+id       = "blocking_in_async"
+severity = "high"
+requires = "async_context"
+summary  = "a blocking call inside an async frame stalls the executor thread"
+targets = [
+  "java.lang.Thread.sleep",
+  "Thread.sleep",
+  "java.util.concurrent.TimeUnit.sleep",
+  "TimeUnit.sleep",
+  "java.net.Socket.connect",
+  "java.util.concurrent.Future.get",
+  "java.util.concurrent.CountDownLatch.await",
+]
+allowed = [
+  "java.util.concurrent.CompletableFuture.delayedExecutor",
+]

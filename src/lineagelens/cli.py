@@ -374,6 +374,16 @@ def _add_query(commands: Any) -> None:
     add("entrypoints", "symbols exposing a contract")
     add("contracts", "who exposes and consumes what")
 
+    risks = sub.add_parser(
+        "risks", parents=[shared],
+        help="resiliency risks, e.g. a blocking call inside an async frame",
+    )
+    risks.add_argument(
+        "--min-severity", choices=["low", "medium", "high", "critical"],
+        default=None,
+        help="report only findings at or above this severity",
+    )
+
     stack = sub.add_parser("stacktrace", parents=[shared],
                            help="map a stack trace onto the graph")
     stack.add_argument("file", nargs="?", help="file containing the trace; "
@@ -427,6 +437,13 @@ def _run_query(args: Any) -> int:
         result = engine.get_node(args.symbol, intent=args.intent)
     elif name == "search":
         result = engine.search(args.text, kinds=kinds, **shared)
+    elif name == "risks":
+        from .query.risks import list_risks
+
+        result = list_risks(
+            engine, min_severity=args.min_severity,
+            limit=args.limit, max_depth=args.max_depth,
+        )
     elif name == "entrypoints":
         result = engine.entry_points(limit=args.limit)
     elif name == "contracts":
@@ -473,12 +490,16 @@ def _print_result(payload: dict[str, Any]) -> None:
 
     for item in payload["results"]:
         print()
-        if isinstance(item, dict) and "chain" in item:
+        # A path, identified by the fields a path has -- not by `chain` alone,
+        # which a risk finding also carries.
+        if isinstance(item, dict) and {"length", "hops"} <= item.keys():
             print(f"  [{item['length']} hop{'s' if item['length'] != 1 else ''}] "
                   f"{item['chain']}")
             for hop in item.get("hops", []):
                 via = f" via {hop['via']}" if hop.get("via") else ""
                 print(f"      {hop['depth']}. {hop['node']}  ({hop['at']}){via}")
+        elif isinstance(item, dict) and item.get("rule"):
+            _print_risk(item)
         else:
             print(_indent(json.dumps(item, indent=2, default=str), "  "))
 
@@ -491,6 +512,29 @@ def _print_result(payload: dict[str, Any]) -> None:
             print(f"    boundary {entry['kind']}: {entry['detail']}")
         if coverage.get("degraded"):
             print(f"    degraded (Tier A only): {', '.join(coverage['degraded'])}")
+
+
+def _print_risk(finding: dict) -> None:
+    """Render one resiliency finding in the shape the product advertises.
+
+    Every line is evidence: the call and where it is, the async frame it sits
+    inside, the chain between them, and the weakest evidence tier on that
+    chain. A severity with no visible derivation is a number a reader cannot
+    argue with, so the reasons are printed whenever they moved it.
+    """
+    print(f"  [RESILIENCY RISK DETECTED]  {finding['rule']} "
+          f"({finding['severity'].upper()})")
+    print(f"    {finding['call']} in async  --  {finding['at']}")
+    print(f"    async frame: {finding['frame']}  ({finding['frame_at']})")
+    hops = finding["distance"]
+    print(f"    chain: {finding['chain']}  "
+          f"[{hops} hop{'s' if hops != 1 else ''}]")
+    note = "external reference" if finding.get("external") else "resolved edge"
+    print(f"    evidence: {finding['evidence']} ({note})")
+    for reason in finding.get("severity_reasons", []):
+        print(f"      severity: {reason}")
+    if finding.get("summary"):
+        print(f"    {finding['summary']}")
 
 
 def _indent(text: str, prefix: str) -> str:

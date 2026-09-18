@@ -55,6 +55,23 @@
   parameters: (formal_parameters) @params
   (#eq? @name "constructor")) @node.constructor
 
+; `async function` and `async` methods. The modifier capture drives
+; NodeFlags.ASYNC (#60). Missing until then: the flag was populated only for
+; Python, so every TypeScript async frame was invisible to the resiliency
+; detector -- which reported "no risks" over code it could not see the
+; async-ness of.
+(function_declaration
+  "async" @modifier
+  name: (identifier) @name
+  parameters: (formal_parameters) @params
+  return_type: (type_annotation)? @return_type) @node.function
+
+(method_definition
+  "async" @modifier
+  name: (property_identifier) @name
+  parameters: (formal_parameters) @params
+  return_type: (type_annotation)? @return_type) @node.method
+
 ; Interface and type-literal members.
 (method_signature
   name: (property_identifier) @name
