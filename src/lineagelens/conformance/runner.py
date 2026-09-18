@@ -55,7 +55,51 @@ class Expectation:
 _TYPE_NODES = frozenset({NodeKind.CLASS, NodeKind.METHOD, NodeKind.FIELD,
                          NodeKind.PARAMETER, NodeKind.VARIABLE, NodeKind.CONSTANT})
 
+#: Wave-1 languages (#61). All L0, so every graph capability is `frozenset()`
+#: -- "the corpus does not exercise this" rather than "this failed". An L0
+#: language has no refs.scm, so requiring a CALLS edge would report a failure
+#: for a capability nobody claimed.
+#:
+#: `nodes` is the real assertion: it is the claim L0 actually makes, and it is
+#: why a grammar cannot enter the matrix without a corpus proving what it
+#: extracts. `pyproject.toml` records the Dubbo incident that rule exists for.
+_L0_GRAPH: dict[str, frozenset] = {
+    "calls": frozenset(),
+    "inherits": frozenset(),
+    "implements": frozenset(),
+    "dataflow": frozenset(),
+    "contracts": frozenset(),
+}
+
 EXPECTATIONS: dict[str, Expectation] = {
+    "c": Expectation(
+        nodes=frozenset({
+            NodeKind.STRUCT, NodeKind.ENUM, NodeKind.ENUM_MEMBER,
+            NodeKind.TYPE_ALIAS, NodeKind.FUNCTION, NodeKind.FIELD,
+            NodeKind.PARAMETER,
+        }),
+        **_L0_GRAPH,
+    ),
+    "ruby": Expectation(
+        nodes=frozenset({
+            NodeKind.MODULE, NodeKind.CLASS, NodeKind.METHOD,
+            NodeKind.CONSTANT, NodeKind.FIELD,
+        }),
+        **_L0_GRAPH,
+    ),
+    "bash": Expectation(
+        nodes=frozenset({
+            NodeKind.FUNCTION, NodeKind.VARIABLE, NodeKind.CONSTANT,
+        }),
+        **_L0_GRAPH,
+    ),
+    "kotlin": Expectation(
+        nodes=frozenset({
+            NodeKind.CLASS, NodeKind.FUNCTION, NodeKind.PROPERTY,
+            NodeKind.PARAMETER,
+        }),
+        **_L0_GRAPH,
+    ),
     "python": Expectation(
         nodes=_TYPE_NODES | {NodeKind.CONSTRUCTOR, NodeKind.FUNCTION},
         implements=frozenset(),  # Python has no `implements`; Protocol is a base

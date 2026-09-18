@@ -1,0 +1,8 @@
+lang = "c"
+dialects = ["c"]
+doc_prefixes = ["/**", "*", "//", "/*"]
+
+# C has no methods, so nothing is an implicit receiver.
+implicit_receivers = []
+# No constructors in the language.
+constructor_names = []

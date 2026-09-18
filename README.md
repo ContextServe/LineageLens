@@ -218,6 +218,37 @@ repository name, branch or line of source — enforced by an assertion over the
 event keys, not by review. Full field list and reasoning in
 [docs/TELEMETRY.md](docs/TELEMETRY.md).
 
+## Languages
+
+Breadth and depth are independent axes, so a language enters at a **level**
+rather than being claimed or not claimed:
+
+| Level | Delivers | Languages |
+| --- | --- | --- |
+| **L2** flow | data flow, contracts, everything below | python, java, typescript, javascript, go, rust, csharp |
+| **L1** graph | call graph, `impact_of`, `callers_of` | — |
+| **L0** inventory | symbols, `search`, `get_symbol` | c, ruby, bash, kotlin |
+
+The level is *derived* from which extraction specs loaded, never declared, and
+the conformance run fails if a claimed level is not corroborated by what the
+corpus produced. `lineagelens ontology` prints it; every query response carries
+it, so an agent knows a missing call answer on an L0 language is *unavailable*
+rather than *absent*.
+
+The core seven install by default. Breadth grammars are extras:
+
+```
+pip install 'lineagelens[wave1]'    # c, ruby, bash, kotlin
+pip install 'lineagelens[all]'
+```
+
+A file whose grammar is not installed is skipped with
+`skip_reason = 'missing_grammar'` and reported in the coverage envelope — never
+silently ignored.
+
+Adding one is documented end to end in
+[docs/ADDING-A-LANGUAGE.md](docs/ADDING-A-LANGUAGE.md).
+
 ## Compiler-grade resolution
 
 Tier A is tree-sitter and always runs. Tier B is a type resolver, and a SCIP

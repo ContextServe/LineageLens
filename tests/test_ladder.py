@@ -96,13 +96,47 @@ class TestLevelIsDerived:
     def test_levels_are_ordered_floor_first(self):
         assert LEVELS == ("L0", "L1", "L2")
 
-    def test_every_shipped_language_is_l2(self):
-        """All seven stay at L2; the ladder adds no regression."""
+    def test_the_core_seven_are_l2(self):
+        """The languages that were L2 before the ladder stay L2.
+
+        Written as a floor on a named set rather than "every language is L2",
+        which is the assumption #61 deliberately breaks: breadth and depth are
+        independent axes, and a new language entering at L0 must not look like
+        a regression in an existing one.
+        """
         levels = SpecRegistry().levels()
-        assert set(levels) == {
+        for lang in (
             "csharp", "go", "java", "javascript", "python", "rust", "typescript",
-        }
-        assert set(levels.values()) == {"L2"}
+        ):
+            assert levels[lang] == "L2", f"{lang} regressed from L2"
+
+    def test_wave_one_languages_are_l0(self):
+        """And say so, rather than claiming a depth they do not have."""
+        levels = SpecRegistry().levels()
+        for lang in ("bash", "c", "kotlin", "ruby"):
+            assert levels[lang] == "L0"
+
+    def test_no_language_claims_a_level_it_cannot_support(self):
+        """The whole point of deriving rather than declaring.
+
+        Every level in the shipped set is corroborated by the committed
+        conformance matrix -- asserted here as well as in the runner, because
+        the runner is a build step and this is a test.
+        """
+        import json
+        from pathlib import Path
+
+        import lineagelens.conformance as conformance
+
+        matrix = json.loads(
+            (Path(conformance.__file__).parent / "matrix.json").read_text()
+        )["languages"]
+        levels = SpecRegistry().levels()
+        for lang, level in levels.items():
+            assert matrix[lang]["level"] == level, (
+                f"{lang}: spec says {level}, matrix says {matrix[lang]['level']}"
+            )
+            assert not matrix[lang].get("level_unsupported")
 
 
 # ---------------------------------------------------------------------------
