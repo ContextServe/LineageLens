@@ -300,7 +300,7 @@ class TestDegradation:
 
 class TestOracleOrder:
     def test_scip_is_absent_without_an_index(self, tmp_path):
-        assert [o.name for o in default_oracles(tmp_path)][0] == "jedi"
+        assert next(o.name for o in default_oracles(tmp_path)) == "jedi"
 
     def test_scip_outranks_jedi_when_present(self, tmp_path):
         """A compiler-verified fact outranks a static-analysis inference.

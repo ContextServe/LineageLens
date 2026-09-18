@@ -864,7 +864,6 @@ def _run_mcp(args: Any) -> int:
 
 
 # ---------------------------------------------------------------------------
-<<<<<<< HEAD
 # serve
 # ---------------------------------------------------------------------------
 
@@ -916,7 +915,10 @@ def _run_serve(args: Any) -> int:
 
     uvicorn.run(create_app(project, api_key=args.api_key),
                 host=args.host, port=args.port, log_level="info")
-=======
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # telemetry
 # ---------------------------------------------------------------------------
 
@@ -967,7 +969,6 @@ def _run_telemetry(args: Any) -> int:
     # leaves their machine.
     print("\nthe exact event that would be sent:")
     print(_indent(json.dumps(state["example_event"], indent=2, sort_keys=True), "  "))
->>>>>>> feature/telemetry
     return 0
 
 
