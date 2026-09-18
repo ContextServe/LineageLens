@@ -1,0 +1,6 @@
+lang = "bash"
+dialects = ["bash"]
+doc_prefixes = ["#"]
+
+implicit_receivers = []
+constructor_names = []
