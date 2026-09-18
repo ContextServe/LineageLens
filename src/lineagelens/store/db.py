@@ -93,6 +93,8 @@ class GraphStore:
         *,
         project_root: str,
         commit_sha: str | None = None,
+        branch: str | None = None,
+        dirty: bool | None = None,
         overwrite: bool = True,
     ) -> GraphStore:
         """Initialise a fresh index, replacing any existing one.
@@ -114,21 +116,25 @@ class GraphStore:
         conn.executescript(SCHEMA_DDL)
         conn.execute(
             """
-            INSERT INTO graph_meta (id, schema_version, project_root, commit_sha)
-            VALUES (1, ?, ?, ?)
+            INSERT INTO graph_meta
+                   (id, schema_version, project_root, commit_sha, branch, dirty)
+            VALUES (1, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 schema_version = excluded.schema_version,
                 project_root   = excluded.project_root,
-                commit_sha     = excluded.commit_sha
+                commit_sha     = excluded.commit_sha,
+                branch         = excluded.branch,
+                dirty          = excluded.dirty
             """,
-            (SCHEMA_VERSION, project_root, commit_sha),
+            (SCHEMA_VERSION, project_root, commit_sha, branch,
+             None if dirty is None else int(dirty)),
         )
         conn.commit()
         return store
 
     @classmethod
     def open(cls, db_path: Path | str) -> GraphStore:
-        """Open an existing index, refusing anything not written at schema 4."""
+        """Open an existing index, refusing anything not written at the current schema."""
         path = Path(db_path)
         if not path.exists():
             raise GraphNotFound(
@@ -165,8 +171,8 @@ class GraphStore:
         if found != SCHEMA_VERSION:
             raise SchemaMismatch(
                 f"{self.db_path} was written at schema {found}, this build requires "
-                f"{SCHEMA_VERSION}. Schema 4 is a clean break with no upgrade path -- "
-                f"reindex with: lineagelens index --force"
+                f"{SCHEMA_VERSION}. There is no upgrade path between schema "
+                f"versions by design -- reindex with: lineagelens index --force"
             )
         self._project_root = row["project_root"]
 
@@ -485,6 +491,53 @@ class GraphStore:
 
         return h.hexdigest()
 
+    def unclaimed_frameworks(self) -> list[dict[str, Any]]:
+        """Frameworks present but unmodelled -- the §8.2 adapter work list.
+
+        Returns an empty list for absent or malformed content rather than
+        raising: a query must not fail because a summary field is unreadable,
+        and an empty list is the honest answer when we cannot say.
+        """
+        try:
+            row = self.conn.execute(
+                "SELECT unclaimed_frameworks FROM graph_meta WHERE id = 1"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return []
+        if not row or not row["unclaimed_frameworks"]:
+            return []
+        try:
+            payload = loads(row["unclaimed_frameworks"])
+        except (ValueError, TypeError):
+            logger.debug("unreadable unclaimed_frameworks in %s", self.db_path)
+            return []
+        return payload if isinstance(payload, list) else []
+
+    def record_determinism(self, ok: bool) -> None:
+        """Store the verdict of ``verify --determinism``.
+
+        A graph that has never been verified keeps ``NULL``, which is a third
+        state and must not collapse into ``0``: "not checked" and "checked and
+        failed" are different facts and only one is a defect.
+        """
+        self.conn.execute(
+            "UPDATE graph_meta SET deterministic_ok = ? WHERE id = 1", (int(ok),)
+        )
+        self.conn.commit()
+
+    def provenance(self) -> dict[str, object]:
+        """Commit identity of this index, for reporting and upload."""
+        row = self.conn.execute(
+            "SELECT commit_sha, branch, dirty FROM graph_meta WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return {"commit_sha": None, "branch": None, "dirty": None}
+        return {
+            "commit_sha": row["commit_sha"],
+            "branch": row["branch"],
+            "dirty": None if row["dirty"] is None else bool(row["dirty"]),
+        }
+
     def finalise(
         self,
         *,
@@ -492,6 +545,7 @@ class GraphStore:
         spec_digest: str = "",
         adapter_digest: str = "",
         ontology_digest: str = "",
+        unclaimed_frameworks: Sequence[dict[str, Any]] | None = None,
         built_at: str | None = None,
     ) -> str:
         """Record digests and optimise the index. Returns the build digest."""
@@ -499,15 +553,18 @@ class GraphStore:
         self.conn.execute(
             """
             UPDATE graph_meta SET
-                build_digest    = ?,
-                grammar_digest  = ?,
-                spec_digest     = ?,
-                adapter_digest  = ?,
-                ontology_digest = ?,
-                built_at        = ?
+                build_digest         = ?,
+                grammar_digest       = ?,
+                spec_digest          = ?,
+                adapter_digest       = ?,
+                ontology_digest      = ?,
+                unclaimed_frameworks = ?,
+                built_at             = ?
             WHERE id = 1
             """,
-            (digest, grammar_digest, spec_digest, adapter_digest, ontology_digest, built_at),
+            (digest, grammar_digest, spec_digest, adapter_digest, ontology_digest,
+             dumps(list(unclaimed_frameworks)) if unclaimed_frameworks else None,
+             built_at),
         )
         self.conn.execute("INSERT INTO nodes_fts (nodes_fts) VALUES ('optimize')")
         self.conn.commit()
