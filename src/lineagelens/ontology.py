@@ -22,6 +22,7 @@ here", and only a per-install probe can say.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,29 @@ def relation_kinds() -> list[str]:
 
 def node_kinds() -> list[str]:
     return sorted(k.value for k in NodeKind)
+
+
+def ontology_digest() -> str:
+    """Hash of the taxonomy an index was built against (#66).
+
+    ``graph_meta.ontology_digest`` existed and was written empty, which is worse
+    than its being absent: ``verify`` reads the column, compares empty to empty
+    and passes, so a change to the node or edge taxonomy left every existing
+    index looking current. ``grammar_digest``, ``spec_digest`` and
+    ``adapter_digest`` all worked; this was the one gap in the mechanism §11
+    relies on to refuse a stale index rather than silently trust it.
+
+    Hashes the sorted enum member sets and the schema version -- the things a
+    stored graph is actually interpreted against -- and nothing incidental. A
+    file mtime or a module path would change without the taxonomy changing,
+    which would invalidate indexes for no reason and train people to pass
+    ``--force``.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    h.update(f"schema={SCHEMA_VERSION}\n".encode())
+    for label, kinds in (("nodes", node_kinds()), ("edges", relation_kinds())):
+        h.update(f"{label}:{','.join(kinds)}\n".encode())
+    return h.hexdigest()
 
 
 def measured_matrix() -> dict[str, dict[str, Any]]:

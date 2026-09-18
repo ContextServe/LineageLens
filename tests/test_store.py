@@ -553,7 +553,7 @@ class TestSchemaRefusal:
         st.conn.execute("UPDATE graph_meta SET schema_version = 3")
         st.conn.commit()
         st.close()
-        with pytest.raises(SchemaMismatch, match="clean break with no upgrade path"):
+        with pytest.raises(SchemaMismatch, match="no upgrade path between schema versions"):
             GraphStore.open(path)
 
     def test_non_lineagelens_database_is_refused(self, tmp_path):
