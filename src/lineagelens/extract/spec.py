@@ -66,6 +66,33 @@ SPEC_ROOT = Path(__file__).resolve().parent.parent / "spec"
 #: nothing (§12).
 QUERY_FILES = ("nodes", "refs", "dataflow")
 
+#: The capability ladder (#56). A level is *derived* from which spec files
+#: loaded, never declared in a manifest: #51 §11 requires capability to be
+#: measured rather than asserted, and a declared level would drift the moment
+#: someone added a grammar without a spec -- which is the exact failure the
+#: ladder exists to make visible.
+#:
+#: Ordered floor-first. ``nodes.scm`` is mandatory, so L0 is the floor and
+#: there is no level below it.
+LEVELS = ("L0", "L1", "L2")
+
+#: What each level adds, for the one place a human reads it.
+LEVEL_MEANING = {
+    "L0": "inventory: symbols, search, module/class/function map",
+    "L1": "graph: CALLS/IMPORTS, callers_of, callees_of, impact_of",
+    "L2": "flow: READS/WRITES/PARAM_BINDS/RETURNS, dataflow_of, contracts",
+}
+
+#: Edge kinds whose presence in a corpus run corroborates a claimed level.
+#: A language claiming L1 whose corpus produced no CALLS or IMPORTS edge is not
+#: an L1 language -- it has a `refs.scm` that does not match its grammar, which
+#: is worse than having none, because the level would advertise a capability
+#: the queries do not deliver.
+LEVEL_EVIDENCE = {
+    "L1": ("CALLS", "IMPORTS"),
+    "L2": ("READS", "WRITES", "PARAM_BINDS", "RETURNS"),
+}
+
 #: Optional per-dialect overlay, appended to the shared query when compiling for
 #: that dialect: ``refs.tsx.scm`` extends ``refs.scm`` for the ``tsx`` grammar
 #: only.
@@ -81,6 +108,19 @@ OVERLAY_TEMPLATE = "{name}.{dialect}.scm"
 
 class SpecError(RuntimeError):
     """A spec is missing, malformed, or violates the capture convention."""
+
+
+def _strip_comments(source: str) -> str:
+    """Query text with tree-sitter ``;`` comments removed.
+
+    Used only to decide whether a spec file is substantive. A file containing
+    nothing but a header comment is a placeholder, and treating it as a
+    capability is how a measured level silently becomes a declared one.
+    """
+    return "\n".join(
+        line.strip() for line in source.splitlines()
+        if line.strip() and not line.strip().startswith(";")
+    )
 
 
 @dataclass(slots=True)
@@ -108,6 +148,30 @@ class LanguageSpec:
     constructor_names: tuple[str, ...] = ()
 
     @property
+    def level(self) -> str:
+        """Capability level, derived from which spec files actually loaded.
+
+        Not read from ``lang.toml``. See :data:`LEVELS` for why.
+        """
+        if self._has("dataflow"):
+            return "L2"
+        if self._has("refs"):
+            return "L1"
+        # `nodes.scm` is mandatory (`_load_one` raises without it), so a spec
+        # that exists at all is at least L0.
+        return "L0"
+
+    def _has(self, name: str) -> bool:
+        """Whether a query file loaded *and* carries content.
+
+        An empty or comment-only file is not a capability. Checking presence of
+        the key alone would let a placeholder `refs.scm` promote a language to
+        L1 while extracting nothing -- a declared level wearing a measured
+        level's clothes.
+        """
+        return bool(_strip_comments(self.sources.get(name, "")).strip())
+
+    @property
     def has_dataflow(self) -> bool:
         """Whether this language has data-flow queries at all.
 
@@ -115,7 +179,7 @@ class LanguageSpec:
         language without them reports the gap rather than answering data-flow
         queries with a confident empty result.
         """
-        return bool(self.sources.get("dataflow", "").strip())
+        return self._has("dataflow")
 
     def query_source(self, name: str, dialect: str | None = None) -> str:
         """Query text for ``name``, with ``dialect``'s overlay appended if any."""
@@ -226,6 +290,11 @@ class SpecRegistry:
     def languages(self) -> tuple[str, ...]:
         self._load()
         return tuple(sorted(self._specs))
+
+    def levels(self) -> dict[str, str]:
+        """``{lang: level}`` for every loaded spec."""
+        self._load()
+        return {lang: spec.level for lang, spec in sorted(self._specs.items())}
 
     def digest(self) -> str:
         """Combined digest across all specs, for ``graph_meta.spec_digest``."""
