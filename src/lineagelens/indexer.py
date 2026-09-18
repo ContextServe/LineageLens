@@ -20,6 +20,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import provenance
 from .contracts import AdapterRegistry, project_adapter_roots
 from .core import (
     FileRecord,
@@ -35,6 +36,7 @@ from .extract import (
     detect_dialect,
     language_of,
 )
+from .ontology import ontology_digest
 from .resolve import OracleRegistry, Resolver, SymbolIndex
 from .services import IGNORED_DIRS, ServiceLocator, discover_services
 from .store import DB_FILENAME, GraphStore
@@ -267,6 +269,8 @@ class Indexer:
             grammar_digest=self.parsers.digest(),
             spec_digest=self.specs.digest(),
             adapter_digest=adapters.digest(),
+            ontology_digest=ontology_digest(),
+            unclaimed_frameworks=report.unclaimed_frameworks,
             built_at=started.isoformat(),
         )
         report.duration_seconds = (datetime.now(UTC) - started).total_seconds()
@@ -293,7 +297,13 @@ class Indexer:
         the total runtime. Each record already carries its own ``file_id``, so
         one call per table is enough.
         """
-        store = GraphStore.create(db_path, project_root=str(self.root))
+        # Git provenance, best effort. `resolve` never raises and returns an
+        # empty Provenance outside a checkout, so indexing a tarball works.
+        prov = provenance.resolve(self.root)
+        store = GraphStore.create(
+            db_path, project_root=str(self.root),
+            commit_sha=prov.commit_sha, branch=prov.branch, dirty=prov.dirty,
+        )
         with store.transaction():
             store.write_services(services)
 

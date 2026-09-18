@@ -416,7 +416,22 @@ def _run_verify(args: Any) -> int:
             store.close()
             print(f"  build {run}: {report.build_digest}")
 
-    if digests[0] != digests[1]:
+    ok = digests[0] == digests[1]
+
+    # Record the verdict on the project's own index, when it has one. An
+    # unverified graph keeps `deterministic_ok = NULL`, which is a third state:
+    # "not checked" and "checked and failed" are different facts and only one
+    # of them is a defect (#66).
+    project_db = Path(args.path) / ".lineagelens" / DB_FILENAME
+    if project_db.exists():
+        try:
+            with GraphStore.open(project_db) as project_store:
+                project_store.record_determinism(ok)
+        except (GraphNotFound, SchemaMismatch) as exc:
+            # The check itself is still valid; only the bookkeeping failed.
+            print(f"  (verdict not recorded: {exc})", file=sys.stderr)
+
+    if not ok:
         print("\nFAIL: two builds of the same tree differ.", file=sys.stderr)
         print("Something order-dependent or time-dependent reached the store.",
               file=sys.stderr)

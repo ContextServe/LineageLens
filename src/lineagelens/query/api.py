@@ -525,15 +525,7 @@ class QueryEngine:
         Without this an empty contract map is indistinguishable from "these
         services genuinely are not connected".
         """
-        row = self.store.conn.execute(
-            "SELECT ontology_digest FROM graph_meta WHERE id = 1"
-        ).fetchone()
-        if row and row["ontology_digest"]:
-            from ..core import loads
-
-            payload = loads(row["ontology_digest"])
-            if isinstance(payload, dict):
-                envelope.unclaimed_frameworks = payload.get("unclaimed", [])
+        envelope.unclaimed_frameworks = self.store.unclaimed_frameworks()
 
     # ---- 8. similar_flows -------------------------------------------------
 
