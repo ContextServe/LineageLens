@@ -54,6 +54,12 @@ watch = ["watchdog>=3.0.0"]
 # schema-3 core), and `llm` (§11 forbids an LLM in the extraction path).
 scip = ["protobuf>=4.25.0"]
 
+# The HTTP surface. Optional because the CLI and MCP are the primary
+# interfaces and neither needs a web framework; `frontend/` and anything
+# preferring HTTP to stdio need this. Unlike the deleted `web` extra, there is
+# now a module that actually imports it -- see rest.py and tests/test_rest.py.
+rest = ["fastapi>=0.110", "uvicorn>=0.27"]
+
 # ruff is pinned to a minor range, not just a floor. Its default rule set
 # widened between releases, which turned CI lint into a moving target that
 # failed on code nobody had touched. [tool.ruff.lint] now selects rules

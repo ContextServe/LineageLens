@@ -753,6 +753,78 @@ class GraphStore:
             )
         }
 
+    def graph_slice(
+        self,
+        *,
+        module: str | None = None,
+        lang: str | None = None,
+        service: str | None = None,
+        limit: int = 2000,
+    ) -> tuple[list[Node], list[Edge], int]:
+        """A bounded set of nodes with the edges wholly inside it (#55).
+
+        For visualisation, which is the one consumer that wants breadth rather
+        than an answer. Bounded because it is the only read in the codebase whose
+        natural size is the whole graph: schema 3's equivalent loaded every
+        symbol and relation into memory and then filtered in Python, which is
+        why the dashboard stopped being usable somewhere around ten thousand
+        nodes.
+
+        Returns the kept nodes, the *induced* edge set, and the total node count
+        before the limit -- so a caller can say it truncated rather than
+        presenting a partial graph as complete. Edges are induced on purpose:
+        an edge with one endpoint outside the slice would render as a dangling
+        arrow in Cytoscape, which requires both endpoints to exist.
+        """
+        where: list[str] = []
+        params: list[Any] = []
+        if module:
+            # Prefix match, against both names a caller might mean. Schema 4
+            # qualified names use `/` and `#` as separators, not dots, so a
+            # dotted-module assumption -- schema 3's -- silently matches
+            # nothing. Accepting a file-path prefix as well means the obvious
+            # thing works from either vocabulary.
+            escaped = module.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where.append(
+                "(n.qualified_name LIKE ? ESCAPE '\\' "
+                " OR n.file_path LIKE ? ESCAPE '\\')"
+            )
+            params += [escaped + "%", escaped + "%"]
+        if lang:
+            where.append("n.lang = ?")
+            params.append(lang)
+        if service:
+            where.append("n.service_id = ?")
+            params.append(service)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+
+        total = int(
+            self.conn.execute(
+                f"SELECT count(*) FROM nodes n{clause}", params  # noqa: S608
+            ).fetchone()[0]
+        )
+        rows = self.conn.execute(
+            # Widest spans first: containers and large types survive truncation,
+            # so a truncated view is still a map rather than an arbitrary sample.
+            f"SELECT n.* FROM nodes n{clause} "  # noqa: S608
+            "ORDER BY (n.end_byte - n.start_byte) DESC, n.id ASC LIMIT ?",
+            [*params, limit],
+        ).fetchall()
+        nodes = [_node_from_row(r) for r in rows]
+        if not nodes:
+            return [], [], total
+
+        ids = {n.id for n in nodes}
+        placeholders = ",".join("?" * len(ids))
+        ordered = sorted(ids)
+        edge_rows = self.conn.execute(
+            f"SELECT * FROM edges WHERE src IN ({placeholders}) "  # noqa: S608
+            f"AND dst IN ({placeholders})",
+            [*ordered, *ordered],
+        ).fetchall()
+        edges = [_edge_from_row(r) for r in edge_rows]
+        return nodes, edges, total
+
     def dangling_edge_count(self) -> int:
         """Edges whose endpoints are not both real nodes.
 

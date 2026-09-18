@@ -1,615 +1,460 @@
-"""REST API for LineageLens (shared by web frontend and ChatGPT Actions).
+"""HTTP surface over the schema-4 graph (#55).
 
-Provides both read-only queries and a trigger for analysis.
-Uses queries.py as the single source of truth.
+Consumed by ``frontend/`` and by anything that would rather speak HTTP than
+MCP. It is a thin projection of :class:`~lineagelens.query.QueryEngine` and
+holds no query logic of its own -- the previous version reimplemented traversal
+against an in-memory graph, which is how it came to disagree with the CLI.
+
+Two properties are deliberate and worth preserving:
+
+**Every answer carries its coverage envelope.** The envelope is what makes a
+negative answer trustworthy, and a transport is exactly the place it tends to
+get dropped for being inconvenient to type. So query routes return the
+engine's own ``as_dict()`` rather than a hand-written response model.
+
+**A capability that does not exist returns 501, not an empty list.** Dead-code
+and reachability verdicts have no schema-4 producer yet, and resiliency signals
+land in #60. Answering ``[]`` would be indistinguishable from "analysed, found
+nothing" -- the single failure mode this codebase spends the most effort
+avoiding.
+
+**Symbol ids must be percent-encoded.** Every schema-4 qualified name contains
+``/`` and ``#`` -- ``shop/python/repo#Repository/save``. An unencoded ``#`` is a
+URL *fragment*, so a client that forgets to encode sends only
+``shop/python/repo``; the server receives a valid request for the *module* and
+answers it correctly. The result is a confidently wrong answer that no
+server-side check can catch, because nothing arrived to look wrong. Clients must
+send ``encodeURIComponent(id)``, as ``frontend/`` already does; ``sym()`` in
+``tests/test_rest.py`` is the same thing for tests.
+
+FastAPI is an optional dependency (``pip install lineagelens[rest]``). Import
+this module only when serving.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 
-from .analyzer import analyze
-from .config import ProjectConfig
-from .index import invalidate, load_index
-from .queries import (
-    GraphNotFoundError,
-    get_callees,
-    get_callers,
-    get_lineage,
-    get_module_overview,
-    get_symbol,
-    impact_analysis,
-    is_test_path,
-    list_entry_points,
-    list_resiliency_risks,
-    search_symbols,
+from .core import NodeFlags
+from .query import QueryEngine
+from .store import GraphNotFound, SchemaMismatch
+
+#: Ceiling on nodes returned by ``/graph/view``. Cytoscape's compound layout is
+#: the binding constraint long before SQLite is.
+GRAPH_VIEW_LIMIT = 2000
+
+#: Sub-resources hanging off ``/symbols/{id}``. Registered *before* the bare
+#: ``/symbols/{id:path}`` route, which matches greedily and would otherwise
+#: swallow them as part of the id. Ordering is the whole mechanism, so the
+#: tuple exists to be asserted against in ``tests/test_rest.py``.
+SYMBOL_SUBRESOURCES: tuple[str, ...] = (
+    "callers", "callees", "lineage", "impact", "dataflow",
 )
-from .reachability import compute_reachability
+
+#: Fields the visualiser renders that have no schema-4 producer yet. Named in
+#: the response so the dashboard can grey out a filter instead of showing it
+#: switched off over data that was never computed.
+UNSUPPORTED_NODE_FIELDS: tuple[str, ...] = (
+    "verdict",              # reachability -- gated on #49
+    "rescue_mechanism",
+    "rescue_tier",
+    "has_resiliency_flag",  # #60
+)
 
 
-# Pydantic models for responses
-class SymbolOut(BaseModel):
-    id: str
-    kind: str
-    name: str
-    file: str
-    line: int
-    end_line: int | None
-    module: str
-    entry_point: str | None
-    async_: bool
-    description: str | None
-    inputs: list[dict[str, Any]]
-    outputs: list[dict[str, Any]]
-    decorators: list[str]
-
-
-class RelationOut(BaseModel):
-    source: str
-    target: str
-    kind: str
-    file: str
-    line: int
-    resolution: str
-
+# ---------------------------------------------------------------------------
+# visualisation models
+#
+# Only the graph view is typed. The frontend depends on its field names, and a
+# breaking change there should fail here rather than in a browser.
+# ---------------------------------------------------------------------------
 
 class NodeView(BaseModel):
-    """Lightweight node for graph visualization (not full detail)."""
+    """One node, as the visualiser needs it -- not the full detail."""
 
     id: str
+    #: The name every *query* route reports hops and results under. Node ids
+    #: are content hashes and are what the graph is keyed by, so a client that
+    #: wants to highlight the result of a traversal needs both: this is the
+    #: join key between a picture and an answer.
+    qualified_name: str
     label: str
     kind: str
-    parent: str | None
-    entry_point: str | None
-    async_: bool
-    has_resiliency_flag: bool
+    parent: str | None = None
+    lang: str = ""
+    service: str | None = None
+    file: str = ""
+    line: int = 0
+    entry_point: bool = False
+    async_: bool = False
     is_test: bool = False
-    # Reachability verdict: alive | dynamic_only | test_only | public_api |
-    # probably_dead | dead. Containers have none.
+    exported: bool = False
+    deprecated: bool = False
+    lines_of_code: int = 1
+    duplicate_name: bool = False
+    #: ``None`` means "not computed", never "false". See UNSUPPORTED_NODE_FIELDS.
     verdict: str | None = None
-    # The specific mechanism that kept it alive, and that mechanism's trust tier.
-    # A verdict an agent cannot audit is one it should not act on.
     rescue_mechanism: str | None = None
     rescue_tier: str | None = None
+    has_resiliency_flag: bool | None = None
     scope: str = "source"
-    duplicate_name: bool = False
-    lines_of_code: int = 1
 
 
 class EdgeView(BaseModel):
-    """Edge for graph visualization."""
-
     id: str
     source: str
     target: str
     kind: str
     resolution: str
+    evidence_tier: str
+    evidence_label: str = ""
 
 
 class GraphView(BaseModel):
-    """Full graph for visualization (nodes + edges)."""
-
     nodes: list[NodeView]
     edges: list[EdgeView]
+    returned: int
+    total_available: int
+    truncated: bool
+    coverage: dict[str, Any]
+    unsupported: list[str]
 
 
-class LineageStepOut(BaseModel):
-    symbol_id: str
-    relation_kind: str
-    depth: int
-    resolution: str
+# ---------------------------------------------------------------------------
+# router
+# ---------------------------------------------------------------------------
 
+def _not_implemented(capability: str, issue: str) -> HTTPException:
+    """501 with the reason and where to follow it.
 
-class ImpactReportOut(BaseModel):
-    symbol_id: str
-    affected: list[LineageStepOut]
-    affected_entry_points: list[str]
-
-
-class ModuleOverviewOut(BaseModel):
-    module_id: str
-    symbols: list[dict[str, Any]]
-    submodules: list[str]
-
-
-class RiskOut(BaseModel):
-    symbol_id: str
-    category: str
-    severity: str
-    evidence: str
-    line: int
+    Distinct from 404: the route exists and is intended, the producer does not.
+    A client can tell "ask again after the next release" from "you have the URL
+    wrong", which an empty 200 would not let it do at all.
+    """
+    return HTTPException(
+        status_code=501,
+        detail={
+            "capability": capability,
+            "reason": f"no schema-4 producer yet; tracked in {issue}",
+            "hint": "the route is intentional and will answer once that lands",
+        },
+    )
 
 
 def create_router(project: Path, api_key: str | None = None) -> APIRouter:
-    """Create a REST router for a project.
+    """Build the ``/api/v1`` router for one indexed project.
 
     Args:
-        project: Project root path
-        api_key: Optional API key for protected endpoints (POST /analyze)
-
-    Returns:
-        FastAPI Router with all endpoints
+        project: project root, i.e. the directory holding ``.lineagelens/``.
+        api_key: when set, every route requires a matching ``X-API-Key``.
+            Unset means no auth, which is correct for ``localhost`` and wrong
+            for anything else.
     """
     router = APIRouter(prefix="/api/v1", tags=["lineagelens"])
+    root = Path(project)
 
-    # Optional auth dependency
     def verify_api_key(x_api_key: str | None = Header(None)) -> None:
         if api_key and x_api_key != api_key:
-            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+            raise HTTPException(status_code=401, detail="invalid or missing API key")
 
-    # GET /api/v1/graph/view - for frontend visualization
-    @router.get("/graph/view", response_model=GraphView)
-    def graph_view(module: str | None = None) -> GraphView:
-        """Get graph data for visualization (with optional module filtering).
+    def engine() -> Iterator[QueryEngine]:
+        """One engine per request.
 
-        For large repos, module scoping allows lazy loading one module at a time.
-        Includes both Symbols and Containers for compound (hierarchical) layout.
+        The store's connection is not shared across threads and FastAPI runs
+        sync handlers in a threadpool, so a module-level engine would be a
+        latent ``ProgrammingError`` under concurrency. Opening SQLite is cheap;
+        debugging that is not.
         """
         try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
+            eng = QueryEngine.open(root)
+        except GraphNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SchemaMismatch as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            yield eng
+        finally:
+            eng.store.close()
 
-        config = index.config
+    guarded = [Depends(verify_api_key)]
+    dep = Depends(engine)
 
-        # Precompute unreferenced symbols and duplicate names for efficiency
-        reachability = compute_reachability(graph, config)
-        duplicate_names = index.duplicate_names
+    def _result(payload: Any) -> dict[str, Any]:
+        """Serialise a QueryResult, surfacing a resolution failure as 404.
 
-        # Collect nodes
-        nodes = []
-        rendered_node_ids = set()  # Track which nodes we're actually rendering
+        The engine reports an unknown symbol in ``extra['error']`` rather than
+        raising, because an MCP client wants the envelope alongside the miss.
+        Over HTTP the status code is the idiom, so translate it.
+        """
+        out = payload.as_dict()
+        if "error" in out:
+            raise HTTPException(status_code=404, detail=out["error"])
+        return out
 
-        # First pass: emit Container nodes (packages and modules)
-        for container in graph.containers.values():
-            # Skip if filtering by module and this container isn't in/under that module
-            # In scope if the id matches the module or sits under it.
-            if module and container.id != module and not container.id.startswith(module + "."):
-                continue
+    # ---- visualisation ----------------------------------------------------
 
-            has_risk = False  # Containers don't have risk flags directly
-            is_test = is_test_path(container.file, test_roots=config.test_roots)
+    @router.get("/graph/view", response_model=GraphView, dependencies=guarded)
+    def graph_view(
+        module: str | None = None,
+        lang: str | None = None,
+        service: str | None = None,
+        limit: int = Query(GRAPH_VIEW_LIMIT, ge=1, le=GRAPH_VIEW_LIMIT),
+        eng: QueryEngine = dep,
+    ) -> GraphView:
+        """The graph as a picture, bounded and honest about the bound."""
+        nodes, edges, total = eng.store.graph_slice(
+            module=module, lang=lang, service=service, limit=limit
+        )
 
-            # Defensive: null out parent if it won't exist in rendered nodes
-            # (This happens after filtering in both module-scoped and test-filtered cases)
-            parent_id = container.parent
-            # We'll validate parent refs after all nodes are collected
-
-            node = NodeView(
-                id=container.id,
-                label=container.name,
-                kind=container.kind,
-                parent=parent_id,
-                entry_point=None,
-                async_=False,
-                has_resiliency_flag=has_risk,
-                is_test=is_test,
-                verdict=None,
-                scope="test" if is_test else "source",
-                duplicate_name=False,
-            )
-            nodes.append(node)
-            rendered_node_ids.add(container.id)
-
-        # Second pass: emit Symbol nodes
-        for symbol in graph.symbols.values():
-            # Skip if filtering by module and this symbol's parent doesn't match
-            if module and symbol.parent != module and not (
-                symbol.parent and symbol.parent.startswith(module + ".")
-            ):
-                continue
-
-            has_risk = len(symbol.resiliency) > 0
-            is_test = is_test_path(symbol.file, test_roots=config.test_roots)
-            candidate = reachability.explain(symbol.id)
-            duplicate_name = (symbol.kind, symbol.name) in duplicate_names
-
-            # Defensive: null out parent if it won't exist in rendered nodes
-            parent_id = symbol.parent
-
-            loc = (symbol.end_line - symbol.line + 1) if (symbol.end_line and symbol.line) else 1
-            node = NodeView(
-                id=symbol.id,
-                label=symbol.name,
-                kind=symbol.kind,
-                parent=parent_id,
-                entry_point=symbol.entry_point,
-                async_=symbol.async_,
-                has_resiliency_flag=has_risk,
-                is_test=is_test,
-                verdict=candidate.verdict if candidate else None,
-                rescue_mechanism=(
-                    candidate.rescue.name if candidate and candidate.rescue else None
-                ),
-                rescue_tier=(
-                    candidate.rescue.evidence.tier if candidate and candidate.rescue else None
-                ),
-                scope=candidate.scope if candidate else "source",
-                duplicate_name=duplicate_name,
-                lines_of_code=max(1, loc),
-            )
-            nodes.append(node)
-            rendered_node_ids.add(symbol.id)
-
-        # Third pass: defensive cleanup — null out any parent refs that don't resolve
+        seen: dict[tuple[str, str], int] = {}
         for node in nodes:
-            if node.parent and node.parent not in rendered_node_ids:
-                node.parent = None
+            key = (node.kind.value, node.name)
+            seen[key] = seen.get(key, 0) + 1
+        rendered = {n.id for n in nodes}
 
-        # Collect edges
-        # Only include edges where BOTH source and target exist in the rendered nodes
-        # (Cytoscape requires both endpoints to exist)
-        edges = []
-        for i, rel in enumerate(graph.relations):
-            # Skip if either endpoint is not in the rendered nodes
-            if rel.source not in rendered_node_ids or rel.target not in rendered_node_ids:
-                continue
-
-            edge = EdgeView(
-                id=f"rel_{i}",
-                source=rel.source,
-                target=rel.target,
-                kind=rel.kind,
-                resolution=rel.resolution,
+        node_views = [
+            NodeView(
+                id=n.id,
+                qualified_name=n.qualified_name,
+                label=n.name,
+                kind=n.kind.value,
+                # Null a parent outside the slice: Cytoscape needs the referent.
+                parent=n.parent_id if n.parent_id in rendered else None,
+                lang=n.lang,
+                service=n.service_id,
+                file=n.file_path,
+                line=n.span.start_line,
+                entry_point=n.has(NodeFlags.ENTRY_POINT),
+                async_=n.has(NodeFlags.ASYNC),
+                is_test=n.has(NodeFlags.TEST),
+                exported=n.has(NodeFlags.EXPORTED),
+                deprecated=n.has(NodeFlags.DEPRECATED),
+                lines_of_code=max(1, n.span.end_line - n.span.start_line + 1),
+                duplicate_name=seen[(n.kind.value, n.name)] > 1,
+                scope="test" if n.has(NodeFlags.TEST) else "source",
             )
-            edges.append(edge)
-
-        return GraphView(nodes=nodes, edges=edges)
-
-    # GET /api/v1/search - search symbols
-    @router.get("/search", response_model=list[SymbolOut])
-    def search(text: str, kind: str | None = None, limit: int = 30) -> list[SymbolOut]:
-        """Search symbols by name/id."""
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-        results = search_symbols(graph, text, kind=kind, limit=limit)
-        return [
-            SymbolOut(
-                id=s.id,
-                kind=s.kind,
-                name=s.name,
-                file=s.file,
-                line=s.line,
-                end_line=s.end_line,
-                module=s.module,
-                entry_point=s.entry_point,
-                async_=s.async_,
-                description=s.description,
-                inputs=s.inputs,
-                outputs=s.outputs,
-                decorators=s.decorators,
-            )
-            for s in results
+            for n in nodes
         ]
-
-    # GET /api/v1/symbols/{symbol_id:path}/callers - who calls this?
-    @router.get("/symbols/{symbol_id:path}/callers", response_model=list[RelationOut])
-    def callers(symbol_id: str) -> list[RelationOut]:
-        """Get all symbols that call this one."""
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-        relations = get_callers(graph, symbol_id, index)
-        return [
-            RelationOut(
-                source=r.source,
-                target=r.target,
-                kind=r.kind,
-                file=r.file,
-                line=r.line,
-                resolution=r.resolution,
+        edge_views = [
+            EdgeView(
+                id=f"{e.src}->{e.dst}:{e.kind.value}:{i}",
+                source=e.src,
+                target=e.dst,
+                kind=e.kind.value,
+                resolution=e.resolution.value,
+                evidence_tier=e.evidence.tier.value,
+                evidence_label=e.evidence.label or "",
             )
-            for r in relations
+            for i, e in enumerate(edges)
         ]
-
-    # GET /api/v1/symbols/{symbol_id:path}/callees - what does this call?
-    @router.get("/symbols/{symbol_id:path}/callees", response_model=list[RelationOut])
-    def callees(symbol_id: str) -> list[RelationOut]:
-        """Get all symbols this one calls."""
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-        relations = get_callees(graph, symbol_id, index)
-        return [
-            RelationOut(
-                source=r.source,
-                target=r.target,
-                kind=r.kind,
-                file=r.file,
-                line=r.line,
-                resolution=r.resolution,
-            )
-            for r in relations
-        ]
-
-    # GET /api/v1/symbols/{symbol_id:path}/lineage - transitive call path
-    @router.get("/symbols/{symbol_id:path}/lineage", response_model=list[LineageStepOut])
-    def lineage(symbol_id: str, direction: str = "forward", max_depth: int = 5) -> list[LineageStepOut]:
-        """Get transitive call path (forward or backward)."""
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-        steps = get_lineage(graph, symbol_id, direction=direction, max_depth=max_depth)
-        return [
-            LineageStepOut(
-                symbol_id=s.symbol_id,
-                relation_kind=s.relation_kind,
-                depth=s.depth,
-                resolution=s.resolution,
-            )
-            for s in steps
-        ]
-
-    # GET /api/v1/symbols/{symbol_id:path}/impact - what breaks if I change this?
-    @router.get("/symbols/{symbol_id:path}/impact", response_model=ImpactReportOut)
-    def impact(symbol_id: str, max_depth: int = 10) -> ImpactReportOut:
-        """Backward transitive closure: what would be affected by changes here?"""
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-        report = impact_analysis(graph, symbol_id, max_depth=max_depth)
-        return ImpactReportOut(
-            symbol_id=report.symbol_id,
-            affected=[
-                LineageStepOut(
-                    symbol_id=s.symbol_id,
-                    relation_kind=s.relation_kind,
-                    depth=s.depth,
-                    resolution=s.resolution,
-                )
-                for s in report.affected
-            ],
-            affected_entry_points=report.affected_entry_points,
+        return GraphView(
+            nodes=node_views,
+            edges=edge_views,
+            returned=len(node_views),
+            total_available=total,
+            truncated=total > len(node_views),
+            coverage=eng.coverage_report().envelope.as_dict(),
+            unsupported=list(UNSUPPORTED_NODE_FIELDS),
         )
 
-    # GET /api/v1/symbols/{symbol_id:path} - full symbol detail
-    @router.get("/symbols/{symbol_id:path}", response_model=SymbolOut)
-    def get_symbol_detail(symbol_id: str) -> SymbolOut:
-        """Get full details for a symbol."""
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
+    # ---- symbols ----------------------------------------------------------
 
-        symbol = get_symbol(graph, symbol_id)
-        if not symbol:
-            if symbol_id in graph.containers:
-                c = graph.containers[symbol_id]
-                return SymbolOut(
-                    id=c.id,
-                    kind=c.kind,
-                    name=c.name,
-                    file=c.file or "",
-                    line=1,
-                    end_line=1,
-                    module=c.parent or "",
-                    entry_point=None,
-                    async_=False,
-                    description=f"Container ({c.kind}): {c.name}",
-                    inputs=[],
-                    outputs=[],
-                    decorators=[],
-                )
-            raise HTTPException(status_code=404, detail=f"Symbol or container not found: {symbol_id}")
-
-        return SymbolOut(
-            id=symbol.id,
-            kind=symbol.kind,
-            name=symbol.name,
-            file=symbol.file,
-            line=symbol.line,
-            end_line=symbol.end_line,
-            module=symbol.module,
-            entry_point=symbol.entry_point,
-            async_=symbol.async_,
-            description=symbol.description,
-            inputs=symbol.inputs,
-            outputs=symbol.outputs,
-            decorators=symbol.decorators,
-        )
-
-    # GET /api/v1/modules/{module}/overview - module summary
-    @router.get("/modules/{module}/overview", response_model=ModuleOverviewOut)
-    def module_overview(module: str) -> ModuleOverviewOut:
-        """Get high-level overview of a module (for agents)."""
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-        overview = get_module_overview(graph, module)
-        if not overview:
-            raise HTTPException(status_code=404, detail=f"Module not found: {module}")
-
-        return ModuleOverviewOut(
-            module_id=overview.module_id,
-            symbols=overview.symbols,
-            submodules=overview.submodules,
-        )
-
-    # GET /api/v1/entry-points - list all entry points
-    @router.get("/entry-points", response_model=list[SymbolOut])
-    def entry_points(kind: str | None = None) -> list[SymbolOut]:
-        """List all entry points (API routes, CLI commands, tests)."""
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-        entries = list_entry_points(graph, kind=kind)
-        return [
-            SymbolOut(
-                id=s.id,
-                kind=s.kind,
-                name=s.name,
-                file=s.file,
-                line=s.line,
-                end_line=s.end_line,
-                module=s.module,
-                entry_point=s.entry_point,
-                async_=s.async_,
-                description=s.description,
-                inputs=s.inputs,
-                outputs=s.outputs,
-                decorators=s.decorators,
-            )
-            for s in entries
-        ]
-
-    # GET /api/v1/resiliency - list risk signals
-    @router.get("/resiliency", response_model=list[RiskOut])
-    def resiliency(min_severity: str | None = None) -> list[RiskOut]:
-        """List all resiliency/risk signals."""
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-        risks = list_resiliency_risks(graph, min_severity=min_severity)
-        return [RiskOut(**r) for r in risks]
-
-    # GET /api/v1/dead-code - the full candidate list with verdicts
-    @router.get("/dead-code")
-    def dead_code(
-        verdict: str | None = None, scope: str | None = None
+    @router.get("/search", dependencies=guarded)
+    def search(
+        text: str,
+        kind: str | None = None,
+        lang: str | None = None,
+        service: str | None = None,
+        intent: str | None = None,
+        limit: int | None = None,
+        eng: QueryEngine = dep,
     ) -> dict[str, Any]:
-        """Symbols that warrant attention as possible dead code.
+        kinds = [k.strip() for k in kind.split(",")] if kind else None
+        return _result(
+            eng.search(
+                text, kinds=kinds, lang=lang, service=service,
+                intent=intent, limit=limit,
+            )
+        )
 
-        Previously reachable only as node flags on /graph/view or through MCP.
+    @router.get("/symbols/{symbol_id:path}/callers", dependencies=guarded)
+    def callers(
+        symbol_id: str,
+        transitive: bool = True,
+        intent: str | None = None,
+        limit: int | None = None,
+        max_depth: int | None = None,
+        eng: QueryEngine = dep,
+    ) -> dict[str, Any]:
+        return _result(
+            eng.callers_of(symbol_id, transitive=transitive, intent=intent,
+                           limit=limit, max_depth=max_depth)
+        )
 
-        Verdicts, in descending severity:
-          dead           not reachable from any entry point by any modelled
-                         mechanism, and no same-named dynamic call site exists
-          probably_dead  unreachable, but an unresolved call shares its name
-          test_only      reachable only from tests, so nothing shipped uses it
+    @router.get("/symbols/{symbol_id:path}/callees", dependencies=guarded)
+    def callees(
+        symbol_id: str,
+        transitive: bool = True,
+        intent: str | None = None,
+        limit: int | None = None,
+        max_depth: int | None = None,
+        eng: QueryEngine = dep,
+    ) -> dict[str, Any]:
+        return _result(
+            eng.callees_of(symbol_id, transitive=transitive, intent=intent,
+                           limit=limit, max_depth=max_depth)
+        )
+
+    @router.get("/symbols/{symbol_id:path}/lineage", dependencies=guarded)
+    def lineage(
+        symbol_id: str,
+        direction: str = Query("forward", pattern="^(forward|backward)$"),
+        intent: str | None = None,
+        limit: int | None = None,
+        max_depth: int | None = None,
+        eng: QueryEngine = dep,
+    ) -> dict[str, Any]:
+        """Transitive callers or callees, kept for the frontend's URL shape.
+
+        Schema 3's ``get_lineage`` returned a reachability *set* with no
+        predecessor links, so its depths were DFS artefacts and no chain could
+        be reconstructed from the response. This answers the question the
+        frontend was actually asking, with real distances.
         """
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
+        walk = eng.callees_of if direction == "forward" else eng.callers_of
+        out = _result(
+            walk(symbol_id, transitive=True, intent=intent,
+                 limit=limit, max_depth=max_depth)
+        )
+        out["direction"] = direction
+        return out
 
-        result = compute_reachability(graph, index.config)
-        candidates = result.candidates()
-        if verdict:
-            candidates = [c for c in candidates if c.verdict == verdict]
-        if scope:
-            candidates = [c for c in candidates if c.scope == scope]
+    @router.get("/symbols/{symbol_id:path}/impact", dependencies=guarded)
+    def impact(
+        symbol_id: str,
+        intent: str | None = None,
+        limit: int | None = None,
+        max_depth: int | None = None,
+        eng: QueryEngine = dep,
+    ) -> dict[str, Any]:
+        return _result(
+            eng.impact_of(symbol_id, intent=intent, limit=limit, max_depth=max_depth)
+        )
 
-        return {
-            "count": len(candidates),
-            "by_verdict": result.by_verdict(),
-            "candidates": [
-                {
-                    "id": c.symbol.id,
-                    "kind": c.symbol.kind,
-                    "name": c.symbol.name,
-                    "file": c.symbol.file,
-                    "line": c.symbol.line,
-                    "module": c.symbol.module,
-                    "verdict": c.verdict,
-                    "scope": c.scope,
-                    "reason": c.reason,
-                }
-                for c in candidates
-            ],
-        }
+    @router.get("/symbols/{symbol_id:path}/dataflow", dependencies=guarded)
+    def dataflow(
+        symbol_id: str,
+        direction: str = Query("both", pattern="^(both|forward|backward)$"),
+        intent: str | None = None,
+        limit: int | None = None,
+        max_depth: int | None = None,
+        eng: QueryEngine = dep,
+    ) -> dict[str, Any]:
+        return _result(
+            eng.dataflow_of(symbol_id, direction=direction, intent=intent,
+                            limit=limit, max_depth=max_depth)
+        )
 
-    # GET /api/v1/reachability/{symbol_id:path} - why is this alive?
-    @router.get("/reachability/{symbol_id:path}")
+    # Registered last: ``{symbol_id:path}`` would otherwise swallow the
+    # suffixed routes above, since a path converter matches greedily.
+    @router.get("/symbols/{symbol_id:path}", dependencies=guarded)
+    def symbol(
+        symbol_id: str, intent: str | None = None, eng: QueryEngine = dep
+    ) -> dict[str, Any]:
+        return _result(eng.get_node(symbol_id, intent=intent))
+
+    # ---- whole-graph questions -------------------------------------------
+
+    @router.get("/entry-points", dependencies=guarded)
+    def entry_points(
+        kind: str | None = None, limit: int | None = None, eng: QueryEngine = dep
+    ) -> dict[str, Any]:
+        return _result(eng.entry_points(kind=kind, limit=limit))
+
+    @router.get("/contracts", dependencies=guarded)
+    def contracts(
+        service: str | None = None,
+        kind: str | None = None,
+        intent: str | None = None,
+        limit: int | None = None,
+        eng: QueryEngine = dep,
+    ) -> dict[str, Any]:
+        return _result(
+            eng.contract_map(service=service, kind=kind, intent=intent, limit=limit)
+        )
+
+    @router.get("/paths", dependencies=guarded)
+    def paths(
+        start: str,
+        goal: str,
+        intent: str | None = None,
+        limit: int | None = None,
+        max_depth: int | None = None,
+        max_paths: int | None = None,
+        eng: QueryEngine = dep,
+    ) -> dict[str, Any]:
+        return _result(
+            eng.find_paths(start, goal, intent=intent, limit=limit,
+                           max_depth=max_depth, max_paths=max_paths)
+        )
+
+    @router.get("/explain", dependencies=guarded)
+    def explain(src: str, dst: str, eng: QueryEngine = dep) -> dict[str, Any]:
+        return _result(eng.explain(src, dst))
+
+    @router.get("/coverage", dependencies=guarded)
+    def coverage(
+        scope: str | None = None, eng: QueryEngine = dep
+    ) -> dict[str, Any]:
+        return _result(eng.coverage_report(scope))
+
+    # ---- declared, not yet answerable ------------------------------------
+
+    @router.get("/resiliency", dependencies=guarded)
+    def resiliency() -> dict[str, Any]:
+        raise _not_implemented("resiliency risk signals", "#60")
+
+    @router.get("/dead-code", dependencies=guarded)
+    def dead_code() -> dict[str, Any]:
+        raise _not_implemented("dead-code detection", "#49")
+
+    @router.get("/reachability/{symbol_id:path}", dependencies=guarded)
     def reachability(symbol_id: str) -> dict[str, Any]:
-        """Explain the verdict for one symbol.
-
-        This is the endpoint that makes the feature auditable, and the one an
-        agent should consult before deleting anything: it names the mechanism
-        that reached the symbol, the symbol it was reached through, and the trust
-        tier of that mechanism.
-        """
-        try:
-            index = load_index(project)
-            graph = index.graph
-        except GraphNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-        if symbol_id not in graph.symbols:
-            if symbol_id in graph.containers:
-                c = graph.containers[symbol_id]
-                return {
-                    "id": symbol_id,
-                    "verdict": "public_api",
-                    "scope": "container",
-                    "reason": f"Container ({c.kind}) containing submodules or class definitions",
-                    "rescue": None,
-                }
-            raise HTTPException(status_code=404, detail=f"Symbol not found: {symbol_id}")
-
-        candidate = compute_reachability(graph, index.config).explain(symbol_id)
-        if candidate is None:
-            raise HTTPException(status_code=404, detail=f"No verdict for {symbol_id}")
-
-        return {
-            "id": symbol_id,
-            "verdict": candidate.verdict,
-            "scope": candidate.scope,
-            "reason": candidate.reason,
-            "rescue": (
-                {
-                    "mechanism": candidate.rescue.name,
-                    "tier": candidate.rescue.evidence.tier,
-                    "detail": candidate.rescue.detail,
-                    "via_symbol": candidate.rescue.via_symbol,
-                }
-                if candidate.rescue
-                else None
-            ),
-        }
-
-    # POST /api/v1/analyze - trigger analysis (protected)
-    @router.post("/analyze")
-    def trigger_analyze(api_key_check: None = Depends(verify_api_key)) -> dict[str, Any]:
-        """Trigger analysis and return report summary."""
-        config = ProjectConfig.load(project)
-        graph, report = analyze(project, config)
-
-        # Persist the graph we just computed. Calling cli.build() here would run the
-        # whole analysis a second time.
-        from .cli import write_artifacts
-
-        write_artifacts(project, config, graph, report, quiet=True)
-        invalidate(project)
-
-        return {
-            "status": "success",
-            "files_scanned": report.files_scanned,
-            "symbols_found": report.symbols_found,
-            "relations_found": report.relations_found,
-            "failures": len(report.failures),
-            "warnings": len(report.warnings),
-        }
+        raise _not_implemented("reachability verdicts", "#49")
 
     return router
+
+
+def create_app(project: Path, api_key: str | None = None) -> Any:
+    """A FastAPI app serving one project, for ``lineagelens serve``."""
+    from fastapi import FastAPI
+
+    app = FastAPI(
+        title="LineageLens",
+        description="Deterministic code graph over HTTP.",
+        version="1.0.0",
+    )
+    app.include_router(create_router(project, api_key=api_key))
+
+    @app.get("/healthz")
+    def healthz() -> dict[str, str]:
+        return {"status": "ok", "project": str(Path(project).resolve())}
+
+    return app
+
+
+__all__ = [
+    "GRAPH_VIEW_LIMIT",
+    "SYMBOL_SUBRESOURCES",
+    "UNSUPPORTED_NODE_FIELDS",
+    "EdgeView",
+    "GraphView",
+    "NodeView",
+    "create_app",
+    "create_router",
+]
