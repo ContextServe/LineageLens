@@ -190,6 +190,7 @@ lineagelens index [path]      build the graph (all languages, one graph)
   --require-tier-b[=LANGS]    skip languages with no type resolver (CI strictness)
   --require-level=SPEC        skip languages below a capability level: L2, or
                               kotlin:L0,java:L2
+  --scip[=PATH]               resolve through a SCIP index (compiler-grade)
   --upload                    publish the graph to ContextServe (opt-in)
   --upload-required           make a publish failure fatal
   --dry-run                   print the exact payload, send nothing
@@ -216,6 +217,31 @@ Anonymous events are counts, versions and digests. Never a path, symbol,
 repository name, branch or line of source — enforced by an assertion over the
 event keys, not by review. Full field list and reasoning in
 [docs/TELEMETRY.md](docs/TELEMETRY.md).
+
+## Compiler-grade resolution
+
+Tier A is tree-sitter and always runs. Tier B is a type resolver, and a SCIP
+index is the one that covers more than Python:
+
+```
+scip-java index                     # or scip-typescript / scip-python / scip-go
+lineagelens index --scip            # discovers ./index.scip
+lineagelens index --scip=path.scip  # or point at one
+```
+
+A SCIP answer is `evidence: fact` with label `scip_resolve`, and it outranks
+jedi — a compiler-verified fact beats a static-analysis inference.
+
+**LineageLens never runs the indexer for you.** Subprocessing `scip-java`
+inside `index` would make indexing network-dependent, slow and
+non-deterministic, and `verify --determinism` could not hold. When a toolchain
+is present and no index is, the CLI prints the command to generate one.
+
+**A stale index is refused per file.** Each SCIP document's text is hashed
+against what is on disk; a file that differs gets no SCIP answers and falls
+back to Tier A, with the count reported. An index built against a different
+commit would otherwise produce confident edges that do not match the code —
+the exact failure the rewrite was written to eliminate.
 
 ## Publishing a graph
 

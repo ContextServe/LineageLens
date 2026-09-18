@@ -154,6 +154,16 @@ def _add_index(commands: Any) -> None:
             "and merely documented"
         ),
     )
+    cmd.add_argument(
+        "--scip", nargs="?", const="auto", default=None, metavar="PATH",
+        help=(
+            "resolve through a SCIP index for compiler-grade accuracy. "
+            "Pass a path, or the flag alone to discover ./index.scip. "
+            "LineageLens never runs scip-java or scip-typescript itself: "
+            "subprocessing a build tool would make indexing "
+            "network-dependent and non-deterministic"
+        ),
+    )
     cmd.add_argument("--force", action="store_true",
                      help="rebuild even if the index looks current")
     cmd.add_argument("--json", action="store_true", help="emit the report as JSON")
@@ -184,10 +194,12 @@ def _parse_level_floors(raw: str) -> dict[str, str]:
 
 
 def _run_index(args: Any) -> int:
+    scip_index = _resolve_scip_path(args)
     indexer = Indexer(
         args.path,
         require_tier_b=_tier_b_set(args.require_tier_b),
         require_level=_parse_level_floors(getattr(args, "require_level", "") or ""),
+        scip_index=scip_index,
     )
     store, report = indexer.run()
     # Hand the report to the telemetry hook in `main`, which owns the event so
@@ -290,6 +302,69 @@ def _maybe_upload(args: Any, report: Any) -> str:
     return ""
 
 
+#: Where `--scip` looks when given no path. The conventional output location
+#: for every scip-* indexer.
+SCIP_DEFAULT_NAME = "index.scip"
+
+
+def _resolve_scip_path(args: Any) -> Path | None:
+    """The SCIP index to use, or None.
+
+    Discovery is opt-in via the flag and never implicit: picking up a stray
+    `index.scip` that happened to be in a directory would change resolution
+    silently, and resolution is the thing a user most needs to be able to
+    reason about.
+    """
+    raw = getattr(args, "scip", None)
+    if raw is None:
+        return None
+
+    project = Path(args.path)
+    if raw == "auto":
+        candidate = project / SCIP_DEFAULT_NAME
+        if not candidate.is_file():
+            raise SystemExit(
+                f"--scip: no {SCIP_DEFAULT_NAME} in {project}.\n"
+                f"  generate one with your language's indexer, e.g.\n"
+                f"    scip-java index          (Java/Kotlin/Scala)\n"
+                f"    scip-typescript index    (TypeScript/JavaScript)\n"
+                f"    scip-python index .      (Python)\n"
+                f"  then re-run: lineagelens index --scip"
+            )
+        return candidate
+
+    candidate = Path(raw)
+    if not candidate.is_file():
+        raise SystemExit(f"--scip: {candidate} is not a file")
+    return candidate
+
+
+def _print_scip_hint(project: Path) -> None:
+    """Suggest generating an index when a toolchain is present but none is.
+
+    The detection `ToolchainOracle` already performs becomes a hint rather
+    than a claim -- "javac detected" was only ever an inventory note, and
+    #65 made that visible in the matrix.
+    """
+    import shutil
+
+    hints = {
+        "javac": ("java", "scip-java index"),
+        "tsc": ("typescript", "scip-typescript index"),
+        "go": ("go", "scip-go"),
+    }
+    for executable, (lang, command) in hints.items():
+        if shutil.which(executable) and not (project / SCIP_DEFAULT_NAME).is_file():
+            print(
+                f"  hint: {lang}: {executable} detected but no SCIP index "
+                f"found.\n"
+                f"        For compiler-grade resolution, run:  {command}\n"
+                f"        then re-run:  lineagelens index --scip",
+                file=sys.stderr,
+            )
+            return
+
+
 def _tier_b_set(raw: str) -> frozenset[str]:
     """Parse ``--require-tier-b``. Bare flag means every language."""
     if not raw:
@@ -326,6 +401,20 @@ def _print_index_report(report: Any, store: GraphStore, *, stream: Any = None) -
         f"   boundaries {graph['boundaries']:,}"
     )
     emit(f"  digest    {data['build_digest'][:16]}  ({data['duration_seconds']}s)")
+
+    if data.get("scip"):
+        scip = data["scip"]
+        if scip.get("error"):
+            emit(f"  scip      unusable: {scip['error']}  (Tier A only)")
+        else:
+            stale = scip.get("stale_files") or []
+            emit(
+                f"  scip      {scip.get('tool') or 'index'}: "
+                f"{scip.get('occurrences', 0):,} occurrences, "
+                f"{scip.get('definitions', 0):,} definitions, "
+                f"{scip.get('documents', 0):,} documents"
+                + (f"  ({len(stale)} stale, Tier A only)" if stale else "")
+            )
 
     if data.get("levels"):
         # Breadth and depth are independent axes, so the level is printed
