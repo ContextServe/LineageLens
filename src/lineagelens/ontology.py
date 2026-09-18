@@ -104,7 +104,7 @@ def measured_matrix() -> dict[str, dict[str, Any]]:
 def installed_tiers() -> dict[str, dict[str, str]]:
     """Grammar and type-resolver availability on this machine (§7.2)."""
     from .extract.langs import ParserRegistry, grammar_version
-    from .resolve.oracles import OracleRegistry
+    from .resolve.oracles import OracleAvailability, OracleRegistry
 
     parsers = ParserRegistry()
     available = parsers.available()
@@ -120,12 +120,25 @@ def installed_tiers() -> dict[str, dict[str, str]]:
 
     for lang, tools in oracles.availability().items():
         entry = out.setdefault(lang, {"tier_a": "missing", "tier_b": "missing"})
-        best = next(
-            (f"{name} ({state})" for name, state in sorted(tools.items())
-             if state != "missing"),
-            "missing",
-        )
-        entry["tier_b"] = best
+        # A resolver that was found but cannot answer is not Tier B. Rendering
+        # it as `javac (detected)` read as a capability and was only an
+        # inventory note, which is how `--require-tier-b` came to pass for
+        # Java while every Java answer stayed Tier A (#65).
+        wired = [
+            f"{name} ({state})" for name, state in sorted(tools.items())
+            if state not in ("missing", OracleAvailability.DETECTED_UNWIRED)
+        ]
+        if wired:
+            entry["tier_b"] = wired[0]
+        else:
+            unwired = [
+                name for name, state in sorted(tools.items())
+                if state == OracleAvailability.DETECTED_UNWIRED
+            ]
+            entry["tier_b"] = (
+                f"{unwired[0]} found, unwired (Tier A)"
+                if unwired else "missing"
+            )
 
     for lang, entry in out.items():
         entry["grammar_version"] = grammar_version(lang) or "n/a"

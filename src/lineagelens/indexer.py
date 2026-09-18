@@ -74,6 +74,13 @@ class IndexReport:
     #: Languages indexed without a Tier B type resolver, so with more
     #: references recorded as ambiguous. Reported, never silent.
     tier_a_only: list[str] = field(default_factory=list)
+    #: Languages `--require-tier-b` asked for and no resolver can answer, so
+    #: their files were skipped. Reported separately from `tier_a_only`
+    #: because it is a *refusal*, not a degradation: the caller asked not to be
+    #: given Tier A answers, and got no answers instead. The CLI exits non-zero
+    #: on it, so refusing to answer cannot look like a successful index of
+    #: nothing (#65).
+    tier_b_refused: list[str] = field(default_factory=list)
     languages: dict[str, int] = field(default_factory=dict)
     #: Framework-shaped declarations no adapter claimed, commonest first (§8.2).
     unclaimed_frameworks: list[dict[str, object]] = field(default_factory=list)
@@ -97,6 +104,7 @@ class IndexReport:
             "languages": dict(sorted(self.languages.items())),
             "unclaimed_frameworks": self.unclaimed_frameworks,
             **({"tier_a_only": self.tier_a_only} if self.tier_a_only else {}),
+            **({"tier_b_refused": self.tier_b_refused} if self.tier_b_refused else {}),
             "skipped_reasons": dict(sorted(self.skipped_reasons.items())),
             "build_digest": self.build_digest,
             "duration_seconds": round(self.duration_seconds, 3),
@@ -151,9 +159,10 @@ class Indexer:
         without_tier_b = set(oracles.languages_without_tier_b())
         refused = without_tier_b & set(self.require_tier_b)
         if refused:
+            report.tier_b_refused = sorted(refused)
             logger.warning(
-                "--require-tier-b was given for %s but no resolver is "
-                "available; files in these languages will be skipped.",
+                "--require-tier-b was given for %s but no resolver can resolve "
+                "them; files in these languages will be skipped.",
                 ", ".join(sorted(refused)),
             )
         degraded = sorted(without_tier_b - refused)

@@ -59,6 +59,11 @@ class OracleAvailability(str):
 
     VENDORED = "vendored"
     DETECTED = "detected"
+    #: Found on PATH but `resolve` is not implemented for this language, so it
+    #: contributes nothing beyond Tier A. Distinct from DETECTED because
+    #: "javac detected" reads as a capability and is only an inventory note
+    #: (#65). Collapsing the two is what made `--require-tier-b` inert.
+    DETECTED_UNWIRED = "detected_unwired"
     CONTAINER = "container"
     MISSING = "missing"
 
@@ -71,7 +76,22 @@ class ResolverOracle(Protocol):
     languages: frozenset[str]
 
     def available(self) -> str:
-        """One of the :class:`OracleAvailability` values."""
+        """One of the :class:`OracleAvailability` values.
+
+        Answers *discovery*: did we find the toolchain. Not whether it can
+        resolve anything -- see :meth:`can_resolve`.
+        """
+        ...
+
+    def can_resolve(self) -> bool:
+        """Is :meth:`resolve` implemented and usable for these languages?
+
+        A separate question from :meth:`available`, and conflating them is the
+        bug this method exists to prevent: a detected toolchain with no wired
+        resolver satisfied ``--require-tier-b`` while answering nothing, so a
+        user asking to be given only compiler-grade results was silently served
+        Tier A (#65).
+        """
         ...
 
     def version(self) -> str:
@@ -98,6 +118,17 @@ class _Base:
 
     def type_of(self, span: Span, file_path: str) -> str | None:
         return None
+
+    def can_resolve(self) -> bool:
+        """False by default, deliberately.
+
+        An oracle that has not overridden :meth:`resolve` inherits the ``None``
+        above, so it must not claim Tier B. Defaulting to False means a new
+        oracle is correct without doing anything, and has to opt in explicitly
+        once it can actually answer -- rather than being wrong until someone
+        remembers to exclude it.
+        """
+        return False
 
 
 @dataclass(slots=True)
@@ -126,6 +157,10 @@ class JediOracle(_Base):
             return getattr(jedi, "__version__", "unknown")
         except ImportError:
             return "missing"
+
+    def can_resolve(self) -> bool:
+        """The one oracle with a working ``resolve`` today."""
+        return self.available() != OracleAvailability.MISSING
 
     def resolve(self, ref: UnresolvedRef) -> ResolvedTarget | None:
         """Ask jedi what a name at a position refers to.
@@ -212,6 +247,13 @@ class ToolchainOracle(_Base):
     detected, resolution not wired") instead of either claiming the language is
     unsupported or silently answering from Tier A and calling it a fact.
 
+    That honesty was undone in one place. :meth:`available` returned
+    ``detected`` and ``languages_without_tier_b`` tested only for ``missing``,
+    so a machine with a JDK counted Java as having Tier B and
+    ``--require-tier-b=java`` refused nothing (#65). Discovery and capability
+    are now separate questions: this reports ``detected_unwired`` and
+    :meth:`can_resolve` returns False until a language is wired.
+
     Wiring each toolchain is per-language work and is tracked separately; §15
     lists why each is irreducibly language-specific.
     """
@@ -230,7 +272,12 @@ class ToolchainOracle(_Base):
     def available(self) -> str:
         if self._locate() is None:
             return OracleAvailability.MISSING
-        return OracleAvailability.DETECTED
+        # Found, but nothing is wired to ask it anything. Reporting plain
+        # `detected` here is what let the refusal flag pass (#65).
+        return (
+            OracleAvailability.DETECTED if self.can_resolve()
+            else OracleAvailability.DETECTED_UNWIRED
+        )
 
     def version(self) -> str:
         located = self._locate()
@@ -323,9 +370,16 @@ class OracleRegistry:
         return matrix
 
     def languages_without_tier_b(self) -> list[str]:
-        """Languages where no oracle is available -- §7.2 step 4 applies."""
-        missing: list[str] = []
-        for lang, oracles in sorted(self._by_lang.items()):
-            if all(o.available() == OracleAvailability.MISSING for o in oracles):
-                missing.append(lang)
-        return missing
+        """Languages where no oracle can actually resolve -- §7.2 step 4.
+
+        Gated on capability, not discovery. The previous form tested
+        ``available() == MISSING``, which answers "did we find a toolchain" --
+        so a detected-but-unwired `javac` counted as Tier B and
+        ``--require-tier-b=java`` had nothing to refuse (#65). It failed
+        silently and in the trusting direction: the run succeeded, the envelope
+        looked clean, and every answer was Tier A.
+        """
+        return [
+            lang for lang, oracles in sorted(self._by_lang.items())
+            if not any(o.can_resolve() for o in oracles)
+        ]
