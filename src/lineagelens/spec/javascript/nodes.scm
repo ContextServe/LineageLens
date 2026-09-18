@@ -35,6 +35,19 @@
   parameters: (formal_parameters) @params
   (#eq? @name "constructor")) @node.constructor
 
+; `async function` and `async` methods. Drives NodeFlags.ASYNC (#60), which
+; was populated only for Python -- so every JavaScript async frame was
+; invisible to the resiliency detector.
+(function_declaration
+  "async" @modifier
+  name: (identifier) @name
+  parameters: (formal_parameters) @params) @node.function
+
+(method_definition
+  "async" @modifier
+  name: (property_identifier) @name
+  parameters: (formal_parameters) @params) @node.method
+
 ; `const handler = (req) => {...}`. The dominant declaration form in modern JS,
 ; so treating these as anonymous would lose most of a codebase.
 (variable_declarator

@@ -356,6 +356,36 @@ def create_server(root: Path | None = None) -> Any:
         """Symbols that expose a contract -- the roots a trace starts from."""
         return engine().entry_points(kind=kind, limit=limit).as_dict()
 
+    @server.tool()
+    @guarded
+    async def list_resiliency_risks(
+        min_severity: str | None = None,
+        limit: int | None = None,
+        max_depth: int | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Blocking calls reachable from an async frame, with the chain.
+
+        Each finding names the blocking call, the async frame it sits inside,
+        the call chain between them, and the weakest evidence tier on that
+        chain -- so a risk found through an inferred edge is reported at lower
+        confidence rather than asserted flatly.
+
+        Read `risks.languages` in the response before trusting an empty list.
+        A language with no rule pack reports `unsupported`, which is not the
+        same as "analysed, no risks found": the first is a gap in LineageLens
+        and the second is a fact about the code.
+
+        Most blocking calls are *external* -- `Thread.sleep` and `time.sleep`
+        live outside the index -- so findings are matched against unresolved
+        references as well as graph edges, and carry `external: true`.
+        """
+        from ..query.risks import list_risks
+
+        return list_risks(
+            engine(), min_severity=min_severity, limit=limit, max_depth=max_depth
+        ).as_dict()
+
     # ---- lookup -----------------------------------------------------------
 
     @server.tool()
