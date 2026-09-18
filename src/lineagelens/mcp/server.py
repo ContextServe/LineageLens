@@ -89,6 +89,21 @@ class EngineHandle:
             return None
 
 
+def _response_bytes(result: Any) -> int:
+    """Serialised size of a tool response, for the token estimate.
+
+    Measured on the serialised form because that is what crosses the wire and
+    lands in an agent's context. Falls back to zero rather than raising: a
+    response that cannot be sized is still a response.
+    """
+    import json as _json
+
+    try:
+        return len(_json.dumps(result, default=str).encode())
+    except Exception:  # pragma: no cover - defensive
+        return 0
+
+
 def create_server(root: Path | None = None) -> Any:
     """Build the MCP server for one project."""
     from mcp.server.mcpserver import MCPServer
@@ -118,18 +133,44 @@ def create_server(root: Path | None = None) -> Any:
         """
         @functools.wraps(fn)
         async def wrapped(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            # Metering lives here rather than on each tool, so it is one change
+            # instead of twenty-four and a new tool is metered by default
+            # rather than by remembering (#59).
+            from .. import telemetry
+
+            with telemetry.timed() as clock:
+                try:
+                    result = await fn(*args, **kwargs)
+                except GraphNotFound:
+                    result = {
+                        "error": "no index",
+                        "remedy": f"run: lineagelens index {project}",
+                    }
+                except SchemaMismatch as exc:
+                    result = {
+                        "error": str(exc),
+                        "remedy": f"run: lineagelens index {project} --force",
+                    }
+
+            # A counter, not I/O. Metering a call must not become the cost it
+            # is measuring, so nothing is sent until the process exits.
             try:
-                return await fn(*args, **kwargs)
-            except GraphNotFound:
-                return {
-                    "error": "no index",
-                    "remedy": f"run: lineagelens index {project}",
-                }
-            except SchemaMismatch as exc:
-                return {
-                    "error": str(exc),
-                    "remedy": f"run: lineagelens index {project} --force",
-                }
+                telemetry.meter().record_tool_call(telemetry.ToolCall(
+                    tool=fn.__name__,
+                    duration_ms=clock.ms,
+                    response_bytes=_response_bytes(result),
+                    # `precise` adds verbatim source and data flow, so it is
+                    # the single biggest cost lever an agent controls.
+                    intent=kwargs.get("intent"),
+                    result_count=len(result.get("results", ()))
+                    if isinstance(result, dict) else 0,
+                    truncated=bool(result.get("truncated"))
+                    if isinstance(result, dict) else False,
+                ))
+            except Exception:  # pragma: no cover - metering never breaks a tool
+                logger.debug("metering failed for %s", fn.__name__, exc_info=True)
+
+            return result
 
         # Advertise the tool's real parameters minus each signature's ``**_``
         # catch-all: the SDK refuses any parameter whose name starts with an
