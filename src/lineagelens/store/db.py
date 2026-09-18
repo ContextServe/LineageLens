@@ -446,6 +446,50 @@ class GraphStore:
 
     # ---- determinism ------------------------------------------------------
 
+    def derive_entry_point_flags(self) -> int:
+        """Set ``NodeFlags.ENTRY_POINT`` on every source of an ``EXPOSES`` edge.
+
+        ``core/kinds.py`` documents the flag as derived -- "it mirrors the
+        existence of an EXPOSES edge, and exists so the hot 'is this an entry
+        point' check does not need a join" -- and nothing derived it, so it was
+        ``0`` on every node while 13 ``EXPOSES`` edges existed (#57).
+        ``ImpactReport.entry_points`` is gated on it, so the most consequential
+        field in a blast-radius answer was unreachable.
+
+        Done as one set-based statement after edges are written, because
+        contracts are detected after nodes are persisted and the flag must not
+        be able to disagree with the edge. Not computed lazily per query: the
+        flag exists specifically to keep that join off the hot path.
+
+        Returns the number of nodes flagged, so the caller can report it.
+        """
+        cursor = self.conn.execute(
+            # `flags | 256` rather than `= 256`: other flags on the node are
+            # already set and must survive.
+            """
+            UPDATE nodes SET flags = flags | ?
+             WHERE id IN (SELECT DISTINCT src FROM edges WHERE kind = ?)
+               AND flags & ? = 0
+            """,
+            (int(NodeFlags.ENTRY_POINT), EdgeKind.EXPOSES.value,
+             int(NodeFlags.ENTRY_POINT)),
+        )
+        return cursor.rowcount or 0
+
+    def nodes_with_flag(self, flag: NodeFlags) -> list[Node]:
+        """Every node carrying ``flag``. For assertions and reporting."""
+        rows = self.conn.execute(
+            "SELECT * FROM nodes WHERE flags & ? ORDER BY id", (int(flag),)
+        )
+        return [_node_from_row(r) for r in rows]
+
+    def edges_of_kind(self, kind: EdgeKind | str) -> list[Edge]:
+        rows = self.conn.execute(
+            "SELECT * FROM edges WHERE kind = ? ORDER BY src, dst",
+            (kind.value if isinstance(kind, EdgeKind) else str(kind),),
+        )
+        return [_edge_from_row(r) for r in rows]
+
     def compute_build_digest(self) -> str:
         """Hash the stored graph, for ``--verify-determinism`` (§11).
 
