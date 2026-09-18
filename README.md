@@ -199,8 +199,23 @@ lineagelens verify [path]     rebuild twice, confirm identical
 lineagelens ontology [path]   measured capability for this installation
 lineagelens mcp [path]        run the MCP server over stdio
 lineagelens serve [path]      HTTP surface for the dashboard (loopback default)
+lineagelens telemetry ...      enable, disable, status -- off until you enable it
 lineagelens auth ...          login, logout, status, token, switch-env
 ```
+
+## Telemetry
+
+Off until you turn it on. `DO_NOT_TRACK` and `CI` suppress it permanently and
+cannot be overridden by configuration.
+
+```
+lineagelens telemetry status     prints the exact event, not a description
+```
+
+Anonymous events are counts, versions and digests. Never a path, symbol,
+repository name, branch or line of source — enforced by an assertion over the
+event keys, not by review. Full field list and reasoning in
+[docs/TELEMETRY.md](docs/TELEMETRY.md).
 
 ## Publishing a graph
 
@@ -264,6 +279,8 @@ index at Tier A and the coverage envelope says so on every query. Use
   writing an adapter, the invariants and where they are enforced
 - [docs/ADDING-A-LANGUAGE.md](docs/ADDING-A-LANGUAGE.md) — the capability
   ladder and the exact artifacts a new language needs
+- [docs/TELEMETRY.md](docs/TELEMETRY.md) — every field sent, what is never
+  sent, and how to switch it off
 - Design rationale and measured baselines: issue #51
 
 ## Licence
