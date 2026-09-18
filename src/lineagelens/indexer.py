@@ -81,6 +81,12 @@ class IndexReport:
     #: on it, so refusing to answer cannot look like a successful index of
     #: nothing (#65).
     tier_b_refused: list[str] = field(default_factory=list)
+    #: ``{lang: level}`` for languages present in this index (#56).
+    levels: dict[str, str] = field(default_factory=dict)
+    #: Languages skipped for sitting below a `--require-level` floor. Reported
+    #: separately from `levels` because it is a refusal, not a description:
+    #: the caller asked not to be given answers below a level and got none.
+    level_refused: dict[str, str] = field(default_factory=dict)
     languages: dict[str, int] = field(default_factory=dict)
     #: Framework-shaped declarations no adapter claimed, commonest first (§8.2).
     unclaimed_frameworks: list[dict[str, object]] = field(default_factory=list)
@@ -105,6 +111,8 @@ class IndexReport:
             "unclaimed_frameworks": self.unclaimed_frameworks,
             **({"tier_a_only": self.tier_a_only} if self.tier_a_only else {}),
             **({"tier_b_refused": self.tier_b_refused} if self.tier_b_refused else {}),
+            **({"levels": self.levels} if self.levels else {}),
+            **({"level_refused": self.level_refused} if self.level_refused else {}),
             "skipped_reasons": dict(sorted(self.skipped_reasons.items())),
             "build_digest": self.build_digest,
             "duration_seconds": round(self.duration_seconds, 3),
@@ -119,6 +127,7 @@ class Indexer:
         project_root: Path,
         *,
         require_tier_b: frozenset[str] = frozenset(),
+        require_level: dict[str, str] | None = None,
     ) -> None:
         self.root = project_root.resolve()
         #: Languages to SKIP unless a Tier B type resolver is available.
@@ -141,6 +150,8 @@ class Indexer:
         #: `--require-tier-b` restores the strict behaviour where a caller wants
         #: the guarantee, e.g. a CI job that must not report a partial graph.
         self.require_tier_b = require_tier_b
+        #: ``{lang: level}`` floors, ``"*"`` for every language (#56).
+        self.require_level = dict(require_level or {})
         self.specs = SpecRegistry()
         self.parsers = ParserRegistry()
         self.extractor = SpecExtractor(specs=self.specs, parsers=self.parsers)
@@ -179,13 +190,23 @@ class Indexer:
             )
             report.tier_a_only = degraded
 
+        # Levels for the languages this index actually contains, not every
+        # language the build could parse -- the report describes this graph.
+        spec_levels = self.specs.levels()
+
         observations: list[Observation] = []
         lang_of_file: dict[str, str] = {}
+        # Every language *encountered*, including ones whose files were all
+        # skipped. `lang_of_file` records only parsed files, so a wholly
+        # refused language is absent from it -- and a refusal that vanishes
+        # from the report is the failure the refusal exists to prevent.
+        langs_seen: set[str] = set()
         usage_sites: list[dict] = []  # For Phase 3: usage site extraction
 
         for rel_path, content, dialect in self._walk():
             report.files_seen += 1
             lang = language_of(dialect)
+            langs_seen.add(lang)
             service = locator.for_path(rel_path)
             digest = hashlib.blake2b(content, digest_size=16).hexdigest()
 
@@ -266,6 +287,18 @@ class Indexer:
             db_path or self.root / ".lineagelens" / DB_FILENAME,
             services, observations, resolved, usage_sites=usage_sites,
         )
+
+        report.levels = {
+            lang: spec_levels[lang]
+            for lang in sorted(set(lang_of_file.values()))
+            if lang in spec_levels
+        }
+        if self.require_level:
+            report.level_refused = {
+                lang: spec_levels.get(lang, "none")
+                for lang in sorted(langs_seen)
+                if self._below_required_level(lang)
+            }
 
         counts = store.counts()
         report.nodes = counts["nodes"]
@@ -407,11 +440,32 @@ class Indexer:
                     continue
                 yield (path.relative_to(self.root).as_posix(), content, dialect)
 
+    def _below_required_level(self, lang: str) -> bool:
+        """Is ``lang`` below the floor asked for?
+
+        A language with no spec at all counts as below any floor: it cannot be
+        indexed, so claiming it met L0 would be the declared-capability failure
+        the ladder exists to prevent.
+        """
+        if not self.require_level:
+            return False
+        from .extract.spec import LEVELS
+
+        floor = self.require_level.get(lang, self.require_level.get("*"))
+        if floor is None:
+            return False
+        if not self.specs.has(lang):
+            return True
+        actual = self.specs.spec_for(lang).level
+        return LEVELS.index(actual) < LEVELS.index(floor)
+
     def _skip_reason(
         self, rel_path: str, content: bytes, lang: str, refused: set[str]
     ) -> SkipReason | None:
         if lang in refused:
             return SkipReason.MISSING_TIER_B
+        if self._below_required_level(lang):
+            return SkipReason.BELOW_REQUIRED_LEVEL
         if len(content) > MAX_FILE_BYTES:
             return SkipReason.TOO_LARGE
         if b"\x00" in content[:8192]:

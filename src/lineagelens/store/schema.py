@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS files (
     size_bytes   INTEGER NOT NULL,
     parse_status TEXT NOT NULL,     -- ok|partial|failed|skipped
     parse_errors TEXT,              -- JSON [{line,col,message}]
-    skip_reason  TEXT,              -- generated|vendored|binary|too_large|excluded
+    -- generated|vendored|binary|too_large|excluded|missing_grammar
+    -- |missing_tier_b|below_required_level
+    skip_reason  TEXT,
                                     -- |missing_grammar|missing_tier_b
     extractors   TEXT NOT NULL      -- JSON [{name,version,tier}]
 );

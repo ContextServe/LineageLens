@@ -121,16 +121,25 @@ class LanguageResult:
     missing_nodes: list[str] = field(default_factory=list)
     files: int = 0
     unresolved: int = 0
+    #: Capability level derived from which spec files loaded (#56).
+    level: str = "L0"
+    #: Why the claimed level is not corroborated by what the corpus produced.
+    #: Empty when it is. A non-empty value fails the run.
+    level_unsupported: str = ""
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "files": self.files,
+            "level": self.level,
             "node_kinds": dict(sorted(self.node_kinds.items())),
             "edge_kinds": dict(sorted(self.edge_kinds.items())),
             "unresolved_refs": self.unresolved,
             "missing_nodes": self.missing_nodes,
             **self.capabilities,
         }
+        if self.level_unsupported:
+            out["level_unsupported"] = self.level_unsupported
+        return out
 
 
 def run_language(lang: str, *, corpus_root: Path | None = None) -> LanguageResult:
@@ -160,6 +169,17 @@ def run_language(lang: str, *, corpus_root: Path | None = None) -> LanguageResul
             result.unresolved = report.unresolved
         finally:
             store.close()
+
+    # The claimed level, and whether the corpus run corroborates it. A level
+    # is derived from which spec files loaded, so a `refs.scm` that does not
+    # match its grammar would claim L1 while extracting no call edges --
+    # a declared capability wearing a measured one's clothes. Checking it here
+    # is what makes the ladder falsifiable rather than decorative (#56 step 2).
+    from ..extract.spec import SpecRegistry
+
+    specs = SpecRegistry()
+    result.level = specs.spec_for(lang).level if specs.has(lang) else "L0"
+    result.level_unsupported = _level_shortfall(result.level, present_edges_of(result))
 
     expected = EXPECTATIONS.get(lang)
     if expected is None:
@@ -191,6 +211,29 @@ def run_language(lang: str, *, corpus_root: Path | None = None) -> LanguageResul
                  or e in {k.value for k in EdgeKind}}
             )
     return result
+
+
+def present_edges_of(result: LanguageResult) -> set[str]:
+    return {kind for kind, count in result.edge_kinds.items() if count}
+
+
+def _level_shortfall(level: str, present: set[str]) -> str:
+    """Why ``level`` is not supported by the edges a corpus run produced.
+
+    Cumulative: L2 must satisfy L1's requirement too, because a language with
+    data-flow queries and no working refs queries is not one level up, it is
+    two levels of spec with one of them broken.
+    """
+    from ..extract.spec import LEVEL_EVIDENCE, LEVELS
+
+    for candidate in LEVELS[1:LEVELS.index(level) + 1]:
+        required = LEVEL_EVIDENCE[candidate]
+        if not present & set(required):
+            return (
+                f"claims {level} but the corpus produced none of "
+                f"{', '.join(required)} -- required for {candidate}"
+            )
+    return ""
 
 
 def run_all(*, corpus_root: Path | None = None) -> dict[str, Any]:
@@ -225,15 +268,27 @@ def main() -> int:  # pragma: no cover - developer entry point
     path = write_matrix()
     payload = json.loads(path.read_text("utf-8"))
     print(f"wrote {path}")
+    unsupported: list[str] = []
     for lang, entry in sorted(payload["languages"].items()):
         marks = " ".join(
             f"{name}={entry.get(name)}"
             for name in ("nodes", "calls", "inherits", "implements",
                          "dataflow", "contracts")
         )
-        print(f"  {lang:12s} {marks}")
+        print(f"  {lang:12s} {entry.get('level', '?'):3s} {marks}")
         if entry.get("missing_nodes"):
             print(f"               missing nodes: {entry['missing_nodes']}")
+        if entry.get("level_unsupported"):
+            print(f"               LEVEL: {entry['level_unsupported']}")
+            unsupported.append(lang)
+
+    if unsupported:
+        # Non-zero, so CI catches a grammar pinned without a working spec.
+        # `pyproject.toml` records why this matters: grammars once sat behind
+        # an extra with no spec at all, and Apache Dubbo produced 4,297
+        # "classes" matched from `"class " in line`.
+        print(f"\nFAIL: unsupported level claims: {', '.join(unsupported)}")
+        return 1
     return 0
 
 

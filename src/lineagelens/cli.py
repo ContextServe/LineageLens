@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .core import SCHEMA_VERSION, Intent
+from .extract.spec import LEVEL_MEANING
 from .indexer import Indexer
 from .ontology import capability_matrix
 from .query import QueryEngine
@@ -82,16 +83,51 @@ def _add_index(commands: Any) -> None:
             "tier is reported per language in the coverage envelope"
         ),
     )
+    cmd.add_argument(
+        "--require-level", metavar="SPEC", default="",
+        help=(
+            "SKIP files whose language is below a capability level. "
+            "`--require-level=L2` applies one floor to every language; "
+            "`--require-level=kotlin:L0,java:L2` sets per-language floors. "
+            "Levels are L0 inventory, L1 +call graph, L2 +data flow, derived "
+            "from which extraction specs loaded. Use in CI when an "
+            "inventory-only answer must be an error rather than an empty one"
+        ),
+    )
     cmd.add_argument("--force", action="store_true",
                      help="rebuild even if the index looks current")
     cmd.add_argument("--json", action="store_true", help="emit the report as JSON")
     cmd.set_defaults(handler=_run_index)
 
 
+def _parse_level_floors(raw: str) -> dict[str, str]:
+    """``"L2"`` or ``"kotlin:L0,java:L2"`` into ``{lang: level}``.
+
+    A bare level uses the ``"*"`` key, meaning "every language". One flag
+    family, one direction: a floor is always a *minimum* to meet, never a
+    maximum to allow, so there is no reading under which passing this relaxes
+    anything.
+    """
+    from .extract.spec import LEVELS
+
+    floors: dict[str, str] = {}
+    for part in (p.strip() for p in raw.split(",") if p.strip()):
+        lang, sep, level = part.rpartition(":")
+        level = level.upper()
+        if level not in LEVELS:
+            raise SystemExit(
+                f"--require-level: {level!r} is not a level; expected one of "
+                f"{', '.join(LEVELS)}"
+            )
+        floors[lang if sep else "*"] = level
+    return floors
+
+
 def _run_index(args: Any) -> int:
     indexer = Indexer(
         args.path,
         require_tier_b=_tier_b_set(args.require_tier_b),
+        require_level=_parse_level_floors(getattr(args, "require_level", "") or ""),
     )
     store, report = indexer.run()
     try:
@@ -113,6 +149,18 @@ def _run_index(args: Any) -> int:
             + f"; {report.files_skipped} file(s) skipped rather than indexed at "
             "Tier A.\ndrop --require-tier-b for those languages to index them "
             "with ambiguity reported instead.",
+        )
+        return 1
+    if report.level_refused:
+        # The caller set a capability floor and these languages are under it,
+        # so their files were skipped rather than indexed at a level that
+        # cannot answer the questions the floor implies. Exiting 0 would make
+        # refusing to answer look like a successful index of nothing.
+        detail = ", ".join(f"{k} ({v})" for k, v in report.level_refused.items())
+        print(
+            f"\nrefused: below --require-level -- {detail}\n"
+            f"{report.files_skipped} file(s) skipped. Lower the floor, or add "
+            f"the missing extraction specs (docs/ADDING-A-LANGUAGE.md).",
             file=sys.stderr,
         )
         return 1
@@ -150,6 +198,13 @@ def _print_index_report(report: Any, store: GraphStore) -> None:
         f"   boundaries {graph['boundaries']:,}"
     )
     print(f"  digest    {data['build_digest'][:16]}  ({data['duration_seconds']}s)")
+
+    if data.get("levels"):
+        # Breadth and depth are independent axes, so the level is printed
+        # beside the tier rather than folded into it (#56).
+        print("  levels    " + "  ".join(
+            f"{lang} {level}" for lang, level in data["levels"].items()
+        ) + "  (L0 inventory, L1 +calls, L2 +data flow)")
 
     if data.get("tier_a_only"):
         print(
@@ -394,6 +449,19 @@ def _run_coverage(args: Any) -> int:
             print("files: " + "  ".join(
                 f"{k} {v:,}" for k, v in coverage["files"].items()
             ))
+        if coverage.get("levels"):
+            print("\nlevels:")
+            for lang, level in coverage["levels"].items():
+                print(f"  {lang:14s} {level}  {LEVEL_MEANING.get(level, '')}")
+            below = sorted(
+                lang for lang, level in coverage["levels"].items()
+                if level != "L2"
+            )
+            if below:
+                # The distinction the ladder exists for: on these languages a
+                # missing answer may be unavailable rather than absent.
+                print("  " + ", ".join(below) + ": a missing call or data-flow "
+                      "answer here is unavailable, not absent")
         if coverage.get("degraded"):
             print(f"degraded (Tier A only): {', '.join(coverage['degraded'])}")
     engine.store.close()
@@ -482,19 +550,18 @@ def _run_ontology(args: Any) -> int:
     symbols = {True: "yes", "partial": "part", "untested": "?", False: "-",
                "n/a": "n/a"}
     header = "  ".join(f"{name[:9]:>9s}" for name in columns)
-    # Wide enough for "javac found, unwired (Tier A)" -- truncating that to
-    # "javac found, unwired (Ti" loses the part that matters (#65).
-    resolver_width = 30
-    print(f"\n{'language':11s} {'type resolver':{resolver_width}s} {header}")
+    print(f"\n{'language':11s} {'lvl':4s} {'type resolver':26s} {header}")
     for lang, entry in matrix["languages"].items():
         caps = entry.get("capabilities", {})
         marks = "  ".join(
             f"{symbols.get(caps.get(name), '-'):>9s}" for name in columns
         )
-        print(f"{lang:11s} "
-              f"{entry['tier_b'][:resolver_width]:{resolver_width}s} {marks}")
+        print(f"{lang:11s} {entry.get('level', '?'):4s} "
+              f"{entry['tier_b'][:26]:26s} {marks}")
     print("\n  'n/a' means the language has no such construct; 'part' is a "
           "documented partial (see `--json` for the reason).")
+    print("  lvl: L0 inventory, L1 +call graph, L2 +data flow. Derived from "
+          "which extraction specs loaded, not declared.")
 
     project = matrix.get("project", {})
     if project.get("indexed"):
