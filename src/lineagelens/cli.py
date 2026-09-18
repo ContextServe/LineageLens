@@ -100,6 +100,21 @@ def _run_index(args: Any) -> int:
             _print_index_report(report, store)
     finally:
         store.close()
+
+    if report.tier_b_refused:
+        # The caller asked not to be served Tier A answers for these languages
+        # and there is no resolver, so their files were skipped rather than
+        # indexed at lower fidelity. Exiting 0 would make refusing to answer
+        # indistinguishable from successfully indexing nothing (#65).
+        print(
+            "\nrefused: no Tier B resolver for "
+            + ", ".join(report.tier_b_refused)
+            + f"; {report.files_skipped} file(s) skipped rather than indexed at "
+            "Tier A.\ndrop --require-tier-b for those languages to index them "
+            "with ambiguity reported instead.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -451,13 +466,17 @@ def _run_ontology(args: Any) -> int:
     symbols = {True: "yes", "partial": "part", "untested": "?", False: "-",
                "n/a": "n/a"}
     header = "  ".join(f"{name[:9]:>9s}" for name in columns)
-    print(f"\n{'language':11s} {'type resolver':26s} {header}")
+    # Wide enough for "javac found, unwired (Tier A)" -- truncating that to
+    # "javac found, unwired (Ti" loses the part that matters (#65).
+    resolver_width = 30
+    print(f"\n{'language':11s} {'type resolver':{resolver_width}s} {header}")
     for lang, entry in matrix["languages"].items():
         caps = entry.get("capabilities", {})
         marks = "  ".join(
             f"{symbols.get(caps.get(name), '-'):>9s}" for name in columns
         )
-        print(f"{lang:11s} {entry['tier_b'][:26]:26s} {marks}")
+        print(f"{lang:11s} "
+              f"{entry['tier_b'][:resolver_width]:{resolver_width}s} {marks}")
     print("\n  'n/a' means the language has no such construct; 'part' is a "
           "documented partial (see `--json` for the reason).")
 
