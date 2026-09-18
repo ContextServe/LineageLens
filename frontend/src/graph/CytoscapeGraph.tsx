@@ -50,6 +50,10 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
         return {
           data: {
             id: node.id,
+            // Query routes answer in qualified names; the graph is keyed by
+            // node id. Carrying both is what lets a traversal result be
+            // highlighted on the picture.
+            qualified_name: node.qualified_name,
             label: node.label,
             kind: node.kind,
             parent: node.parent && nodeIds.has(node.parent) ? node.parent : undefined,
@@ -232,17 +236,34 @@ export function CytoscapeGraph({ data, selectedSymbol, onSelectSymbol, filters }
       onSelectSymbol?.(nodeId)
 
       try {
+        const id = encodeURIComponent(nodeId)
         const [backwardRes, forwardRes] = await Promise.all([
-          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/lineage?direction=backward&max_depth=10`),
-          fetch(`/api/v1/symbols/${encodeURIComponent(nodeId)}/lineage?direction=forward&max_depth=10`),
+          fetch(`/api/v1/symbols/${id}/lineage?direction=backward&max_depth=10`),
+          fetch(`/api/v1/symbols/${id}/lineage?direction=forward&max_depth=10`),
         ])
 
-        const backwardSteps = backwardRes.ok ? await backwardRes.json() : []
-        const forwardSteps = forwardRes.ok ? await forwardRes.json() : []
+        // Each result is a *path* with a hop list, not a flat reachability
+        // set: schema 3 returned a bag whose depths were DFS artefacts, so no
+        // chain could be reconstructed from it. Hops report `node` as a
+        // qualified name; the graph is keyed by node id, so map back through
+        // `qualified_name` on the node view.
+        const byQualifiedName = new Map<string, string>()
+        cy.nodes().forEach((n: any) => {
+          const qn = n.data('qualified_name')
+          if (qn) byQualifiedName.set(qn, n.id())
+        })
 
         const reachableIds = new Set<string>([nodeId])
-        if (Array.isArray(backwardSteps)) backwardSteps.forEach((step: any) => reachableIds.add(step.symbol_id))
-        if (Array.isArray(forwardSteps)) forwardSteps.forEach((step: any) => reachableIds.add(step.symbol_id))
+        for (const response of [backwardRes, forwardRes]) {
+          if (!response.ok) continue
+          const body = await response.json()
+          for (const path of body.results ?? []) {
+            for (const hop of path.hops ?? []) {
+              const mapped = byQualifiedName.get(hop.node)
+              if (mapped) reachableIds.add(mapped)
+            }
+          }
+        }
 
         highlightLineage(cy, reachableIds)
       } catch (err) {

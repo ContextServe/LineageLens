@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_verify(commands)
     _add_ontology(commands)
     _add_mcp(commands)
+    _add_serve(commands)
     _add_auth(commands)
 
     args = parser.parse_args(argv)
@@ -482,6 +483,61 @@ def _run_mcp(args: Any) -> int:
     from .mcp.server import create_server
 
     create_server(Path(args.path)).run()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# serve
+# ---------------------------------------------------------------------------
+
+def _add_serve(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "serve",
+        help="serve the graph over HTTP (requires: pip install lineagelens[rest])",
+    )
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    # Loopback by default. An unauthenticated graph of someone's source tree
+    # should take a deliberate act to expose, not a forgotten flag.
+    cmd.add_argument("--host", default="127.0.0.1",
+                     help="bind address (default: 127.0.0.1, loopback only)")
+    cmd.add_argument("--port", type=int, default=8000)
+    cmd.add_argument("--api-key", default=None,
+                     help="require this key in the X-API-Key header")
+    cmd.set_defaults(handler=_run_serve)
+
+
+def _run_serve(args: Any) -> int:
+    try:
+        import uvicorn
+    except ImportError:
+        print(
+            "serve needs the HTTP extra:\n  pip install 'lineagelens[rest]'",
+            file=sys.stderr,
+        )
+        return 2
+
+    from .rest import create_app
+
+    project = Path(args.path)
+    if not (project / ".lineagelens").is_dir():
+        print(f"no index at {project}\nRun: lineagelens index {project}",
+              file=sys.stderr)
+        return 1
+
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not args.api_key:
+        # Refuse rather than warn. The graph carries signatures, docstrings and
+        # file layout; serving it unauthenticated on a routable address is a
+        # disclosure, and a warning on line 3 of uvicorn's banner is not
+        # consent.
+        print(
+            f"refusing to bind {args.host} without --api-key\n"
+            "the graph exposes signatures, docstrings and file layout",
+            file=sys.stderr,
+        )
+        return 2
+
+    uvicorn.run(create_app(project, api_key=args.api_key),
+                host=args.host, port=args.port, log_level="info")
     return 0
 
 

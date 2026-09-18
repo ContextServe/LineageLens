@@ -106,17 +106,52 @@ class TestDeclaredDependencies:
         assert not loose, f"grammars must be pinned exactly, not floored: {loose}"
 
     def test_no_dependency_on_deleted_subsystems(self, pyproject):
-        """The GraphQL/UI stack went with the schema-3 core.
+        """The GraphQL stack went with the schema-3 core and has no successor.
 
-        Leaving it declared would install four packages nothing imports.
+        ``fastapi`` and ``uvicorn`` were on this list too, for the right reason
+        at the time: the ``web`` extra declared them while nothing imported
+        them. #55 ported ``rest.py`` onto the schema-4 engine, so they are
+        declared again -- under ``rest``, with a real importer and a test suite.
+        The rule the original assertion was protecting is the one below:
+        nothing is declared that nothing imports.
         """
         declared = " ".join(
             pyproject["project"]["dependencies"]
             + [d for deps in pyproject["project"]["optional-dependencies"].values()
                for d in deps]
         )
-        for gone in ("strawberry-graphql", "fastapi", "uvicorn"):
+        for gone in ("strawberry-graphql", "graphql-core"):
             assert gone not in declared, f"{gone} is declared but nothing imports it"
+
+    def test_every_optional_extra_has_an_importer(self, pyproject):
+        """An extra nothing imports is a dependency users install for nothing.
+
+        This is the general form of the assertion above, so the next extra
+        added without a consumer fails here instead of shipping.
+        """
+        # extra -> a module-level import that proves something needs it.
+        importers = {
+            "auth": "httpx",
+            "mcp": "mcp",
+            "watch": "watchdog",
+            "scip": "protobuf",
+            "rest": "fastapi",
+            "dev": None,  # tooling, not imported by the package
+        }
+        extras = set(pyproject["project"]["optional-dependencies"])
+        assert extras == set(importers), (
+            f"extras changed; add the importer for {extras ^ set(importers)}"
+        )
+
+        sources = "\n".join(
+            path.read_text() for path in PACKAGE_ROOT.rglob("*.py")
+        )
+        for extra, module in importers.items():
+            if module is None:
+                continue
+            assert module in sources, (
+                f"extra {extra!r} declares {module} but no module imports it"
+            )
 
     def test_console_scripts_resolve(self, pyproject):
         import importlib
