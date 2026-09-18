@@ -53,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_ontology(commands)
     _add_mcp(commands)
     _add_serve(commands)
+    _add_telemetry(commands)
     _add_auth(commands)
 
     args = parser.parse_args(argv)
@@ -60,7 +61,36 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    return int(args.handler(args) or 0)
+
+    from . import telemetry
+
+    with telemetry.timed() as clock:
+        code = int(args.handler(args) or 0)
+
+    # One event, after the command, never before. Buffered and flushed here
+    # rather than inside the handler so an outage cannot affect what the
+    # command returns -- `code` is already decided by this point (#59).
+    _emit_command_event(args, code, clock.ms)
+    return code
+
+
+def _emit_command_event(args: Any, code: int, duration_ms: int) -> None:
+    """Record one anonymous event, if the user opted in. Never raises."""
+    from . import telemetry
+
+    try:
+        if not telemetry.is_enabled():
+            return
+        meter = telemetry.meter()
+        meter.record(telemetry.usage_event(
+            command=args.command,
+            duration_ms=duration_ms,
+            exit_code=code,
+            report=getattr(args, "_report", None),
+        ))
+        meter.flush()
+    except Exception:  # pragma: no cover - telemetry never breaks a command
+        logging.getLogger(__name__).debug("telemetry emit failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +191,9 @@ def _run_index(args: Any) -> int:
         require_level=_parse_level_floors(getattr(args, "require_level", "") or ""),
     )
     store, report = indexer.run()
+    # Hand the report to the telemetry hook in `main`, which owns the event so
+    # that a flush failure cannot reach this function's return value.
+    args._report = report
     # Under --dry-run stdout belongs to the payload, so it can be piped into
     # jq or diffed. The build report still gets printed -- to stderr, where it
     # does not corrupt the thing being audited.
@@ -742,6 +775,7 @@ def _run_mcp(args: Any) -> int:
 
 
 # ---------------------------------------------------------------------------
+<<<<<<< HEAD
 # serve
 # ---------------------------------------------------------------------------
 
@@ -793,6 +827,58 @@ def _run_serve(args: Any) -> int:
 
     uvicorn.run(create_app(project, api_key=args.api_key),
                 host=args.host, port=args.port, log_level="info")
+=======
+# telemetry
+# ---------------------------------------------------------------------------
+
+def _add_telemetry(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "telemetry",
+        help="anonymous usage telemetry: off until you turn it on",
+    )
+    sub = cmd.add_subparsers(dest="telemetry_command", required=True)
+    sub.add_parser("enable", help="opt in to anonymous usage telemetry")
+    sub.add_parser("disable", help="opt out")
+    sub.add_parser("status", help="what would be sent, and where")
+    cmd.set_defaults(handler=_run_telemetry)
+
+
+def _run_telemetry(args: Any) -> int:
+    from . import telemetry
+
+    action = args.telemetry_command
+    if action == "enable":
+        telemetry.set_enabled(True)
+        blocker = telemetry.suppressed_by()
+        print(f"telemetry enabled. Preferences: {telemetry.prefs_path()}")
+        if blocker:
+            # Honesty about an override that will win. Saying "enabled" and
+            # then sending nothing would be worse than refusing.
+            print(f"  note: ${blocker} is set, so nothing will be sent while "
+                  f"it remains. That override cannot be configured away.")
+        print("  run `lineagelens telemetry status` to see the exact payload.")
+        return 0
+
+    if action == "disable":
+        telemetry.set_enabled(False)
+        print("telemetry disabled. No events will be sent.")
+        return 0
+
+    state = telemetry.status()
+    print(f"enabled     {state['enabled']}")
+    print(f"effective   {state['effective']}"
+          + (f"  (suppressed by ${state['suppressed_by']})"
+             if state["suppressed_by"] else ""))
+    print(f"install id  {state['install_id'] or '(not yet generated)'}")
+    print(f"endpoint    {state['endpoint']}")
+    print(f"prefs       {state['preferences_file']}")
+    print("\nnever sent: " + ", ".join(state["never_sent"]))
+    # The actual payload, not a description of it. For a tool that ships as
+    # source, a user should not have to read telemetry.py to find out what
+    # leaves their machine.
+    print("\nthe exact event that would be sent:")
+    print(_indent(json.dumps(state["example_event"], indent=2, sort_keys=True), "  "))
+>>>>>>> feature/telemetry
     return 0
 
 
