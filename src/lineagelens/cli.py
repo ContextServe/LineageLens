@@ -94,6 +94,37 @@ def _add_index(commands: Any) -> None:
             "inventory-only answer must be an error rather than an empty one"
         ),
     )
+    cmd.add_argument(
+        "--upload", action="store_true",
+        help=(
+            "publish the graph to ContextServe after indexing. Strictly "
+            "opt-in: a plain `index` makes no network calls at all"
+        ),
+    )
+    cmd.add_argument(
+        "--upload-required", action="store_true",
+        help=(
+            "exit non-zero if publication fails. Without it an upload failure "
+            "is a diagnostic and the exit code reflects the index, because the "
+            "graph is the product and publication is a side effect"
+        ),
+    )
+    cmd.add_argument("--repo-name", default=None,
+                     help="name to publish under (default: the directory name)")
+    cmd.add_argument("--token", default=None,
+                     help=f"token to publish with (default: ${'LINEAGELENS_TOKEN'} "
+                          "or the stored login)")
+    cmd.add_argument("--env", default=None,
+                     choices=["prod", "stage", "dev", "local"],
+                     help="publish to a non-active environment without switching it")
+    cmd.add_argument(
+        "--dry-run", action="store_true",
+        help=(
+            "print the exact payload that would be uploaded and send nothing. "
+            "For an open-source tool this is the difference between auditable "
+            "and merely documented"
+        ),
+    )
     cmd.add_argument("--force", action="store_true",
                      help="rebuild even if the index looks current")
     cmd.add_argument("--json", action="store_true", help="emit the report as JSON")
@@ -130,11 +161,15 @@ def _run_index(args: Any) -> int:
         require_level=_parse_level_floors(getattr(args, "require_level", "") or ""),
     )
     store, report = indexer.run()
+    # Under --dry-run stdout belongs to the payload, so it can be piped into
+    # jq or diffed. The build report still gets printed -- to stderr, where it
+    # does not corrupt the thing being audited.
+    stream = sys.stderr if getattr(args, "dry_run", False) else sys.stdout
     try:
         if args.json:
-            print(json.dumps(report.as_dict(), indent=2))
+            print(json.dumps(report.as_dict(), indent=2), file=stream)
         else:
-            _print_index_report(report, store)
+            _print_index_report(report, store, stream=stream)
     finally:
         store.close()
 
@@ -151,6 +186,9 @@ def _run_index(args: Any) -> int:
             "with ambiguity reported instead.",
         )
         return 1
+
+    upload_failed = _maybe_upload(args, report)
+
     if report.level_refused:
         # The caller set a capability floor and these languages are under it,
         # so their files were skipped rather than indexed at a level that
@@ -164,7 +202,74 @@ def _run_index(args: Any) -> int:
             file=sys.stderr,
         )
         return 1
+
+    if upload_failed:
+        # The graph is the product; publication is a side effect. An offline
+        # laptop, an expired token or a server outage must not break someone's
+        # build, so this is a diagnostic and the exit code still reflects the
+        # index -- unless the caller explicitly asked otherwise.
+        print(f"\nupload failed: {upload_failed}", file=sys.stderr)
+        if getattr(args, "upload_required", False):
+            return 1
+        print("  the index succeeded; exiting 0. Use --upload-required to "
+              "make this fatal.", file=sys.stderr)
     return 0
+
+
+def _maybe_upload(args: Any, report: Any) -> str:
+    """Publish if asked. Returns a diagnostic, or "" on success or no-op.
+
+    Runs after the index has been reported, so a user sees their graph before
+    anything touches the network. Reopens the store rather than holding the
+    indexer's handle: publication reads what was *persisted*, which is the
+    thing being published.
+    """
+    if not (getattr(args, "upload", False) or getattr(args, "dry_run", False)):
+        return ""
+
+    from . import upload as upload_mod
+
+    project = Path(args.path)
+    repo_name = args.repo_name or project.resolve().name
+    db_path = project / ".lineagelens" / DB_FILENAME
+
+    if args.dry_run:
+        # Auditable: the exact bytes, not a description of them.
+        with GraphStore.open(db_path) as store:
+            payload = upload_mod.build_payload(
+                store, repo_name=repo_name, report=report
+            )
+            upload_mod.assert_no_source(payload)
+        body, compressed = upload_mod.serialise(payload)
+        print(json.dumps(payload, indent=2, default=str))
+        print(
+            f"\n--dry-run: nothing sent. {len(body):,} bytes"
+            f"{' (gzipped)' if compressed else ''}, "
+            f"{len(payload['graph_data']['nodes']):,} nodes, "
+            f"{len(payload['graph_data']['edges']):,} edges.",
+            file=sys.stderr,
+        )
+        return ""
+
+    try:
+        credential = upload_mod.resolve_credential(env=args.env, token=args.token)
+        with GraphStore.open(db_path) as store:
+            result = upload_mod.upload(
+                store, repo_name=repo_name, credential=credential, report=report
+            )
+    except upload_mod.UploadError as exc:
+        return str(exc)
+
+    verb = "unchanged" if result.unchanged else "uploaded"
+    print(
+        f"  {verb}  {result.nodes:,} nodes, {result.edges:,} edges"
+        f"  ->  {result.destination}"
+    )
+    print(
+        f"            repo={result.repo_name}  digest={result.digest[:8]}"
+        f"  auth={credential.source}"
+    )
+    return ""
 
 
 def _tier_b_set(raw: str) -> frozenset[str]:
@@ -177,57 +282,62 @@ def _tier_b_set(raw: str) -> frozenset[str]:
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
-def _print_index_report(report: Any, store: GraphStore) -> None:
+def _print_index_report(report: Any, store: GraphStore, *, stream: Any = None) -> None:
+    stream = stream or sys.stdout
+
+    def emit(text: str = "") -> None:
+        print(text, file=stream)
+
     data = report.as_dict()
     files = data["files"]
     graph = data["graph"]
 
-    print(f"indexed {data['project_root']}")
-    print(
+    emit(f"indexed {data['project_root']}")
+    emit(
         f"  files     {files['parsed']:,} parsed"
         + (f", {files['skipped']:,} skipped" if files["skipped"] else "")
         + (f", {files['failed']:,} failed" if files["failed"] else "")
     )
     langs = ", ".join(f"{k} {v:,}" for k, v in data["languages"].items())
-    print(f"  languages {langs or 'none'}")
-    print(f"  services  {data['services']:,}")
-    print(f"  graph     {graph['nodes']:,} nodes, {graph['edges']:,} edges")
-    print(
+    emit(f"  languages {langs or 'none'}")
+    emit(f"  services  {data['services']:,}")
+    emit(f"  graph     {graph['nodes']:,} nodes, {graph['edges']:,} edges")
+    emit(
         f"  contracts {data['contracts']:,}"
         f"   unresolved {graph['unresolved_refs']:,}"
         f"   boundaries {graph['boundaries']:,}"
     )
-    print(f"  digest    {data['build_digest'][:16]}  ({data['duration_seconds']}s)")
+    emit(f"  digest    {data['build_digest'][:16]}  ({data['duration_seconds']}s)")
 
     if data.get("levels"):
         # Breadth and depth are independent axes, so the level is printed
         # beside the tier rather than folded into it (#56).
-        print("  levels    " + "  ".join(
+        emit("  levels    " + "  ".join(
             f"{lang} {level}" for lang, level in data["levels"].items()
         ) + "  (L0 inventory, L1 +calls, L2 +data flow)")
 
     if data.get("tier_a_only"):
-        print(
+        emit(
             f"  tier A only: {', '.join(data['tier_a_only'])}"
             f"  (no type resolver; more refs ambiguous, none guessed)"
         )
 
     if data["skipped_reasons"]:
-        print("  skipped:")
+        emit("  skipped:")
         for reason, count in data["skipped_reasons"].items():
-            print(f"    {reason:20s} {count:,}")
+            emit(f"    {reason:20s} {count:,}")
 
     # A framework nobody wrote an adapter for is a coverage gap, so it is
     # surfaced as a work list rather than left silent (§8.2).
     unclaimed = data.get("unclaimed_frameworks") or []
     if unclaimed:
-        print("\n  frameworks present but unmodelled (no contract adapter):")
+        emit("\n  frameworks present but unmodelled (no contract adapter):")
         for entry in unclaimed[:5]:
-            print(
+            emit(
                 f"    {entry['name']:24s} {entry['uses']:>4} uses"
                 f"   e.g. {entry['example']}  {entry.get('sample_key', '')}"
             )
-        print("    add an adapter under .lineagelens/adapters/ to link these")
+        emit("    add an adapter under .lineagelens/adapters/ to link these")
 
 
 # ---------------------------------------------------------------------------
