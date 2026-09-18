@@ -41,6 +41,10 @@ EXPECTED_TOOLS = {
     "map_stacktrace",
     "coverage_report",
     "get_ontology",
+    # Restored on schema 4 (#60). Keeps the exact name and signature
+    # docs/claude-mcp-setup.md:142 already documents, so a client written
+    # against the old docs still works.
+    "list_resiliency_risks",
 }
 
 

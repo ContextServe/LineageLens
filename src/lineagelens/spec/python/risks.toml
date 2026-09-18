@@ -1,0 +1,31 @@
+# Resiliency rules for Python (#60).
+#
+# Data, not code, for the same reasons the .scm files are: a rule is reviewable
+# as a diff, it is language-specific, and a language with no risks.toml reports
+# `unsupported` rather than an empty list. An empty risk list and an unanalysed
+# language must not look identical -- that applies here more than anywhere,
+# because "no risks found" is exactly the answer a reader wants to believe.
+
+[[rule]]
+id       = "blocking_in_async"
+severity = "high"
+requires = "async_context"
+summary  = "a blocking call inside an async frame stalls the event loop"
+# Matched against resolved targets *and* unresolved external references. Most
+# of these are stdlib, so they are never nodes in the graph.
+targets = [
+  "time.sleep",
+  "socket.socket.connect",
+  "urllib.request.urlopen",
+  "subprocess.run",
+  "subprocess.call",
+  "subprocess.check_output",
+  "os.system",
+]
+# Correct async forms that must never be flagged. A detector that flags correct
+# code is worse than none, because it trains people to ignore it.
+allowed = [
+  "asyncio.sleep",
+  "anyio.sleep",
+  "trio.sleep",
+]

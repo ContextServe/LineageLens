@@ -1,0 +1,25 @@
+# Resiliency rules for JavaScript (#60).
+#
+# Deliberately a separate file from typescript/risks.toml even though the rules
+# are currently identical: the spec directories are per language and a shared
+# file would make one language's rule change silently alter the other's
+# findings. They are free to diverge, and when they do it should be a diff in
+# one file rather than a surprise in two.
+
+[[rule]]
+id       = "blocking_in_async"
+severity = "high"
+requires = "async_context"
+summary  = "a synchronous Node API inside an async frame stalls the event loop"
+targets = [
+  "fs.readFileSync",
+  "fs.writeFileSync",
+  "fs.appendFileSync",
+  "fs.readdirSync",
+  "child_process.execSync",
+  "child_process.spawnSync",
+]
+allowed = [
+  "fs.promises.readFile",
+  "fs.promises.writeFile",
+]
