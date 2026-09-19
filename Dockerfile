@@ -21,7 +21,7 @@ COPY src/ ./src/
 
 # Tier A extraction needs no external toolchain.
 # Install lineagelens and scip-python.
-RUN pip install --no-cache-dir ".[mcp]" scip-python
+RUN pip install --no-cache-dir ".[mcp]"
 
 RUN useradd -m -u 1000 lineagelens
 # We do not switch to the user yet, as subsequent targets need root to install packages.
@@ -52,10 +52,9 @@ USER lineagelens
 # JAVA TARGET
 # ==========================================
 FROM base AS java
-RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jdk \
- && curl -fL https://github.com/coursier/coursier/releases/latest/download/cs-x86_64-pc-linux.gz | gzip -d > /usr/local/bin/cs \
- && chmod +x /usr/local/bin/cs \
- && /usr/local/bin/cs install scip-java --install-dir /usr/local/bin \
+RUN apt-get update && apt-get install -y --no-install-recommends default-jdk \
+ && curl -L https://github.com/scip-code/scip-java/releases/download/v0.13.1/scip-java-v0.13.1 -o /usr/local/bin/scip-java \
+ && chmod +x /usr/local/bin/scip-java \
  && rm -rf /var/lib/apt/lists/*
 USER lineagelens
 
@@ -64,9 +63,10 @@ USER lineagelens
 # GO TARGET
 # ==========================================
 FROM base AS go
-RUN curl -L https://go.dev/dl/go1.21.1.linux-amd64.tar.gz | tar -C /usr/local -xz
+RUN GO_ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) \
+ && curl -L "https://go.dev/dl/go1.21.1.linux-${GO_ARCH}.tar.gz" | tar -C /usr/local -xz
 ENV PATH="/usr/local/go/bin:${PATH}"
-RUN go install github.com/sourcegraph/scip-go/cmd/scip-go@latest \
+RUN go install github.com/scip-code/scip-go/cmd/scip-go@latest \
  && mv /root/go/bin/scip-go /usr/local/bin/ \
  && rm -rf /root/go
 USER lineagelens
@@ -109,30 +109,33 @@ USER lineagelens
 # MONOLITH TARGET (LATEST)
 # ==========================================
 FROM base AS monolith
-# Install Node
+# Run NodeSource setup which adds the node repository
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
- && apt-get install -y --no-install-recommends nodejs \
+# Consolidate ALL system package installations into a single apt-get transaction
+ && apt-get update && apt-get install -y --no-install-recommends \
+    nodejs \
+    default-jdk \
+    ruby-full build-essential \
+    clang llvm \
+# Install TypeScript SCIP
  && npm install -g @sourcegraph/scip-typescript \
-# Install Java
- && apt-get update && apt-get install -y --no-install-recommends openjdk-17-jdk \
- && curl -fL https://github.com/coursier/coursier/releases/latest/download/cs-x86_64-pc-linux.gz | gzip -d > /usr/local/bin/cs \
- && chmod +x /usr/local/bin/cs \
- && /usr/local/bin/cs install scip-java --install-dir /usr/local/bin \
-# Install Go
- && curl -L https://go.dev/dl/go1.21.1.linux-amd64.tar.gz | tar -C /usr/local -xz \
- && /usr/local/go/bin/go install github.com/sourcegraph/scip-go/cmd/scip-go@latest \
+# Install Java SCIP (JVM wrapper script to avoid GraalVM AVX crashes on Apple Silicon)
+ && curl -L https://github.com/scip-code/scip-java/releases/download/v0.13.1/scip-java-v0.13.1 -o /usr/local/bin/scip-java \
+ && chmod +x /usr/local/bin/scip-java \
+# Install Go & SCIP
+ && GO_ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) \
+ && curl -L "https://go.dev/dl/go1.21.1.linux-${GO_ARCH}.tar.gz" | tar -C /usr/local -xz \
+ && /usr/local/go/bin/go install github.com/scip-code/scip-go/cmd/scip-go@latest \
  && mv /root/go/bin/scip-go /usr/local/bin/ \
  && rm -rf /root/go \
-# Install Ruby
- && apt-get install -y --no-install-recommends ruby-full build-essential \
+# Install Ruby SCIP
  && gem install scip-ruby \
-# Install Rust
+# Install Rust & Analyzer
  && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
  && /root/.cargo/bin/rustup component add rust-analyzer \
  && cp /root/.cargo/bin/rust-analyzer /usr/local/bin/ \
  && rm -rf /root/.cargo/registry \
-# Install C/C++
- && apt-get install -y --no-install-recommends clang llvm \
+# Install Clang SCIP
  && curl -L https://github.com/sourcegraph/scip-clang/releases/latest/download/scip-clang-x86_64-linux -o /usr/local/bin/scip-clang \
  && chmod +x /usr/local/bin/scip-clang \
 # Cleanup
