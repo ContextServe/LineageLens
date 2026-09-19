@@ -58,6 +58,31 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    auth_cmds = {"auth", "help", "version"}
+    is_auth_cmd = hasattr(args, "auth_command") or getattr(args, "command", "") in auth_cmds
+    
+    # Require authentication for core commands
+    if not is_auth_cmd:
+        from .credentials import CredentialsStore
+        store = CredentialsStore()
+        active_env = store.active_env
+        creds = store.get(active_env)
+        
+        # If no credentials or expired (handled by get()), force login
+        if not creds:
+            print(f"  \u2717 You are not logged in to {active_env}.")
+            print("  Automatically starting login flow...\n")
+            from .cli import _run_auth
+            # Mock args for login
+            class LoginArgs:
+                auth_command = "login"
+                env = active_env
+                no_browser = False
+                timeout = 300
+                reauth = False
+            _run_auth(LoginArgs())
+            print() # Blank line after login
+
     return int(args.handler(args) or 0)
 
 
@@ -495,8 +520,8 @@ def _add_auth(commands: Any) -> None:
     auth_sub = auth_cmd.add_subparsers(dest="auth_command", required=True)
 
     login_p = auth_sub.add_parser("login", help="Log in via browser + one-time code")
-    login_p.add_argument("--env", "-e", default="prod", choices=_envs,
-                         help="Target environment (default: prod → contextserve.ai)")
+    login_p.add_argument("--env", "-e", default=None, choices=_envs,
+                         help="Target environment (defaults to active environment)")
     login_p.add_argument("--no-browser", action="store_true",
                          help="Print URL instead of opening browser (useful over SSH)")
     login_p.add_argument("--reauth", action="store_true",
@@ -505,14 +530,14 @@ def _add_auth(commands: Any) -> None:
                          help="Seconds to wait for browser login (default: 300)")
 
     logout_p = auth_sub.add_parser("logout", help="Revoke and remove stored credentials")
-    logout_p.add_argument("--env", "-e", default="prod", choices=_envs)
+    logout_p.add_argument("--env", "-e", default=None, choices=_envs)
     logout_p.add_argument("--all", action="store_true",
                           help="Log out of all environments")
 
     auth_sub.add_parser("status", help="Show authentication status for all environments")
 
     token_p = auth_sub.add_parser("token", help="Print raw bearer token to stdout")
-    token_p.add_argument("--env", "-e", default="prod", choices=_envs)
+    token_p.add_argument("--env", "-e", default=None, choices=_envs)
 
     switch_p = auth_sub.add_parser("switch-env", help="Change active environment")
     switch_p.add_argument("env", choices=_envs)
@@ -536,7 +561,7 @@ def _run_auth(args: Any) -> int:
 
     # ── login ─────────────────────────────────────────────────────────────────
     if sub == "login":
-        env = args.env
+        env = args.env or store.active_env
 
         if not args.reauth and store.is_token_valid(env):
             creds = store.get(env)
@@ -577,8 +602,9 @@ def _run_auth(args: Any) -> int:
                     if me.is_success:
                         email = me.json().get("email", "")
                         store.save(env, token_resp, base_url, email=email)
-            except Exception:
-                pass
+            except Exception as e:
+                import sys
+                print(f"  \u26a0\ufe0f Could not fetch user profile: {e}", file=sys.stderr)
 
         print()
         print(f"  \u2713 Logged in as {email or '(unknown)'}")
@@ -599,7 +625,7 @@ def _run_auth(args: Any) -> int:
             store.remove_all()
             print("  \u2713 Logged out of all environments.")
         else:
-            env = args.env
+            env = args.env or store.active_env
             removed = store.remove(env)
             if removed:
                 print(f"  \u2713 Logged out of '{env}'.")
@@ -638,7 +664,7 @@ def _run_auth(args: Any) -> int:
 
     # ── token ─────────────────────────────────────────────────────────────────
     elif sub == "token":
-        env = args.env
+        env = args.env or store.active_env
         creds = store.get(env)
         if not creds or not creds.get("access_token"):
             raise SystemExit(
