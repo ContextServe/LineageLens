@@ -23,18 +23,21 @@ COPY src/ ./src/
 # Install lineagelens and scip-python.
 RUN pip install --no-cache-dir ".[mcp]"
 
-RUN useradd -m -u 1000 lineagelens
+RUN useradd -m -u 1000 lineagelens \
+ && mkdir -p /workspace \
+ && chown -R lineagelens:lineagelens /workspace
+
 # We do not switch to the user yet, as subsequent targets need root to install packages.
 
-# Mount a repository at /work and index it.
-VOLUME ["/work"]
-WORKDIR /work
+# Mount a repository at /workspace and index it.
+VOLUME ["/workspace"]
+WORKDIR /workspace
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD lineagelens ontology --json > /dev/null || exit 1
 
-ENV LINEAGELENS_PROJECT=/work
-CMD ["lineagelens", "mcp", "/work"]
+ENV LINEAGELENS_PROJECT=/workspace
+CMD ["lineagelens", "mcp", "/workspace"]
 
 
 # ==========================================
