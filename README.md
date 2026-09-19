@@ -224,6 +224,30 @@ index at Tier A and the coverage envelope says so on every query. Use
   writing an adapter, the invariants and where they are enforced
 - Design rationale and measured baselines: issue #51
 
+
+
+
+## Dockerfile build
+
+Refactored the root Dockerfile to use the Multi-Stage Build Target architecture. 
+This allowed us to define a shared base layer and then branch off into 8 
+isolated environments (node, java, go, ruby, rust, clang, and the monolith)
+within a single, highly maintainable file.
+
+To build the Node variant, for example, your CI pipeline just runs:
+
+```bash
+docker build --target node -t registry.contextserve.ai/lineagelens/cli:node .
+```
+
+To build the massive all-in-one image:
+
+```bash
+docker build --target monolith -t registry.contextserve.ai/lineagelens/cli:latest .
+```
+All stages have been optimized to clean their APT caches to keep the image sizes as small as possible!
+
+
 ## Licence
 
 Apache-2.0
