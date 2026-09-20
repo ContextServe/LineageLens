@@ -4,40 +4,46 @@
       "calls": "n/a",
       "contracts": "n/a",
       "dataflow": "n/a",
-      "edge_kinds": {},
-      "files": 0,
+      "edge_kinds": {
+        "CONTAINS": 7
+      },
+      "files": 1,
       "implements": "n/a",
       "inherits": "n/a",
       "level": "L0",
-      "missing_nodes": [
-        "constant",
-        "function",
-        "variable"
-      ],
-      "node_kinds": {},
-      "nodes": false,
+      "missing_nodes": [],
+      "node_kinds": {
+        "constant": 2,
+        "function": 2,
+        "module": 1,
+        "variable": 3
+      },
+      "nodes": true,
       "unresolved_refs": 0
     },
     "c": {
       "calls": "n/a",
       "contracts": "n/a",
       "dataflow": "n/a",
-      "edge_kinds": {},
-      "files": 0,
+      "edge_kinds": {
+        "CONTAINS": 17
+      },
+      "files": 1,
       "implements": "n/a",
       "inherits": "n/a",
       "level": "L0",
-      "missing_nodes": [
-        "enum",
-        "enum_member",
-        "field",
-        "function",
-        "parameter",
-        "struct",
-        "type_alias"
-      ],
-      "node_kinds": {},
-      "nodes": false,
+      "missing_nodes": [],
+      "node_kinds": {
+        "enum": 1,
+        "enum_member": 2,
+        "field": 4,
+        "function": 2,
+        "module": 1,
+        "parameter": 2,
+        "struct": 2,
+        "type_alias": 1
+      },
+      "nodes": true,
       "unresolved_refs": 0
     },
     "csharp": {
@@ -190,19 +196,23 @@
       "calls": "n/a",
       "contracts": "n/a",
       "dataflow": "n/a",
-      "edge_kinds": {},
-      "files": 0,
+      "edge_kinds": {
+        "CONTAINS": 8
+      },
+      "files": 1,
       "implements": "n/a",
       "inherits": "n/a",
       "level": "L0",
-      "missing_nodes": [
-        "class",
-        "function",
-        "parameter",
-        "property"
-      ],
-      "node_kinds": {},
-      "nodes": false,
+      "missing_nodes": [],
+      "node_kinds": {
+        "class": 3,
+        "function": 1,
+        "method": 2,
+        "module": 1,
+        "parameter": 1,
+        "property": 1
+      },
+      "nodes": true,
       "unresolved_refs": 0
     },
     "python": {
@@ -244,20 +254,22 @@
       "calls": "n/a",
       "contracts": "n/a",
       "dataflow": "n/a",
-      "edge_kinds": {},
-      "files": 0,
+      "edge_kinds": {
+        "CONTAINS": 7
+      },
+      "files": 1,
       "implements": "n/a",
       "inherits": "n/a",
       "level": "L0",
-      "missing_nodes": [
-        "class",
-        "constant",
-        "field",
-        "method",
-        "module"
-      ],
-      "node_kinds": {},
-      "nodes": false,
+      "missing_nodes": [],
+      "node_kinds": {
+        "class": 1,
+        "constant": 1,
+        "field": 1,
+        "method": 3,
+        "module": 2
+      },
+      "nodes": true,
       "unresolved_refs": 0
     },
     "rust": {
