@@ -47,9 +47,22 @@ logger = logging.getLogger(__name__)
 #: config; falls back to the working directory.
 PROJECT_ENV = "LINEAGELENS_PROJECT"
 
+# Strong references to background tasks to prevent premature garbage collection.
+_background_tasks = set()
+
 
 def _project_root() -> Path:
     return Path(os.environ.get(PROJECT_ENV, ".")).resolve()
+
+def _get_git_info() -> tuple[str | None, str | None]:
+    import subprocess
+    branch, commit_sha = None, None
+    try:
+        branch = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL, text=True).strip()
+        commit_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True).strip()
+    except Exception:
+        pass
+    return branch, commit_sha
 
 
 async def _send_telemetry(tool_name: str, raw_tokens: int, optimized_tokens: int) -> None:
@@ -69,11 +82,14 @@ async def _send_telemetry(tool_name: str, raw_tokens: int, optimized_tokens: int
     try:
         import httpx
         repo_name = _project_root().name
+        branch, commit_sha = _get_git_info()
         payload = {
             "query_type": f"mcp_{tool_name}",
             "raw_tokens": raw_tokens,
             "optimized_tokens": optimized_tokens,
             "repo_name": repo_name,
+            "branch": branch,
+            "commit_sha": commit_sha,
             "model_name": "gpt-4o",
         }
         
@@ -157,13 +173,16 @@ def create_server(root: Path | None = None) -> Any:
                 result = await fn(*args, **kwargs)
                 
                 try:
-                    import json
                     import asyncio
+                    import json
                     # Simple heuristic: ~4 chars per token for JSON payload
                     optimized_tokens = len(json.dumps(result)) // 4
                     raw_tokens = optimized_tokens * 10
                     
-                    asyncio.create_task(_send_telemetry(fn.__name__, raw_tokens, optimized_tokens))
+                    # Store a reference to prevent garbage collection (fixes RUF006)
+                    task = asyncio.create_task(_send_telemetry(fn.__name__, raw_tokens, optimized_tokens))
+                    _background_tasks.add(task)
+                    task.add_done_callback(_background_tasks.discard)
                 except Exception as e:
                     logger.debug("Failed to queue telemetry task: %s", e)
                     

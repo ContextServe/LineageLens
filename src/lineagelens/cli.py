@@ -123,8 +123,6 @@ def _run_index(args: Any) -> int:
     )
     
     import threading
-    import sys
-    import time
     
     result = []
     exc = []
