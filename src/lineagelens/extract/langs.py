@@ -72,6 +72,13 @@ GRAMMARS: tuple[Grammar, ...] = (
     Grammar("go", "go", "tree_sitter_go", "language", "tree-sitter-go"),
     Grammar("rust", "rust", "tree_sitter_rust", "language", "tree-sitter-rust"),
     Grammar("csharp", "csharp", "tree_sitter_c_sharp", "language", "tree-sitter-c-sharp"),
+    # Wave 1 (#61), all at L0: nodes.scm only, no refs or dataflow. The level
+    # is derived from which specs loaded, so nothing here claims more than it
+    # delivers -- and the conformance run fails if it did.
+    Grammar("c", "c", "tree_sitter_c", "language", "tree-sitter-c"),
+    Grammar("ruby", "ruby", "tree_sitter_ruby", "language", "tree-sitter-ruby"),
+    Grammar("bash", "bash", "tree_sitter_bash", "language", "tree-sitter-bash"),
+    Grammar("kotlin", "kotlin", "tree_sitter_kotlin", "language", "tree-sitter-kotlin"),
 )
 
 #: File extension to grammar dialect. ``.tsx`` and ``.jsx`` need their own
@@ -85,6 +92,16 @@ EXTENSIONS: dict[str, str] = {
     ".cjs": "javascript",
     ".jsx": "tsx",         # tree-sitter-javascript has no JSX; the TSX grammar covers it
     ".ts": "typescript",
+    # Wave 1 (#61).
+    ".c": "c",
+    ".h": "c",           # a C header is an inventory of what a unit exposes
+    ".rb": "ruby",
+    ".rake": "ruby",
+    ".gemspec": "ruby",
+    ".sh": "bash",
+    ".bash": "bash",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
     ".mts": "typescript",
     ".cts": "typescript",
     ".tsx": "tsx",
@@ -206,6 +223,20 @@ class ParserRegistry:
 
         self._parsers[dialect] = parser
         return parser
+
+    def can_parse(self, dialect: str) -> bool:
+        """Whether ``dialect`` has a loadable grammar, without raising.
+
+        Exists because a missing grammar became a routine state when wave-1
+        grammars moved behind extras (#61): the indexer needs to decide
+        whether to skip a file, and an exception is the wrong shape for a
+        decision made once per file.
+        """
+        try:
+            self.parser_for(dialect)
+        except MissingGrammar:
+            return False
+        return True
 
     def available(self) -> dict[str, str]:
         """``{dialect: version}`` for every grammar that loads.

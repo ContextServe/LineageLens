@@ -88,6 +88,14 @@ class Envelope:
     boundary_detail: list[dict[str, Any]] = field(default_factory=list)
     #: Languages present in the touched slice and the tier that resolved them.
     tier_used: dict[str, str] = field(default_factory=dict)
+    #: Per-language capability level (#56): L0 inventory, L1 graph, L2 flow.
+    #:
+    #: The single most important consumer of the ladder. An agent calling
+    #: ``callers_of`` on a symbol in an L0 language must be told a call answer
+    #: is *unavailable* rather than *empty* -- distinguishing those two is why
+    #: this class exists, and a level is exactly that distinction at language
+    #: granularity.
+    levels: dict[str, str] = field(default_factory=dict)
     #: Languages indexed at Tier A only via an explicit override (§7.2).
     degraded: list[str] = field(default_factory=list)
     #: Files in the touched slice that were skipped or partially parsed.
@@ -127,6 +135,11 @@ class Envelope:
             and not self.degraded
             and self.files.get("partial", 0) == 0
             and self.files.get("skipped", 0) == 0
+            # A slice touching an L0 or L1 language is not complete for any
+            # question the missing level would answer. Reporting `complete`
+            # over an inventory-only language would assert exactly the thing
+            # the ladder exists to deny.
+            and all(level == "L2" for level in self.levels.values())
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -143,6 +156,8 @@ class Envelope:
             out["boundary_detail"] = self.boundary_detail
         if self.tier_used:
             out["tier_used"] = dict(sorted(self.tier_used.items()))
+        if self.levels:
+            out["levels"] = dict(sorted(self.levels.items()))
         if self.degraded:
             out["degraded"] = sorted(self.degraded)
         if self.dataflow:

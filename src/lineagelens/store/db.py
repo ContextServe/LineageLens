@@ -93,6 +93,8 @@ class GraphStore:
         *,
         project_root: str,
         commit_sha: str | None = None,
+        branch: str | None = None,
+        dirty: bool | None = None,
         overwrite: bool = True,
     ) -> GraphStore:
         """Initialise a fresh index, replacing any existing one.
@@ -114,21 +116,25 @@ class GraphStore:
         conn.executescript(SCHEMA_DDL)
         conn.execute(
             """
-            INSERT INTO graph_meta (id, schema_version, project_root, commit_sha)
-            VALUES (1, ?, ?, ?)
+            INSERT INTO graph_meta
+                   (id, schema_version, project_root, commit_sha, branch, dirty)
+            VALUES (1, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 schema_version = excluded.schema_version,
                 project_root   = excluded.project_root,
-                commit_sha     = excluded.commit_sha
+                commit_sha     = excluded.commit_sha,
+                branch         = excluded.branch,
+                dirty          = excluded.dirty
             """,
-            (SCHEMA_VERSION, project_root, commit_sha),
+            (SCHEMA_VERSION, project_root, commit_sha, branch,
+             None if dirty is None else int(dirty)),
         )
         conn.commit()
         return store
 
     @classmethod
     def open(cls, db_path: Path | str) -> GraphStore:
-        """Open an existing index, refusing anything not written at schema 4."""
+        """Open an existing index, refusing anything not written at the current schema."""
         path = Path(db_path)
         if not path.exists():
             raise GraphNotFound(
@@ -165,8 +171,8 @@ class GraphStore:
         if found != SCHEMA_VERSION:
             raise SchemaMismatch(
                 f"{self.db_path} was written at schema {found}, this build requires "
-                f"{SCHEMA_VERSION}. Schema 4 is a clean break with no upgrade path -- "
-                f"reindex with: lineagelens index --force"
+                f"{SCHEMA_VERSION}. There is no upgrade path between schema "
+                f"versions by design -- reindex with: lineagelens index --force"
             )
         self._project_root = row["project_root"]
 
@@ -440,6 +446,50 @@ class GraphStore:
 
     # ---- determinism ------------------------------------------------------
 
+    def derive_entry_point_flags(self) -> int:
+        """Set ``NodeFlags.ENTRY_POINT`` on every source of an ``EXPOSES`` edge.
+
+        ``core/kinds.py`` documents the flag as derived -- "it mirrors the
+        existence of an EXPOSES edge, and exists so the hot 'is this an entry
+        point' check does not need a join" -- and nothing derived it, so it was
+        ``0`` on every node while 13 ``EXPOSES`` edges existed (#57).
+        ``ImpactReport.entry_points`` is gated on it, so the most consequential
+        field in a blast-radius answer was unreachable.
+
+        Done as one set-based statement after edges are written, because
+        contracts are detected after nodes are persisted and the flag must not
+        be able to disagree with the edge. Not computed lazily per query: the
+        flag exists specifically to keep that join off the hot path.
+
+        Returns the number of nodes flagged, so the caller can report it.
+        """
+        cursor = self.conn.execute(
+            # `flags | 256` rather than `= 256`: other flags on the node are
+            # already set and must survive.
+            """
+            UPDATE nodes SET flags = flags | ?
+             WHERE id IN (SELECT DISTINCT src FROM edges WHERE kind = ?)
+               AND flags & ? = 0
+            """,
+            (int(NodeFlags.ENTRY_POINT), EdgeKind.EXPOSES.value,
+             int(NodeFlags.ENTRY_POINT)),
+        )
+        return cursor.rowcount or 0
+
+    def nodes_with_flag(self, flag: NodeFlags) -> list[Node]:
+        """Every node carrying ``flag``. For assertions and reporting."""
+        rows = self.conn.execute(
+            "SELECT * FROM nodes WHERE flags & ? ORDER BY id", (int(flag),)
+        )
+        return [_node_from_row(r) for r in rows]
+
+    def edges_of_kind(self, kind: EdgeKind | str) -> list[Edge]:
+        rows = self.conn.execute(
+            "SELECT * FROM edges WHERE kind = ? ORDER BY src, dst",
+            (kind.value if isinstance(kind, EdgeKind) else str(kind),),
+        )
+        return [_edge_from_row(r) for r in rows]
+
     def compute_build_digest(self) -> str:
         """Hash the stored graph, for ``--verify-determinism`` (§11).
 
@@ -485,6 +535,53 @@ class GraphStore:
 
         return h.hexdigest()
 
+    def unclaimed_frameworks(self) -> list[dict[str, Any]]:
+        """Frameworks present but unmodelled -- the §8.2 adapter work list.
+
+        Returns an empty list for absent or malformed content rather than
+        raising: a query must not fail because a summary field is unreadable,
+        and an empty list is the honest answer when we cannot say.
+        """
+        try:
+            row = self.conn.execute(
+                "SELECT unclaimed_frameworks FROM graph_meta WHERE id = 1"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return []
+        if not row or not row["unclaimed_frameworks"]:
+            return []
+        try:
+            payload = loads(row["unclaimed_frameworks"])
+        except (ValueError, TypeError):
+            logger.debug("unreadable unclaimed_frameworks in %s", self.db_path)
+            return []
+        return payload if isinstance(payload, list) else []
+
+    def record_determinism(self, ok: bool) -> None:
+        """Store the verdict of ``verify --determinism``.
+
+        A graph that has never been verified keeps ``NULL``, which is a third
+        state and must not collapse into ``0``: "not checked" and "checked and
+        failed" are different facts and only one is a defect.
+        """
+        self.conn.execute(
+            "UPDATE graph_meta SET deterministic_ok = ? WHERE id = 1", (int(ok),)
+        )
+        self.conn.commit()
+
+    def provenance(self) -> dict[str, object]:
+        """Commit identity of this index, for reporting and upload."""
+        row = self.conn.execute(
+            "SELECT commit_sha, branch, dirty FROM graph_meta WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return {"commit_sha": None, "branch": None, "dirty": None}
+        return {
+            "commit_sha": row["commit_sha"],
+            "branch": row["branch"],
+            "dirty": None if row["dirty"] is None else bool(row["dirty"]),
+        }
+
     def finalise(
         self,
         *,
@@ -492,6 +589,7 @@ class GraphStore:
         spec_digest: str = "",
         adapter_digest: str = "",
         ontology_digest: str = "",
+        unclaimed_frameworks: Sequence[dict[str, Any]] | None = None,
         built_at: str | None = None,
     ) -> str:
         """Record digests and optimise the index. Returns the build digest."""
@@ -499,15 +597,18 @@ class GraphStore:
         self.conn.execute(
             """
             UPDATE graph_meta SET
-                build_digest    = ?,
-                grammar_digest  = ?,
-                spec_digest     = ?,
-                adapter_digest  = ?,
-                ontology_digest = ?,
-                built_at        = ?
+                build_digest         = ?,
+                grammar_digest       = ?,
+                spec_digest          = ?,
+                adapter_digest       = ?,
+                ontology_digest      = ?,
+                unclaimed_frameworks = ?,
+                built_at             = ?
             WHERE id = 1
             """,
-            (digest, grammar_digest, spec_digest, adapter_digest, ontology_digest, built_at),
+            (digest, grammar_digest, spec_digest, adapter_digest, ontology_digest,
+             dumps(list(unclaimed_frameworks)) if unclaimed_frameworks else None,
+             built_at),
         )
         self.conn.execute("INSERT INTO nodes_fts (nodes_fts) VALUES ('optimize')")
         self.conn.commit()
@@ -752,6 +853,78 @@ class GraphStore:
                 "SELECT kind, count(*) AS n FROM nodes GROUP BY kind ORDER BY n DESC"
             )
         }
+
+    def graph_slice(
+        self,
+        *,
+        module: str | None = None,
+        lang: str | None = None,
+        service: str | None = None,
+        limit: int = 2000,
+    ) -> tuple[list[Node], list[Edge], int]:
+        """A bounded set of nodes with the edges wholly inside it (#55).
+
+        For visualisation, which is the one consumer that wants breadth rather
+        than an answer. Bounded because it is the only read in the codebase whose
+        natural size is the whole graph: schema 3's equivalent loaded every
+        symbol and relation into memory and then filtered in Python, which is
+        why the dashboard stopped being usable somewhere around ten thousand
+        nodes.
+
+        Returns the kept nodes, the *induced* edge set, and the total node count
+        before the limit -- so a caller can say it truncated rather than
+        presenting a partial graph as complete. Edges are induced on purpose:
+        an edge with one endpoint outside the slice would render as a dangling
+        arrow in Cytoscape, which requires both endpoints to exist.
+        """
+        where: list[str] = []
+        params: list[Any] = []
+        if module:
+            # Prefix match, against both names a caller might mean. Schema 4
+            # qualified names use `/` and `#` as separators, not dots, so a
+            # dotted-module assumption -- schema 3's -- silently matches
+            # nothing. Accepting a file-path prefix as well means the obvious
+            # thing works from either vocabulary.
+            escaped = module.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where.append(
+                "(n.qualified_name LIKE ? ESCAPE '\\' "
+                " OR n.file_path LIKE ? ESCAPE '\\')"
+            )
+            params += [escaped + "%", escaped + "%"]
+        if lang:
+            where.append("n.lang = ?")
+            params.append(lang)
+        if service:
+            where.append("n.service_id = ?")
+            params.append(service)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+
+        total = int(
+            self.conn.execute(
+                f"SELECT count(*) FROM nodes n{clause}", params  # noqa: S608
+            ).fetchone()[0]
+        )
+        rows = self.conn.execute(
+            # Widest spans first: containers and large types survive truncation,
+            # so a truncated view is still a map rather than an arbitrary sample.
+            f"SELECT n.* FROM nodes n{clause} "  # noqa: S608
+            "ORDER BY (n.end_byte - n.start_byte) DESC, n.id ASC LIMIT ?",
+            [*params, limit],
+        ).fetchall()
+        nodes = [_node_from_row(r) for r in rows]
+        if not nodes:
+            return [], [], total
+
+        ids = {n.id for n in nodes}
+        placeholders = ",".join("?" * len(ids))
+        ordered = sorted(ids)
+        edge_rows = self.conn.execute(
+            f"SELECT * FROM edges WHERE src IN ({placeholders}) "  # noqa: S608
+            f"AND dst IN ({placeholders})",
+            [*ordered, *ordered],
+        ).fetchall()
+        edges = [_edge_from_row(r) for r in edge_rows]
+        return nodes, edges, total
 
     def dangling_edge_count(self) -> int:
         """Edges whose endpoints are not both real nodes.

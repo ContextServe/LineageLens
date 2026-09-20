@@ -66,6 +66,39 @@ SPEC_ROOT = Path(__file__).resolve().parent.parent / "spec"
 #: nothing (§12).
 QUERY_FILES = ("nodes", "refs", "dataflow")
 
+#: Resiliency rule pack, loaded alongside the queries (#60). Optional: a
+#: language without one reports ``risks: unsupported`` rather than an empty
+#: list, because "no risks found" is the answer a reader most wants to believe
+#: and must not be produced by an absence of analysis.
+RISKS_FILE = "risks.toml"
+
+#: The capability ladder (#56). A level is *derived* from which spec files
+#: loaded, never declared in a manifest: #51 §11 requires capability to be
+#: measured rather than asserted, and a declared level would drift the moment
+#: someone added a grammar without a spec -- which is the exact failure the
+#: ladder exists to make visible.
+#:
+#: Ordered floor-first. ``nodes.scm`` is mandatory, so L0 is the floor and
+#: there is no level below it.
+LEVELS = ("L0", "L1", "L2")
+
+#: What each level adds, for the one place a human reads it.
+LEVEL_MEANING = {
+    "L0": "inventory: symbols, search, module/class/function map",
+    "L1": "graph: CALLS/IMPORTS, callers_of, callees_of, impact_of",
+    "L2": "flow: READS/WRITES/PARAM_BINDS/RETURNS, dataflow_of, contracts",
+}
+
+#: Edge kinds whose presence in a corpus run corroborates a claimed level.
+#: A language claiming L1 whose corpus produced no CALLS or IMPORTS edge is not
+#: an L1 language -- it has a `refs.scm` that does not match its grammar, which
+#: is worse than having none, because the level would advertise a capability
+#: the queries do not deliver.
+LEVEL_EVIDENCE = {
+    "L1": ("CALLS", "IMPORTS"),
+    "L2": ("READS", "WRITES", "PARAM_BINDS", "RETURNS"),
+}
+
 #: Optional per-dialect overlay, appended to the shared query when compiling for
 #: that dialect: ``refs.tsx.scm`` extends ``refs.scm`` for the ``tsx`` grammar
 #: only.
@@ -81,6 +114,26 @@ OVERLAY_TEMPLATE = "{name}.{dialect}.scm"
 
 class SpecError(RuntimeError):
     """A spec is missing, malformed, or violates the capture convention."""
+
+
+def _dumps_stable(value: Any) -> str:
+    """Canonical JSON, so a digest does not depend on key order."""
+    import json
+
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _strip_comments(source: str) -> str:
+    """Query text with tree-sitter ``;`` comments removed.
+
+    Used only to decide whether a spec file is substantive. A file containing
+    nothing but a header comment is a placeholder, and treating it as a
+    capability is how a measured level silently becomes a declared one.
+    """
+    return "\n".join(
+        line.strip() for line in source.splitlines()
+        if line.strip() and not line.strip().startswith(";")
+    )
 
 
 @dataclass(slots=True)
@@ -106,6 +159,37 @@ class LanguageSpec:
     #: method -- so the engine promotes the kind rather than each spec needing a
     #: second pattern that would collide with the first (see engine._merge_by_span).
     constructor_names: tuple[str, ...] = ()
+    #: Resiliency rules from ``risks.toml``, or ``None`` when the language has
+    #: none (#60). ``None`` rather than an empty list on purpose: a language
+    #: with no rule pack reports ``unsupported``, and an empty risk list must
+    #: not look the same as an unanalysed one.
+    risks: tuple[dict[str, Any], ...] | None = None
+    #: Constructs that mark an async frame in a language with no async keyword.
+    async_markers: tuple[str, ...] = ()
+
+    @property
+    def level(self) -> str:
+        """Capability level, derived from which spec files actually loaded.
+
+        Not read from ``lang.toml``. See :data:`LEVELS` for why.
+        """
+        if self._has("dataflow"):
+            return "L2"
+        if self._has("refs"):
+            return "L1"
+        # `nodes.scm` is mandatory (`_load_one` raises without it), so a spec
+        # that exists at all is at least L0.
+        return "L0"
+
+    def _has(self, name: str) -> bool:
+        """Whether a query file loaded *and* carries content.
+
+        An empty or comment-only file is not a capability. Checking presence of
+        the key alone would let a placeholder `refs.scm` promote a language to
+        L1 while extracting nothing -- a declared level wearing a measured
+        level's clothes.
+        """
+        return bool(_strip_comments(self.sources.get(name, "")).strip())
 
     @property
     def has_dataflow(self) -> bool:
@@ -115,7 +199,7 @@ class LanguageSpec:
         language without them reports the gap rather than answering data-flow
         queries with a confident empty result.
         """
-        return bool(self.sources.get("dataflow", "").strip())
+        return self._has("dataflow")
 
     def query_source(self, name: str, dialect: str | None = None) -> str:
         """Query text for ``name``, with ``dialect``'s overlay appended if any."""
@@ -136,6 +220,14 @@ class LanguageSpec:
         """
         h = hashlib.blake2b(digest_size=16)
         h.update(self.lang.encode())
+        # Rules participate: changing a rule changes findings, so it must
+        # invalidate the index the same way editing a query does (#60 step 1).
+        if self.risks is not None:
+            h.update(b"\x00risks\x00")
+            h.update(_dumps_stable(self.risks).encode())
+        if self.async_markers:
+            h.update(b"\x00async\x00")
+            h.update(",".join(sorted(self.async_markers)).encode())
         for name in QUERY_FILES:
             h.update(b"\x00")
             h.update(name.encode())
@@ -185,6 +277,24 @@ class SpecRegistry:
         lang = manifest.get("lang", path.name)
         dialects = tuple(manifest.get("dialects", [lang]))
 
+        # Rules live beside the extraction specs because a rule is
+        # language-specific and reviewable as a diff, same as a query.
+        risks: tuple[dict[str, Any], ...] | None = None
+        async_markers: tuple[str, ...] = ()
+        risks_path = path / RISKS_FILE
+        if risks_path.is_file():
+            try:
+                pack = tomllib.loads(risks_path.read_text("utf-8"))
+            except (OSError, tomllib.TOMLDecodeError) as exc:
+                raise SpecError(f"{risks_path}: {exc}") from exc
+            risks = tuple(pack.get("rule", ()))
+            async_markers = tuple(pack.get("async_markers", ()))
+            if not risks:
+                raise SpecError(
+                    f"{risks_path}: contains no [[rule]]. An empty rule pack "
+                    f"would report 'analysed, no risks' over nothing analysed."
+                )
+
         sources: dict[str, str] = {}
         overlays: dict[tuple[str, str], str] = {}
         for name in QUERY_FILES:
@@ -208,6 +318,8 @@ class SpecRegistry:
             implicit_receivers=tuple(manifest.get("implicit_receivers", [])),
             doc_prefixes=tuple(manifest.get("doc_prefixes", [])),
             constructor_names=tuple(manifest.get("constructor_names", [])),
+            risks=risks,
+            async_markers=async_markers,
         )
 
     def spec_for(self, lang: str) -> LanguageSpec:
@@ -226,6 +338,24 @@ class SpecRegistry:
     def languages(self) -> tuple[str, ...]:
         self._load()
         return tuple(sorted(self._specs))
+
+    def risk_rules(self, lang: str) -> tuple[dict[str, Any], ...] | None:
+        """Rule pack for ``lang``, or ``None`` when it has none."""
+        self._load()
+        spec = self._specs.get(lang)
+        return spec.risks if spec else None
+
+    def languages_with_risks(self) -> tuple[str, ...]:
+        self._load()
+        return tuple(
+            lang for lang, spec in sorted(self._specs.items())
+            if spec.risks
+        )
+
+    def levels(self) -> dict[str, str]:
+        """``{lang: level}`` for every loaded spec."""
+        self._load()
+        return {lang: spec.level for lang, spec in sorted(self._specs.items())}
 
     def digest(self) -> str:
         """Combined digest across all specs, for ``graph_meta.spec_digest``."""

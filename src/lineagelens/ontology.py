@@ -22,6 +22,7 @@ here", and only a per-install probe can say.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,37 @@ def node_kinds() -> list[str]:
     return sorted(k.value for k in NodeKind)
 
 
+def ontology_digest() -> str:
+    """Hash of the taxonomy an index was built against (#66).
+
+    ``graph_meta.ontology_digest`` existed and was written empty, which is worse
+    than its being absent: ``verify`` reads the column, compares empty to empty
+    and passes, so a change to the node or edge taxonomy left every existing
+    index looking current. ``grammar_digest``, ``spec_digest`` and
+    ``adapter_digest`` all worked; this was the one gap in the mechanism §11
+    relies on to refuse a stale index rather than silently trust it.
+
+    Hashes the sorted enum member sets and the schema version -- the things a
+    stored graph is actually interpreted against -- and nothing incidental. A
+    file mtime or a module path would change without the taxonomy changing,
+    which would invalidate indexes for no reason and train people to pass
+    ``--force``.
+    """
+    from .extract.spec import SpecRegistry
+
+    h = hashlib.blake2b(digest_size=16)
+    h.update(f"schema={SCHEMA_VERSION}\n".encode())
+    for label, kinds in (("nodes", node_kinds()), ("edges", relation_kinds())):
+        h.update(f"{label}:{','.join(kinds)}\n".encode())
+    # Capability levels participate: promoting a language from L1 to L2 changes
+    # what the graph contains, so an index built before the promotion is stale
+    # and must be refused rather than silently trusted (#56 criterion 5).
+    levels = SpecRegistry().levels()
+    h.update(("levels:" + ",".join(f"{k}={v}" for k, v in sorted(levels.items()))
+              + "\n").encode())
+    return h.hexdigest()
+
+
 def measured_matrix() -> dict[str, dict[str, Any]]:
     """Per-language conformance results, or ``{}`` if never generated.
 
@@ -80,7 +112,7 @@ def measured_matrix() -> dict[str, dict[str, Any]]:
 def installed_tiers() -> dict[str, dict[str, str]]:
     """Grammar and type-resolver availability on this machine (§7.2)."""
     from .extract.langs import ParserRegistry, grammar_version
-    from .resolve.oracles import OracleRegistry
+    from .resolve.oracles import OracleAvailability, OracleRegistry
 
     parsers = ParserRegistry()
     available = parsers.available()
@@ -96,12 +128,25 @@ def installed_tiers() -> dict[str, dict[str, str]]:
 
     for lang, tools in oracles.availability().items():
         entry = out.setdefault(lang, {"tier_a": "missing", "tier_b": "missing"})
-        best = next(
-            (f"{name} ({state})" for name, state in sorted(tools.items())
-             if state != "missing"),
-            "missing",
-        )
-        entry["tier_b"] = best
+        # A resolver that was found but cannot answer is not Tier B. Rendering
+        # it as `javac (detected)` read as a capability and was only an
+        # inventory note, which is how `--require-tier-b` came to pass for
+        # Java while every Java answer stayed Tier A (#65).
+        wired = [
+            f"{name} ({state})" for name, state in sorted(tools.items())
+            if state not in ("missing", OracleAvailability.DETECTED_UNWIRED)
+        ]
+        if wired:
+            entry["tier_b"] = wired[0]
+        else:
+            unwired = [
+                name for name, state in sorted(tools.items())
+                if state == OracleAvailability.DETECTED_UNWIRED
+            ]
+            entry["tier_b"] = (
+                f"{unwired[0]} found, unwired (Tier A)"
+                if unwired else "missing"
+            )
 
     for lang, entry in out.items():
         entry["grammar_version"] = grammar_version(lang) or "n/a"
@@ -117,12 +162,18 @@ def installed_tiers() -> dict[str, dict[str, str]]:
 
 def capability_matrix(project: Path | None = None) -> dict[str, Any]:
     """The full, measured capability report served by ``get_ontology``."""
+    from .extract.spec import LEVEL_MEANING, SpecRegistry
+
     measured = measured_matrix()
     installed = installed_tiers()
+    spec_levels = SpecRegistry().levels()
 
     languages: dict[str, Any] = {}
     for lang in sorted(set(measured) | set(installed)):
         entry: dict[str, Any] = {
+            # Derived from which spec files loaded, never declared (#56).
+            "level": spec_levels.get(lang, "unknown"),
+            "level_means": LEVEL_MEANING.get(spec_levels.get(lang, ""), ""),
             "tier_a": installed.get(lang, {}).get("tier_a", "missing"),
             "tier_b": installed.get(lang, {}).get("tier_b", "missing"),
         }

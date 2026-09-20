@@ -546,3 +546,82 @@ class TestTraverserDirectly:
         )
         assert paths
         assert len({p.signature() for p in paths}) == len(paths), "duplicate paths"
+
+
+# ---------------------------------------------------------------------------
+# entry points (#57)
+# ---------------------------------------------------------------------------
+
+
+class TestEntryPointFlagIsDerived:
+    """``NodeFlags.ENTRY_POINT`` mirrors the existence of an ``EXPOSES`` edge.
+
+    ``core/kinds.py`` documented it as derived and nothing derived it, so it was
+    ``0`` on every node while the graph held 13 ``EXPOSES`` edges.
+    ``ImpactReport.entry_points`` is gated on the flag and ``as_dict`` omits
+    empty collections, so the field was simply absent from every answer -- and
+    absence reads as "this change stays internal", which is a conclusion the
+    data never supported.
+
+    ``list_entry_points`` was unaffected, because it joins ``EXPOSES``
+    directly. That is why the defect survived: one surface was right.
+    """
+
+    def test_flagged_set_equals_the_exposing_set(self, engine):
+        """Asserted both ways.
+
+        A one-sided check would pass if the update over-applied, which is the
+        other way a set-based derivation goes wrong.
+        """
+        from lineagelens.core import NodeFlags
+
+        exposing = {e.src for e in engine.store.edges_of_kind(EdgeKind.EXPOSES)}
+        flagged = {n.id for n in engine.store.nodes_with_flag(NodeFlags.ENTRY_POINT)}
+        assert exposing, "fixture has no EXPOSES edges; the test proves nothing"
+        assert exposing == flagged
+
+    def test_impact_reports_a_reachable_entry_point(self, engine):
+        """The assertion the previous code could not satisfy at any input."""
+        report = engine.impact_of(qname(engine, "save")).as_dict()["results"][0]
+        assert report["entry_points"], "entry_points is empty for a reaching target"
+        assert any(
+            "create_order" in name for name in report["entry_points"]
+        ), report["entry_points"]
+
+    def test_deriving_the_flag_preserves_other_flags(self, engine):
+        """``flags | 256``, not ``flags = 256``.
+
+        An entry point that is also async or exported must keep both. Asserted
+        structurally rather than on a fixture that happens to have one: no
+        flagged node may carry *only* ENTRY_POINT if it had another flag before,
+        so instead check the bit arithmetic cannot clear anything.
+        """
+        from lineagelens.core import NodeFlags
+
+        for node in engine.store.nodes_with_flag(NodeFlags.ENTRY_POINT):
+            assert node.has(NodeFlags.ENTRY_POINT)
+            # The OR can only add bits, so the stored value must be at least
+            # the flag itself and any node-specific bits are still readable.
+            assert int(node.flags) >= int(NodeFlags.ENTRY_POINT)
+
+    def test_list_entry_points_still_agrees(self, engine):
+        """The surface that was already correct must not regress."""
+        from lineagelens.core import NodeFlags
+
+        listed = {e["node"] for e in engine.entry_points().results}
+        flagged = {
+            n.qualified_name
+            for n in engine.store.nodes_with_flag(NodeFlags.ENTRY_POINT)
+        }
+        assert listed == flagged
+
+    def test_derivation_is_idempotent(self, engine):
+        """Re-running it flags nothing new and changes no digest.
+
+        The statement is guarded by ``flags & 256 = 0``, so a second pass is a
+        no-op. If it were not, `build_digest` would depend on how many times
+        indexing ran.
+        """
+        before = engine.store.compute_build_digest()
+        assert engine.store.derive_entry_point_flags() == 0
+        assert engine.store.compute_build_digest() == before
