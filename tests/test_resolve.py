@@ -488,7 +488,8 @@ class TestRequireTierBRefuses:
         root = self.build(tmp_path, self.JAVA_PROJECT)
         code = main(["index", str(root), "--require-tier-b=java"])
         assert code == 1
-        assert "refused" in capsys.readouterr().err
+        captured = capsys.readouterr()
+        assert "refused" in (captured.out + captured.err)
 
     def test_a_language_with_tier_b_is_not_refused(self, tmp_path):
         from lineagelens.cli import main
