@@ -178,8 +178,10 @@ class TestDeclaredDependencies:
             "auth": "httpx",
             "mcp": "mcp",
             "watch": "watchdog",
-            "scip": "protobuf",
+            "scip": None,  # no runtime dependency, kept for backwards compat
             "rest": "fastapi",
+            "wave1": None,  # optional language grammars, discovered dynamically
+            "all": None,  # optional language grammars, discovered dynamically
             "dev": None,  # tooling, not imported by the package
         }
         extras = set(pyproject["project"]["optional-dependencies"])
