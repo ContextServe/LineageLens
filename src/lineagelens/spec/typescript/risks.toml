@@ -1,0 +1,23 @@
+# Resiliency rules for TypeScript and JavaScript (#60).
+#
+# `async function` sets NodeFlags.ASYNC, so the context is a flag lookup as in
+# Python. The blocking calls are different: Node's sync filesystem and child
+# process APIs are the event-loop stalls that matter here.
+
+[[rule]]
+id       = "blocking_in_async"
+severity = "high"
+requires = "async_context"
+summary  = "a synchronous Node API inside an async frame stalls the event loop"
+targets = [
+  "fs.readFileSync",
+  "fs.writeFileSync",
+  "fs.appendFileSync",
+  "fs.readdirSync",
+  "child_process.execSync",
+  "child_process.spawnSync",
+]
+allowed = [
+  "fs.promises.readFile",
+  "fs.promises.writeFile",
+]

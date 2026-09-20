@@ -67,7 +67,7 @@ from .types import (
 #: silently upgraded (issue #51 §17.2). Schema 3's habit of preferring a lossy
 #: store over a complete one, with only a debug-level log line to say so, is the
 #: specific failure this refusal exists to prevent.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 __all__ = [
     "CALL_CHAIN_EDGES",

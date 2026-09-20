@@ -19,7 +19,7 @@ jobs:
       # suite then reports on the wheel rather than on the code under review.
       # tests/conftest.py fails loudly if that happens anyway.
       - name: Install
-        run: pip install -e ".[dev,mcp]"
+        run: pip install -e ".[dev,mcp,wave1]"
 
       - name: Lint
         run: ruff check src tests
@@ -68,7 +68,7 @@ jobs:
           cache: pip
 
       - name: Install
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,wave1]"
 
       # The capability matrix served by `get_ontology` is a generated artifact.
       # If the code has moved on and the matrix has not, agents read a stale

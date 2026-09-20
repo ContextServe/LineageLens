@@ -142,7 +142,7 @@ contracts/   cross-framework and cross-service joins
   adapters.py                               30 frameworks as YAML
   detect.py                                 applies them; reads SPI registries
 
-store/       schema 4 — one node table, one edge table, spans on both
+store/       the schema — one node table, one edge table, spans on both
 query/       twelve primitives; intent, budget, envelope
 mcp/         thin shell over query (four lines per tool)
 conformance/ corpora + the generated capability matrix

@@ -1,0 +1,6 @@
+lang = "kotlin"
+dialects = ["kotlin"]
+doc_prefixes = ["/**", "*", "//"]
+
+implicit_receivers = []
+constructor_names = ["constructor", "<init>"]

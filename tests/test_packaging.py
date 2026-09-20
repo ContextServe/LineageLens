@@ -76,22 +76,66 @@ class TestDeclaredDependencies:
             pytest.skip("not running from a source checkout")
         return tomllib.loads(path.read_text("utf-8"))
 
-    def test_every_grammar_is_a_core_dependency(self, pyproject):
-        """Tier A is not optional, so grammars cannot sit behind an extra.
+    def test_every_grammar_is_declared_somewhere(self, pyproject):
+        """A registered grammar must be installable, core or extra.
 
-        The schema-3 build declared `tree-sitter` as an extra and *no grammar
-        package at all*, so parser loading returned None for all 12 advertised
-        languages and every non-Python file fell through to a regex scanner --
-        every time. On Apache Dubbo that produced 4,297 "classes" matched from
-        `"class " in line`.
+        The rule this protects is *not* "grammars are core dependencies" -- #61
+        moved breadth grammars behind extras, because fifty hard dependencies
+        is a large install for someone who works in one language. The rule is
+        that a grammar LineageLens claims to support must be obtainable.
+
+        The schema-3 failure was worse than an extra: it declared
+        `tree-sitter` as an extra and *no grammar package at all*, so parser
+        loading returned None for all 12 advertised languages and every
+        non-Python file fell through to a regex scanner. On Apache Dubbo that
+        produced 4,297 "classes" matched from `"class " in line`. What stops
+        that recurring is this assertion plus `can_parse`, which turns an
+        unavailable grammar into a reported skip rather than a silent
+        fallback.
         """
         from lineagelens.extract.langs import GRAMMARS
 
-        declared = " ".join(pyproject["project"]["dependencies"])
+        core = " ".join(pyproject["project"]["dependencies"])
+        extras = " ".join(
+            dep
+            for deps in pyproject["project"]["optional-dependencies"].values()
+            for dep in deps
+        )
         for grammar in GRAMMARS:
-            assert grammar.package in declared, (
-                f"{grammar.package} is registered but not a declared dependency"
+            assert grammar.package in core or grammar.package in extras, (
+                f"{grammar.package} is registered but not installable"
             )
+
+    def test_the_core_languages_stay_core_dependencies(self, pyproject):
+        """Tier A must work on a bare `pip install lineagelens`.
+
+        These seven are the languages the ontology reports at L2, and a
+        default install has to be able to parse them -- otherwise the base
+        case depends on remembering an extra.
+        """
+        core = " ".join(pyproject["project"]["dependencies"])
+        for package in (
+            "tree-sitter-python", "tree-sitter-java", "tree-sitter-javascript",
+            "tree-sitter-typescript", "tree-sitter-go", "tree-sitter-rust",
+            "tree-sitter-c-sharp",
+        ):
+            assert package in core, f"{package} must be a core dependency"
+
+    def test_an_uninstalled_grammar_is_a_reported_skip_not_a_crash(self):
+        """The cost of moving grammars behind extras, made safe.
+
+        `detect_dialect` can now return a dialect with no loadable grammar.
+        That has to be a routine, reported state -- a file that could not be
+        parsed is a fact in the coverage envelope, never a silent gap and
+        never an exception.
+        """
+        from lineagelens.extract.langs import ParserRegistry
+
+        registry = ParserRegistry()
+        # A registered-but-not-installed dialect, and an unknown one, both
+        # answer False rather than raising.
+        assert registry.can_parse("definitely-not-a-dialect") is False
+        assert registry.can_parse("python") is True
 
     def test_grammars_are_pinned_exactly(self, pyproject):
         """A `>=` floor would make `lineagelens verify` unenforceable.
@@ -106,17 +150,54 @@ class TestDeclaredDependencies:
         assert not loose, f"grammars must be pinned exactly, not floored: {loose}"
 
     def test_no_dependency_on_deleted_subsystems(self, pyproject):
-        """The GraphQL/UI stack went with the schema-3 core.
+        """The GraphQL stack went with the schema-3 core and has no successor.
 
-        Leaving it declared would install four packages nothing imports.
+        ``fastapi`` and ``uvicorn`` were on this list too, for the right reason
+        at the time: the ``web`` extra declared them while nothing imported
+        them. #55 ported ``rest.py`` onto the schema-4 engine, so they are
+        declared again -- under ``rest``, with a real importer and a test suite.
+        The rule the original assertion was protecting is the one below:
+        nothing is declared that nothing imports.
         """
         declared = " ".join(
             pyproject["project"]["dependencies"]
             + [d for deps in pyproject["project"]["optional-dependencies"].values()
                for d in deps]
         )
-        for gone in ("strawberry-graphql", "fastapi", "uvicorn"):
+        for gone in ("strawberry-graphql", "graphql-core"):
             assert gone not in declared, f"{gone} is declared but nothing imports it"
+
+    def test_every_optional_extra_has_an_importer(self, pyproject):
+        """An extra nothing imports is a dependency users install for nothing.
+
+        This is the general form of the assertion above, so the next extra
+        added without a consumer fails here instead of shipping.
+        """
+        # extra -> a module-level import that proves something needs it.
+        importers = {
+            "auth": "httpx",
+            "mcp": "mcp",
+            "watch": "watchdog",
+            "scip": None,  # no runtime dependency, kept for backwards compat
+            "rest": "fastapi",
+            "wave1": None,  # optional language grammars, discovered dynamically
+            "all": None,  # optional language grammars, discovered dynamically
+            "dev": None,  # tooling, not imported by the package
+        }
+        extras = set(pyproject["project"]["optional-dependencies"])
+        assert extras == set(importers), (
+            f"extras changed; add the importer for {extras ^ set(importers)}"
+        )
+
+        sources = "\n".join(
+            path.read_text() for path in PACKAGE_ROOT.rglob("*.py")
+        )
+        for extra, module in importers.items():
+            if module is None:
+                continue
+            assert module in sources, (
+                f"extra {extra!r} declares {module} but no module imports it"
+            )
 
     def test_console_scripts_resolve(self, pyproject):
         import importlib
