@@ -284,7 +284,6 @@ class TestDeclaredButNotAnswerable:
     @pytest.mark.parametrize(
         ("path", "issue"),
         [
-            ("/api/v1/resiliency", "#60"),
             ("/api/v1/dead-code", "#49"),
             ("/api/v1/reachability/anything", "#49"),
         ],
