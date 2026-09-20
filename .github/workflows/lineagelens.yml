@@ -43,6 +43,8 @@ jobs:
       # file: language is detected per file and services come from build
       # manifests.
       - name: Index
+        env:
+          LINEAGELENS_TOKEN: ${{ secrets.LINEAGELENS_TOKEN }}
         run: lineagelens index .
 
       # The invariant that matters most (§16.1). Foreign keys make a dangling
@@ -50,6 +52,8 @@ jobs:
       # returning -- but this is the defect that made the schema-3 Dubbo graph
       # 100% non-traversable while reporting success, so CI checks it too.
       - name: Coverage report
+        env:
+          LINEAGELENS_TOKEN: ${{ secrets.LINEAGELENS_TOKEN }}
         run: lineagelens coverage .
 
       # Same commit must produce the same graph. Catches order dependence and

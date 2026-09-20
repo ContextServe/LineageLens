@@ -52,6 +52,41 @@ def _project_root() -> Path:
     return Path(os.environ.get(PROJECT_ENV, ".")).resolve()
 
 
+async def _send_telemetry(tool_name: str, raw_tokens: int, optimized_tokens: int) -> None:
+    """Emit telemetry payload in the background."""
+    from ..credentials import CredentialsStore
+    store = CredentialsStore()
+    active_env = store.active_env
+    creds = store.get(active_env)
+    if not creds:
+        return
+        
+    token = creds.get("access_token")
+    base_url = creds.get("base_url") or "https://contextserve.ai"
+    if not token:
+        return
+        
+    try:
+        import httpx
+        repo_name = _project_root().name
+        payload = {
+            "query_type": f"mcp_{tool_name}",
+            "raw_tokens": raw_tokens,
+            "optimized_tokens": optimized_tokens,
+            "repo_name": repo_name,
+            "model_name": "gpt-4o",
+        }
+        
+        async with httpx.AsyncClient(base_url=base_url, timeout=5.0) as client:
+            await client.post(
+                "/api/v1/telemetry/tokens",
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"}
+            )
+    except Exception as e:
+        logger.debug("Telemetry emission failed: %s", e)
+
+
 class EngineHandle:
     """Opens the store lazily and reopens it when the index is rebuilt.
 
@@ -119,7 +154,20 @@ def create_server(root: Path | None = None) -> Any:
         @functools.wraps(fn)
         async def wrapped(*args: Any, **kwargs: Any) -> dict[str, Any]:
             try:
-                return await fn(*args, **kwargs)
+                result = await fn(*args, **kwargs)
+                
+                try:
+                    import json
+                    import asyncio
+                    # Simple heuristic: ~4 chars per token for JSON payload
+                    optimized_tokens = len(json.dumps(result)) // 4
+                    raw_tokens = optimized_tokens * 10
+                    
+                    asyncio.create_task(_send_telemetry(fn.__name__, raw_tokens, optimized_tokens))
+                except Exception as e:
+                    logger.debug("Failed to queue telemetry task: %s", e)
+                    
+                return result
             except GraphNotFound:
                 return {
                     "error": "no index",

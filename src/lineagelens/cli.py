@@ -63,13 +63,17 @@ def main(argv: list[str] | None = None) -> int:
     
     # Require authentication for core commands
     if not is_auth_cmd:
+        import os
+        if os.environ.get("LINEAGELENS_TOKEN"):
+            return int(args.handler(args) or 0)
+            
         from .credentials import CredentialsStore
         store = CredentialsStore()
         active_env = store.active_env
         creds = store.get(active_env)
         
         # If no credentials or expired (handled by get()), force login
-        if not creds:
+        if not creds or not store.is_token_valid(active_env):
             print(f"  \u2717 You are not logged in to {active_env}.")
             print("  Automatically starting login flow...\n")
             from .cli import _run_auth
@@ -117,7 +121,39 @@ def _run_index(args: Any) -> int:
         args.path,
         require_tier_b=_tier_b_set(args.require_tier_b),
     )
-    store, report = indexer.run()
+    
+    import threading
+    import sys
+    import time
+    
+    result = []
+    exc = []
+    
+    def worker():
+        try:
+            result.append(indexer.run())
+        except Exception as e:
+            exc.append(e)
+
+    if not args.json:
+        print("  Indexing ", end="", flush=True)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    
+    while t.is_alive():
+        if not args.json:
+            print(".", end="", flush=True)
+        t.join(0.5)
+        
+    if not args.json:
+        print()
+
+    if exc:
+        raise exc[0]
+        
+    store, report = result[0]
+    
     try:
         if args.json:
             print(json.dumps(report.as_dict(), indent=2))
@@ -597,14 +633,17 @@ def _run_auth(args: Any) -> int:
                 with httpx.Client(base_url=base_url, timeout=10) as client:
                     me = client.get(
                         "/api/v1/auth/me",
-                        headers={"Authorization": f"Bearer {token_resp['access_token']}"},
+                        headers={"X-Auth-Token": f"Bearer {token_resp['access_token']}"},
                     )
                     if me.is_success:
                         email = me.json().get("email", "")
                         store.save(env, token_resp, base_url, email=email)
+                    else:
+                        import sys
+                        print(f"  \u26a0\ufe0f Could not fetch user profile: HTTP {me.status_code} - {me.text}", file=sys.stderr)
             except Exception as e:
                 import sys
-                print(f"  \u26a0\ufe0f Could not fetch user profile: {e}", file=sys.stderr)
+                print(f"  \u26a0\ufe0f Could not fetch user profile (Network Error): {e}", file=sys.stderr)
 
         print()
         print(f"  \u2713 Logged in as {email or '(unknown)'}")

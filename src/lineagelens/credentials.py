@@ -47,7 +47,11 @@ def _creds_path() -> Path:
     Respects the ``LINEAGELENS_CREDENTIALS_FILE`` environment variable.
     """
     env_override = os.environ.get("LINEAGELENS_CREDENTIALS_FILE")
-    return Path(env_override) if env_override else _DEFAULT_CREDS_PATH
+    if env_override:
+        return Path(env_override)
+    if Path("/.dockerenv").exists():
+        return Path(".lineagelens/credentials.json").resolve()
+    return _DEFAULT_CREDS_PATH
 
 
 class CredentialsStore:
