@@ -26,7 +26,7 @@ from .core import SCHEMA_VERSION, Intent
 from .indexer import Indexer
 from .ontology import capability_matrix
 from .query import QueryEngine
-from .store import DB_FILENAME, GraphNotFound, GraphStore, SchemaMismatch
+from .store import DB_FILENAME, GraphNotFound, SchemaMismatch
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +129,9 @@ def _run_index(args: Any) -> int:
     
     def worker():
         try:
-            result.append(indexer.run())
+            store, report = indexer.run()
+            store.close()
+            result.append(report)
         except Exception as e:
             exc.append(e)
 
@@ -150,15 +152,12 @@ def _run_index(args: Any) -> int:
     if exc:
         raise exc[0]
         
-    store, report = result[0]
+    report = result[0]
     
-    try:
-        if args.json:
-            print(json.dumps(report.as_dict(), indent=2))
-        else:
-            _print_index_report(report, store)
-    finally:
-        store.close()
+    if args.json:
+        print(json.dumps(report.as_dict(), indent=2))
+    else:
+        _print_index_report(report)
     return 0
 
 
@@ -172,7 +171,7 @@ def _tier_b_set(raw: str) -> frozenset[str]:
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
-def _print_index_report(report: Any, store: GraphStore) -> None:
+def _print_index_report(report: Any) -> None:
     data = report.as_dict()
     files = data["files"]
     graph = data["graph"]
