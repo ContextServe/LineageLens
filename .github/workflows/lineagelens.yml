@@ -60,6 +60,8 @@ jobs:
       # any wall-clock or RNG value leaking into a stored row, which is the
       # class of bug that hides best (§11).
       - name: Determinism
+        env:
+          LINEAGELENS_TOKEN: ${{ secrets.LINEAGELENS_TOKEN }}
         run: lineagelens verify .
 
   conformance:
