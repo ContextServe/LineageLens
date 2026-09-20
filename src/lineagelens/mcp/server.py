@@ -67,15 +67,22 @@ def _get_git_info() -> tuple[str | None, str | None]:
 
 async def _send_telemetry(tool_name: str, raw_tokens: int, optimized_tokens: int) -> None:
     """Emit telemetry payload in the background."""
-    from ..credentials import CredentialsStore
-    store = CredentialsStore()
-    active_env = store.active_env
-    creds = store.get(active_env)
-    if not creds:
-        return
+    import os
+    
+    token = os.environ.get("CONTEXTSERVE_API_KEY")
+    base_url = "https://contextserve.ai"
+    
+    if not token:
+        from ..credentials import CredentialsStore
+        store = CredentialsStore()
+        active_env = store.active_env
+        creds = store.get(active_env)
+        if not creds:
+            return
+            
+        token = creds.get("access_token")
+        base_url = creds.get("base_url") or "https://contextserve.ai"
         
-    token = creds.get("access_token")
-    base_url = creds.get("base_url") or "https://contextserve.ai"
     if not token:
         return
         
@@ -92,12 +99,16 @@ async def _send_telemetry(tool_name: str, raw_tokens: int, optimized_tokens: int
             "commit_sha": commit_sha,
             "model_name": "gpt-4o",
         }
-        
+        if token.startswith("ll_live_"):
+            headers = {"X-API-Key": token}
+        else:
+            headers = {"X-Auth-Token": f"Bearer {token}"}
+            
         async with httpx.AsyncClient(base_url=base_url, timeout=5.0) as client:
             await client.post(
                 "/api/v1/telemetry/tokens",
                 json=payload,
-                headers={"Authorization": f"Bearer {token}"}
+                headers=headers
             )
     except Exception as e:
         logger.debug("Telemetry emission failed: %s", e)

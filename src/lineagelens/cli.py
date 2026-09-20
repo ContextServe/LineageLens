@@ -52,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_ontology(commands)
     _add_mcp(commands)
     _add_auth(commands)
+    _add_export(commands)
 
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -215,6 +216,110 @@ def _print_index_report(report: Any) -> None:
                 f"   e.g. {entry['example']}  {entry.get('sample_key', '')}"
             )
         print("    add an adapter under .lineagelens/adapters/ to link these")
+
+
+# ---------------------------------------------------------------------------
+# export
+# ---------------------------------------------------------------------------
+
+def _add_export(commands: Any) -> None:
+    cmd = commands.add_parser("export", help="export the schema-4 graph to a JSON payload")
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    cmd.add_argument("--json", action="store_true", help="emit raw JSON")
+    cmd.add_argument("--upload", action="store_true", help="upload the graph to ContextServe")
+    cmd.add_argument("--env", "-e", choices=["prod", "stage", "dev", "local"], default="prod",
+                     help="Target environment for upload (default: prod)")
+    cmd.set_defaults(handler=_run_export)
+
+def _run_export(args: Any) -> int:
+    import json
+    import os
+    import sys
+
+    from .query import QueryEngine
+    from .store import GraphNotFound, SchemaMismatch
+
+    try:
+        engine = QueryEngine.open(args.path)
+    except (GraphNotFound, SchemaMismatch) as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+
+    if not args.json and not args.upload:
+        print("Export requires --json to output the payload or --upload to send it.", file=sys.stderr)
+        return 1
+
+    store = engine.store
+    payload = {"nodes": [], "edges": [], "graph_meta": {}, "repo": {}}
+
+    for row in store.conn.execute("SELECT * FROM nodes"):
+        n = dict(row)
+        n["type_params"] = json.loads(n["type_params"]) if n["type_params"] else []
+        n["decorators"] = json.loads(n["decorators"]) if n["decorators"] else []
+        if n.get("flags") and (n["flags"] & 256):
+            n["flags"] = ["ENTRY_POINT"]
+        else:
+            n["flags"] = []
+        payload["nodes"].append(n)
+
+    for row in store.conn.execute("SELECT * FROM edges"):
+        e = dict(row)
+        e["metadata"] = json.loads(e["metadata"]) if e["metadata"] else {}
+        payload["edges"].append(e)
+
+    meta_row = store.conn.execute("SELECT * FROM graph_meta WHERE id = 1").fetchone()
+    if meta_row:
+        payload["graph_meta"] = dict(meta_row)
+        payload["repo"] = {
+            "commit_sha": meta_row["commit_sha"],
+            "branch": "",
+            "dirty": False
+        }
+
+    store.close()
+
+    if args.upload:
+        import httpx
+
+        from .auth_flow import ENVIRONMENTS
+        from .credentials import CredentialsStore
+        
+        token = os.environ.get("CONTEXTSERVE_API_KEY") or os.environ.get("LINEAGELENS_API_KEY")
+        headers = {}
+        if token:
+            headers["X-API-Key"] = token
+        else:
+            c_store = CredentialsStore()
+            creds = c_store.get(args.env)
+            if not creds:
+                print(f"Error: Not authenticated for environment '{args.env}'. Please run 'lineagelens auth login --env {args.env}' or set CONTEXTSERVE_API_KEY.", file=sys.stderr)
+                return 1
+            headers["Authorization"] = f"Bearer {creds['access_token']}"
+        
+        base_url = ENVIRONMENTS[args.env]
+        repo_name = Path(args.path).absolute().name
+        
+        req_payload = {
+            "repo_name": repo_name,
+            "graph_data": payload
+        }
+        
+        print(f"Uploading graph to {args.env} ({base_url})...", file=sys.stderr)
+        try:
+            resp = httpx.post(f"{base_url}/api/v1/graphs/upload", json=req_payload, headers=headers, timeout=60.0)
+            resp.raise_for_status()
+            print("Upload successful!", file=sys.stderr)
+            if args.json:
+                print(json.dumps(resp.json(), default=str))
+        except Exception as e:
+            print(f"Upload failed: {e}", file=sys.stderr)
+            if hasattr(e, "response") and e.response is not None:
+                print(e.response.text, file=sys.stderr)
+            return 1
+    elif args.json:
+        print(json.dumps(payload, default=str))
+
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -630,7 +735,7 @@ def _run_auth(args: Any) -> int:
                 with httpx.Client(base_url=base_url, timeout=10) as client:
                     me = client.get(
                         "/api/v1/auth/me",
-                        headers={"Authorization": f"Bearer {token_resp['access_token']}"},
+                        headers={"X-Auth-Token": f"Bearer {token_resp['access_token']}"},
                     )
                     if me.is_success:
                         email = me.json().get("email", "")
