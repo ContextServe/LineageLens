@@ -630,7 +630,7 @@ def _run_auth(args: Any) -> int:
                 with httpx.Client(base_url=base_url, timeout=10) as client:
                     me = client.get(
                         "/api/v1/auth/me",
-                        headers={"X-Auth-Token": f"Bearer {token_resp['access_token']}"},
+                        headers={"Authorization": f"Bearer {token_resp['access_token']}"},
                     )
                     if me.is_success:
                         email = me.json().get("email", "")
