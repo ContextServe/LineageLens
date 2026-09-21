@@ -12,6 +12,8 @@ traversable paths that reported success.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from lineagelens.core import (
@@ -336,3 +338,164 @@ class TestDeterminism:
         assert sorted(e.identity for e in forward.edges) == sorted(
             e.identity for e in reverse.edges
         )
+
+
+# ---------------------------------------------------------------------------
+# tier B capability versus discovery (#65)
+# ---------------------------------------------------------------------------
+
+
+class TestTierBIsGatedOnCapability:
+    """`--require-tier-b` refused nothing for a detected-but-unwired toolchain.
+
+    `ToolchainOracle.resolve` inherits the base's `None` -- deliberately, so
+    the matrix can say "javac detected, resolution not wired" rather than
+    claiming the language is unsupported. But `languages_without_tier_b` tested
+    `available() == MISSING`, which answers "did we find a toolchain". A JDK on
+    PATH therefore counted Java as having Tier B, so a user asking to be given
+    only compiler-grade answers was silently served Tier A: the run succeeded,
+    the envelope looked clean, and nothing indicated it.
+
+    It was install-dependent, which is why no test caught it. Without a JDK,
+    `javac` is `missing`, Java lands in `languages_without_tier_b`, and
+    everything behaves. Every test here therefore fakes the toolchain rather
+    than depending on the machine.
+    """
+
+    @staticmethod
+    def registry(tmp_path):
+        from lineagelens.resolve.oracles import OracleRegistry
+
+        return OracleRegistry(project_root=tmp_path)
+
+    def test_base_oracles_cannot_resolve_by_default(self):
+        """False by default, so a new oracle is correct without doing anything.
+
+        Defaulting to True would make every future oracle wrong until someone
+        remembered to exclude it -- the wrong direction for a trust switch.
+        """
+        from lineagelens.resolve.oracles import _Base
+
+        assert _Base().can_resolve() is False
+
+    def test_every_oracle_claiming_tier_b_overrides_resolve(self, tmp_path):
+        """A `can_resolve()` of True must be backed by a real implementation."""
+        from lineagelens.resolve.oracles import _Base
+
+        for oracles in self.registry(tmp_path)._by_lang.values():
+            for oracle in oracles:
+                if oracle.can_resolve():
+                    assert type(oracle).resolve is not _Base.resolve, (
+                        f"{oracle.name} claims Tier B but inherits the base resolve"
+                    )
+
+    def test_a_detected_but_unwired_toolchain_is_not_tier_b(self, tmp_path, monkeypatch):
+        """The bug, asserted independently of whether this machine has a JDK."""
+        from lineagelens.resolve.oracles import (
+            OracleAvailability,
+            ToolchainOracle,
+        )
+
+        # Pretend every toolchain was found on PATH.
+        monkeypatch.setattr(
+            ToolchainOracle, "_locate", lambda self: tmp_path / "fake-tool"
+        )
+        registry = self.registry(tmp_path)
+
+        assert registry.availability()["java"]["javac"] == (
+            OracleAvailability.DETECTED_UNWIRED
+        )
+        assert "java" in registry.languages_without_tier_b(), (
+            "a found-but-unwired toolchain is being counted as Tier B"
+        )
+
+    def test_detected_unwired_is_distinct_from_detected(self):
+        """Two states, because they mean different things to a caller."""
+        from lineagelens.resolve.oracles import OracleAvailability
+
+        assert OracleAvailability.DETECTED != OracleAvailability.DETECTED_UNWIRED
+
+    def test_python_still_has_tier_b(self, tmp_path):
+        """jedi is the one oracle that actually resolves; do not regress it."""
+        registry = self.registry(tmp_path)
+        assert "python" not in registry.languages_without_tier_b()
+        assert registry.availability()["python"]["jedi"] == "vendored"
+
+    def test_ontology_does_not_render_unwired_as_a_resolver(self, monkeypatch, tmp_path):
+        """"javac (detected)" read as a capability. It was an inventory note."""
+        from lineagelens.ontology import installed_tiers
+        from lineagelens.resolve.oracles import ToolchainOracle
+
+        monkeypatch.setattr(
+            ToolchainOracle, "_locate", lambda self: tmp_path / "fake-tool"
+        )
+        java = installed_tiers()["java"]["tier_b"]
+        assert "unwired" in java
+        assert java != "javac (detected)"
+
+
+class TestRequireTierBRefuses:
+    """The refusal has to be observable: skipped files and a non-zero exit.
+
+    Refusing to answer must not look like a successful index of nothing.
+    """
+
+    JAVA_PROJECT: ClassVar[dict[str, str]] = {
+        "pom.xml": "<project><artifactId>svc</artifactId></project>",
+        "src/main/java/Svc.java": (
+            "public class Svc {\n"
+            "    public String handle(String in) { return in; }\n"
+            "}\n"
+        ),
+    }
+
+    @staticmethod
+    def build(tmp_path, files):
+        root = tmp_path / "svc"
+        for rel, text in files.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        return root
+
+    def test_files_are_skipped_with_the_right_reason(self, tmp_path, monkeypatch):
+        from lineagelens.core import SkipReason
+        from lineagelens.indexer import Indexer
+        from lineagelens.resolve.oracles import ToolchainOracle
+
+        monkeypatch.setattr(
+            ToolchainOracle, "_locate", lambda self: tmp_path / "fake-tool"
+        )
+        root = self.build(tmp_path, self.JAVA_PROJECT)
+        store, report = Indexer(root, require_tier_b=frozenset({"java"})).run()
+
+        assert report.tier_b_refused == ["java"]
+        skipped = [
+            f for f in store.files()
+            if f.skip_reason == SkipReason.MISSING_TIER_B
+        ]
+        assert skipped, "no file was skipped despite the refusal"
+        assert all(f.lang == "java" for f in skipped)
+
+    def test_the_cli_exits_non_zero(self, tmp_path, monkeypatch, capsys):
+        """Otherwise a CI job that asked for Tier B passes on zero answers."""
+        from lineagelens.cli import main
+        from lineagelens.resolve.oracles import ToolchainOracle
+
+        monkeypatch.setattr(
+            ToolchainOracle, "_locate", lambda self: tmp_path / "fake-tool"
+        )
+        root = self.build(tmp_path, self.JAVA_PROJECT)
+        code = main(["index", str(root), "--require-tier-b=java"])
+        assert code == 1
+        captured = capsys.readouterr()
+        assert "refused" in (captured.out + captured.err)
+
+    def test_a_language_with_tier_b_is_not_refused(self, tmp_path):
+        from lineagelens.cli import main
+
+        root = self.build(tmp_path, {
+            "pyproject.toml": '[project]\nname = "p"\n',
+            "app.py": "def f(x):\n    return x\n",
+        })
+        assert main(["index", str(root), "--require-tier-b=python"]) == 0

@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS files (
     size_bytes   INTEGER NOT NULL,
     parse_status TEXT NOT NULL,     -- ok|partial|failed|skipped
     parse_errors TEXT,              -- JSON [{line,col,message}]
-    skip_reason  TEXT,              -- generated|vendored|binary|too_large|excluded
+    -- generated|vendored|binary|too_large|excluded|missing_grammar
+    -- |missing_tier_b|below_required_level
+    skip_reason  TEXT,
                                     -- |missing_grammar|missing_tier_b
     extractors   TEXT NOT NULL      -- JSON [{name,version,tier}]
 );
@@ -182,12 +184,23 @@ CREATE TABLE IF NOT EXISTS graph_meta (
     id               INTEGER PRIMARY KEY CHECK (id = 1),
     schema_version   INTEGER NOT NULL,
     project_root     TEXT NOT NULL,
-    commit_sha       TEXT,
+    -- Provenance. Deliberately outside `build_digest`: that digest asserts
+    -- "same source, same graph", so folding a commit into it would make
+    -- `verify --determinism` fail between any two commits with identical
+    -- content and destroy the guarantee it exists to provide.
+    commit_sha       TEXT,           -- NULL outside a git checkout
+    branch           TEXT,           -- NULL when detached or not a checkout
+    dirty            INTEGER,        -- 1 = built from a modified tree; NULL = unknown
     build_digest     TEXT,           -- determinism check (§11)
     grammar_digest   TEXT,           -- pinned grammar version set
     spec_digest      TEXT,           -- extraction spec files
     adapter_digest   TEXT,           -- contract adapter specs
-    ontology_digest  TEXT,           -- generated capability matrix (§12)
+    ontology_digest  TEXT,           -- node/edge taxonomy this graph is read against
+    -- The §8.2 adapter work list: frameworks present but unmodelled. Its own
+    -- column because it is a payload, not a digest. It previously lived inside
+    -- `ontology_digest` as JSON, which let two features share one field
+    -- without either of them working (#69).
+    unclaimed_frameworks TEXT,       -- JSON array
     built_at         TEXT,
     deterministic_ok INTEGER
 );

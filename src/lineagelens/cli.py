@@ -23,10 +23,11 @@ from pathlib import Path
 from typing import Any
 
 from .core import SCHEMA_VERSION, Intent
+from .extract.spec import LEVEL_MEANING
 from .indexer import Indexer
 from .ontology import capability_matrix
 from .query import QueryEngine
-from .store import DB_FILENAME, GraphNotFound, SchemaMismatch
+from .store import DB_FILENAME, GraphNotFound, GraphStore, SchemaMismatch
 
 logger = logging.getLogger(__name__)
 
@@ -51,44 +52,46 @@ def main(argv: list[str] | None = None) -> int:
     _add_verify(commands)
     _add_ontology(commands)
     _add_mcp(commands)
+    _add_serve(commands)
+    _add_telemetry(commands)
     _add_auth(commands)
-    _add_export(commands)
+    #_add_export(commands)
 
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    auth_cmds = {"auth", "help", "version"}
-    is_auth_cmd = hasattr(args, "auth_command") or getattr(args, "command", "") in auth_cmds
-    
-    # Require authentication for core commands
-    if not is_auth_cmd:
-        import os
-        if os.environ.get("LINEAGELENS_TOKEN"):
-            return int(args.handler(args) or 0)
-            
-        from .credentials import CredentialsStore
-        store = CredentialsStore()
-        active_env = store.active_env
-        creds = store.get(active_env)
-        
-        # If no credentials or expired (handled by get()), force login
-        if not creds or not store.is_token_valid(active_env):
-            print(f"  \u2717 You are not logged in to {active_env}.")
-            print("  Automatically starting login flow...\n")
-            from .cli import _run_auth
-            # Mock args for login
-            class LoginArgs:
-                auth_command = "login"
-                env = active_env
-                no_browser = False
-                timeout = 300
-                reauth = False
-            _run_auth(LoginArgs())
-            print() # Blank line after login
 
-    return int(args.handler(args) or 0)
+    from . import telemetry
+
+    with telemetry.timed() as clock:
+        code = int(args.handler(args) or 0)
+
+    # One event, after the command, never before. Buffered and flushed here
+    # rather than inside the handler so an outage cannot affect what the
+    # command returns -- `code` is already decided by this point (#59).
+    _emit_command_event(args, code, clock.ms)
+    return code
+
+
+def _emit_command_event(args: Any, code: int, duration_ms: int) -> None:
+    """Record one anonymous event, if the user opted in. Never raises."""
+    from . import telemetry
+
+    try:
+        if not telemetry.is_enabled():
+            return
+        meter = telemetry.meter()
+        meter.record(telemetry.usage_event(
+            command=args.command,
+            duration_ms=duration_ms,
+            exit_code=code,
+            report=getattr(args, "_report", None),
+        ))
+        meter.flush()
+    except Exception:  # pragma: no cover - telemetry never breaks a command
+        logging.getLogger(__name__).debug("telemetry emit failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -111,55 +114,271 @@ def _add_index(commands: Any) -> None:
             "tier is reported per language in the coverage envelope"
         ),
     )
+    cmd.add_argument(
+        "--require-level", metavar="SPEC", default="",
+        help=(
+            "SKIP files whose language is below a capability level. "
+            "`--require-level=L2` applies one floor to every language; "
+            "`--require-level=kotlin:L0,java:L2` sets per-language floors. "
+            "Levels are L0 inventory, L1 +call graph, L2 +data flow, derived "
+            "from which extraction specs loaded. Use in CI when an "
+            "inventory-only answer must be an error rather than an empty one"
+        ),
+    )
+    cmd.add_argument(
+        "--upload", action="store_true",
+        help=(
+            "publish the graph to ContextServe after indexing. Strictly "
+            "opt-in: a plain `index` makes no network calls at all"
+        ),
+    )
+    cmd.add_argument(
+        "--upload-required", action="store_true",
+        help=(
+            "exit non-zero if publication fails. Without it an upload failure "
+            "is a diagnostic and the exit code reflects the index, because the "
+            "graph is the product and publication is a side effect"
+        ),
+    )
+    cmd.add_argument("--repo-name", default=None,
+                     help="name to publish under (default: the directory name)")
+    cmd.add_argument("--token", default=None,
+                     help=f"token to publish with (default: ${'LINEAGELENS_TOKEN'} "
+                          "or the stored login)")
+    cmd.add_argument("--env", default=None,
+                     choices=["prod", "stage", "dev", "local"],
+                     help="publish to a non-active environment without switching it")
+    cmd.add_argument(
+        "--dry-run", action="store_true",
+        help=(
+            "print the exact payload that would be uploaded and send nothing. "
+            "For an open-source tool this is the difference between auditable "
+            "and merely documented"
+        ),
+    )
+    cmd.add_argument(
+        "--scip", nargs="?", const="auto", default=None, metavar="PATH",
+        help=(
+            "resolve through a SCIP index for compiler-grade accuracy. "
+            "Pass a path, or the flag alone to discover ./index.scip. "
+            "LineageLens never runs scip-java or scip-typescript itself: "
+            "subprocessing a build tool would make indexing "
+            "network-dependent and non-deterministic"
+        ),
+    )
     cmd.add_argument("--force", action="store_true",
                      help="rebuild even if the index looks current")
     cmd.add_argument("--json", action="store_true", help="emit the report as JSON")
     cmd.set_defaults(handler=_run_index)
 
 
+def _parse_level_floors(raw: str) -> dict[str, str]:
+    """``"L2"`` or ``"kotlin:L0,java:L2"`` into ``{lang: level}``.
+
+    A bare level uses the ``"*"`` key, meaning "every language". One flag
+    family, one direction: a floor is always a *minimum* to meet, never a
+    maximum to allow, so there is no reading under which passing this relaxes
+    anything.
+    """
+    from .extract.spec import LEVELS
+
+    floors: dict[str, str] = {}
+    for part in (p.strip() for p in raw.split(",") if p.strip()):
+        lang, sep, level = part.rpartition(":")
+        level = level.upper()
+        if level not in LEVELS:
+            raise SystemExit(
+                f"--require-level: {level!r} is not a level; expected one of "
+                f"{', '.join(LEVELS)}"
+            )
+        floors[lang if sep else "*"] = level
+    return floors
+
+
 def _run_index(args: Any) -> int:
+    scip_index = _resolve_scip_path(args)
     indexer = Indexer(
         args.path,
         require_tier_b=_tier_b_set(args.require_tier_b),
+        require_level=_parse_level_floors(getattr(args, "require_level", "") or ""),
+        scip_index=scip_index,
     )
-    
-    import threading
-    
-    result = []
-    exc = []
-    
-    def worker():
-        try:
-            store, report = indexer.run()
-            store.close()
-            result.append(report)
-        except Exception as e:
-            exc.append(e)
+    store, report = indexer.run()
+    # Hand the report to the telemetry hook in `main`, which owns the event so
+    # that a flush failure cannot reach this function's return value.
+    args._report = report
+    # Under --dry-run stdout belongs to the payload, so it can be piped into
+    # jq or diffed. The build report still gets printed -- to stderr, where it
+    # does not corrupt the thing being audited.
+    stream = sys.stderr if getattr(args, "dry_run", False) else sys.stdout
+    try:
+        if args.json:
+            print(json.dumps(report.as_dict(), indent=2), file=stream)
+        else:
+            _print_index_report(report, store, stream=stream)
+    finally:
+        store.close()
 
-    if not args.json:
-        print("  Indexing ", end="", flush=True)
+    if report.tier_b_refused:
+        # The caller asked not to be served Tier A answers for these languages
+        # and there is no resolver, so their files were skipped rather than
+        # indexed at lower fidelity. Exiting 0 would make refusing to answer
+        # indistinguishable from successfully indexing nothing (#65).
+        print(
+            "\nrefused: no Tier B resolver for "
+            + ", ".join(report.tier_b_refused)
+            + f"; {report.files_skipped} file(s) skipped rather than indexed at "
+            "Tier A.\ndrop --require-tier-b for those languages to index them "
+            "with ambiguity reported instead.",
+        )
+        return 1
 
-    t = threading.Thread(target=worker)
-    t.start()
-    
-    while t.is_alive():
-        if not args.json:
-            print(".", end="", flush=True)
-        t.join(0.5)
-        
-    if not args.json:
-        print()
+    upload_failed = _maybe_upload(args, report)
 
-    if exc:
-        raise exc[0]
-        
-    report = result[0]
-    
-    if args.json:
-        print(json.dumps(report.as_dict(), indent=2))
-    else:
-        _print_index_report(report)
+    if report.level_refused:
+        # The caller set a capability floor and these languages are under it,
+        # so their files were skipped rather than indexed at a level that
+        # cannot answer the questions the floor implies. Exiting 0 would make
+        # refusing to answer look like a successful index of nothing.
+        detail = ", ".join(f"{k} ({v})" for k, v in report.level_refused.items())
+        print(
+            f"\nrefused: below --require-level -- {detail}\n"
+            f"{report.files_skipped} file(s) skipped. Lower the floor, or add "
+            f"the missing extraction specs (docs/ADDING-A-LANGUAGE.md).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if upload_failed:
+        # The graph is the product; publication is a side effect. An offline
+        # laptop, an expired token or a server outage must not break someone's
+        # build, so this is a diagnostic and the exit code still reflects the
+        # index -- unless the caller explicitly asked otherwise.
+        print(f"\nupload failed: {upload_failed}", file=sys.stderr)
+        if getattr(args, "upload_required", False):
+            return 1
+        print("  the index succeeded; exiting 0. Use --upload-required to "
+              "make this fatal.", file=sys.stderr)
     return 0
+
+
+def _maybe_upload(args: Any, report: Any) -> str:
+    """Publish if asked. Returns a diagnostic, or "" on success or no-op.
+
+    Runs after the index has been reported, so a user sees their graph before
+    anything touches the network. Reopens the store rather than holding the
+    indexer's handle: publication reads what was *persisted*, which is the
+    thing being published.
+    """
+    if not (getattr(args, "upload", False) or getattr(args, "dry_run", False)):
+        return ""
+
+    from . import upload as upload_mod
+
+    project = Path(args.path)
+    repo_name = args.repo_name or project.resolve().name
+    db_path = project / ".lineagelens" / DB_FILENAME
+
+    if args.dry_run:
+        # Auditable: the exact bytes, not a description of them.
+        with GraphStore.open(db_path) as store:
+            payload = upload_mod.build_payload(
+                store, repo_name=repo_name, report=report
+            )
+            upload_mod.assert_no_source(payload)
+        body, compressed = upload_mod.serialise(payload)
+        print(json.dumps(payload, indent=2, default=str))
+        print(
+            f"\n--dry-run: nothing sent. {len(body):,} bytes"
+            f"{' (gzipped)' if compressed else ''}, "
+            f"{len(payload['graph_data']['nodes']):,} nodes, "
+            f"{len(payload['graph_data']['edges']):,} edges.",
+            file=sys.stderr,
+        )
+        return ""
+
+    try:
+        credential = upload_mod.resolve_credential(env=args.env, token=args.token)
+        with GraphStore.open(db_path) as store:
+            result = upload_mod.upload(
+                store, repo_name=repo_name, credential=credential, report=report
+            )
+    except upload_mod.UploadError as exc:
+        return str(exc)
+
+    verb = "unchanged" if result.unchanged else "uploaded"
+    print(
+        f"  {verb}  {result.nodes:,} nodes, {result.edges:,} edges"
+        f"  ->  {result.destination}"
+    )
+    print(
+        f"            repo={result.repo_name}  digest={result.digest[:8]}"
+        f"  auth={credential.source}"
+    )
+    return ""
+
+
+#: Where `--scip` looks when given no path. The conventional output location
+#: for every scip-* indexer.
+SCIP_DEFAULT_NAME = "index.scip"
+
+
+def _resolve_scip_path(args: Any) -> Path | None:
+    """The SCIP index to use, or None.
+
+    Discovery is opt-in via the flag and never implicit: picking up a stray
+    `index.scip` that happened to be in a directory would change resolution
+    silently, and resolution is the thing a user most needs to be able to
+    reason about.
+    """
+    raw = getattr(args, "scip", None)
+    if raw is None:
+        return None
+
+    project = Path(args.path)
+    if raw == "auto":
+        candidate = project / SCIP_DEFAULT_NAME
+        if not candidate.is_file():
+            raise SystemExit(
+                f"--scip: no {SCIP_DEFAULT_NAME} in {project}.\n"
+                f"  generate one with your language's indexer, e.g.\n"
+                f"    scip-java index          (Java/Kotlin/Scala)\n"
+                f"    scip-typescript index    (TypeScript/JavaScript)\n"
+                f"    scip-python index .      (Python)\n"
+                f"  then re-run: lineagelens index --scip"
+            )
+        return candidate
+
+    candidate = Path(raw)
+    if not candidate.is_file():
+        raise SystemExit(f"--scip: {candidate} is not a file")
+    return candidate
+
+
+def _print_scip_hint(project: Path) -> None:
+    """Suggest generating an index when a toolchain is present but none is.
+
+    The detection `ToolchainOracle` already performs becomes a hint rather
+    than a claim -- "javac detected" was only ever an inventory note, and
+    #65 made that visible in the matrix.
+    """
+    import shutil
+
+    hints = {
+        "javac": ("java", "scip-java index"),
+        "tsc": ("typescript", "scip-typescript index"),
+        "go": ("go", "scip-go"),
+    }
+    for executable, (lang, command) in hints.items():
+        if shutil.which(executable) and not (project / SCIP_DEFAULT_NAME).is_file():
+            print(
+                f"  hint: {lang}: {executable} detected but no SCIP index "
+                f"found.\n"
+                f"        For compiler-grade resolution, run:  {command}\n"
+                f"        then re-run:  lineagelens index --scip",
+                file=sys.stderr,
+            )
+            return
 
 
 def _tier_b_set(raw: str) -> frozenset[str]:
@@ -172,154 +391,76 @@ def _tier_b_set(raw: str) -> frozenset[str]:
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
-def _print_index_report(report: Any) -> None:
+def _print_index_report(report: Any, store: GraphStore, *, stream: Any = None) -> None:
+    stream = stream or sys.stdout
+
+    def emit(text: str = "") -> None:
+        print(text, file=stream)
+
     data = report.as_dict()
     files = data["files"]
     graph = data["graph"]
 
-    print(f"indexed {data['project_root']}")
-    print(
+    emit(f"indexed {data['project_root']}")
+    emit(
         f"  files     {files['parsed']:,} parsed"
         + (f", {files['skipped']:,} skipped" if files["skipped"] else "")
         + (f", {files['failed']:,} failed" if files["failed"] else "")
     )
     langs = ", ".join(f"{k} {v:,}" for k, v in data["languages"].items())
-    print(f"  languages {langs or 'none'}")
-    print(f"  services  {data['services']:,}")
-    print(f"  graph     {graph['nodes']:,} nodes, {graph['edges']:,} edges")
-    print(
+    emit(f"  languages {langs or 'none'}")
+    emit(f"  services  {data['services']:,}")
+    emit(f"  graph     {graph['nodes']:,} nodes, {graph['edges']:,} edges")
+    emit(
         f"  contracts {data['contracts']:,}"
         f"   unresolved {graph['unresolved_refs']:,}"
         f"   boundaries {graph['boundaries']:,}"
     )
-    print(f"  digest    {data['build_digest'][:16]}  ({data['duration_seconds']}s)")
+    emit(f"  digest    {data['build_digest'][:16]}  ({data['duration_seconds']}s)")
+
+    if data.get("scip"):
+        scip = data["scip"]
+        if scip.get("error"):
+            emit(f"  scip      unusable: {scip['error']}  (Tier A only)")
+        else:
+            stale = scip.get("stale_files") or []
+            emit(
+                f"  scip      {scip.get('tool') or 'index'}: "
+                f"{scip.get('occurrences', 0):,} occurrences, "
+                f"{scip.get('definitions', 0):,} definitions, "
+                f"{scip.get('documents', 0):,} documents"
+                + (f"  ({len(stale)} stale, Tier A only)" if stale else "")
+            )
+
+    if data.get("levels"):
+        # Breadth and depth are independent axes, so the level is printed
+        # beside the tier rather than folded into it (#56).
+        emit("  levels    " + "  ".join(
+            f"{lang} {level}" for lang, level in data["levels"].items()
+        ) + "  (L0 inventory, L1 +calls, L2 +data flow)")
 
     if data.get("tier_a_only"):
-        print(
+        emit(
             f"  tier A only: {', '.join(data['tier_a_only'])}"
             f"  (no type resolver; more refs ambiguous, none guessed)"
         )
 
     if data["skipped_reasons"]:
-        print("  skipped:")
+        emit("  skipped:")
         for reason, count in data["skipped_reasons"].items():
-            print(f"    {reason:20s} {count:,}")
+            emit(f"    {reason:20s} {count:,}")
 
     # A framework nobody wrote an adapter for is a coverage gap, so it is
     # surfaced as a work list rather than left silent (§8.2).
     unclaimed = data.get("unclaimed_frameworks") or []
     if unclaimed:
-        print("\n  frameworks present but unmodelled (no contract adapter):")
+        emit("\n  frameworks present but unmodelled (no contract adapter):")
         for entry in unclaimed[:5]:
-            print(
+            emit(
                 f"    {entry['name']:24s} {entry['uses']:>4} uses"
                 f"   e.g. {entry['example']}  {entry.get('sample_key', '')}"
             )
         print("    add an adapter under .lineagelens/adapters/ to link these")
-
-
-# ---------------------------------------------------------------------------
-# export
-# ---------------------------------------------------------------------------
-
-def _add_export(commands: Any) -> None:
-    cmd = commands.add_parser("export", help="export the schema-4 graph to a JSON payload")
-    cmd.add_argument("path", nargs="?", default=".", type=Path)
-    cmd.add_argument("--json", action="store_true", help="emit raw JSON")
-    cmd.add_argument("--upload", action="store_true", help="upload the graph to ContextServe")
-    cmd.add_argument("--env", "-e", choices=["prod", "stage", "dev", "local"], default="prod",
-                     help="Target environment for upload (default: prod)")
-    cmd.set_defaults(handler=_run_export)
-
-def _run_export(args: Any) -> int:
-    import json
-    import os
-    import sys
-
-    from .query import QueryEngine
-    from .store import GraphNotFound, SchemaMismatch
-
-    try:
-        engine = QueryEngine.open(args.path)
-    except (GraphNotFound, SchemaMismatch) as exc:
-        print(f"{exc}", file=sys.stderr)
-        return 1
-
-    if not args.json and not args.upload:
-        print("Export requires --json to output the payload or --upload to send it.", file=sys.stderr)
-        return 1
-
-    store = engine.store
-    payload = {"nodes": [], "edges": [], "graph_meta": {}, "repo": {}}
-
-    for row in store.conn.execute("SELECT * FROM nodes"):
-        n = dict(row)
-        n["type_params"] = json.loads(n["type_params"]) if n["type_params"] else []
-        n["decorators"] = json.loads(n["decorators"]) if n["decorators"] else []
-        if n.get("flags") and (n["flags"] & 256):
-            n["flags"] = ["ENTRY_POINT"]
-        else:
-            n["flags"] = []
-        payload["nodes"].append(n)
-
-    for row in store.conn.execute("SELECT * FROM edges"):
-        e = dict(row)
-        e["metadata"] = json.loads(e["metadata"]) if e["metadata"] else {}
-        payload["edges"].append(e)
-
-    meta_row = store.conn.execute("SELECT * FROM graph_meta WHERE id = 1").fetchone()
-    if meta_row:
-        payload["graph_meta"] = dict(meta_row)
-        payload["repo"] = {
-            "commit_sha": meta_row["commit_sha"],
-            "branch": "",
-            "dirty": False
-        }
-
-    store.close()
-
-    if args.upload:
-        import httpx
-
-        from .auth_flow import ENVIRONMENTS
-        from .credentials import CredentialsStore
-        
-        token = os.environ.get("CONTEXTSERVE_API_KEY") or os.environ.get("LINEAGELENS_API_KEY")
-        headers = {}
-        if token:
-            headers["X-API-Key"] = token
-        else:
-            c_store = CredentialsStore()
-            creds = c_store.get(args.env)
-            if not creds:
-                print(f"Error: Not authenticated for environment '{args.env}'. Please run 'lineagelens auth login --env {args.env}' or set CONTEXTSERVE_API_KEY.", file=sys.stderr)
-                return 1
-            headers["Authorization"] = f"Bearer {creds['access_token']}"
-        
-        base_url = ENVIRONMENTS[args.env]
-        repo_name = Path(args.path).absolute().name
-        
-        req_payload = {
-            "repo_name": repo_name,
-            "graph_data": payload
-        }
-        
-        print(f"Uploading graph to {args.env} ({base_url})...", file=sys.stderr)
-        try:
-            resp = httpx.post(f"{base_url}/api/v1/graphs/upload", json=req_payload, headers=headers, timeout=60.0)
-            resp.raise_for_status()
-            print("Upload successful!", file=sys.stderr)
-            if args.json:
-                print(json.dumps(resp.json(), default=str))
-        except Exception as e:
-            print(f"Upload failed: {e}", file=sys.stderr)
-            if hasattr(e, "response") and e.response is not None:
-                print(e.response.text, file=sys.stderr)
-            return 1
-    elif args.json:
-        print(json.dumps(payload, default=str))
-
-    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +511,16 @@ def _add_query(commands: Any) -> None:
     add("search", "ranked search over the graph", "text")
     add("entrypoints", "symbols exposing a contract")
     add("contracts", "who exposes and consumes what")
+
+    risks = sub.add_parser(
+        "risks", parents=[shared],
+        help="resiliency risks, e.g. a blocking call inside an async frame",
+    )
+    risks.add_argument(
+        "--min-severity", choices=["low", "medium", "high", "critical"],
+        default=None,
+        help="report only findings at or above this severity",
+    )
 
     stack = sub.add_parser("stacktrace", parents=[shared],
                            help="map a stack trace onto the graph")
@@ -424,6 +575,13 @@ def _run_query(args: Any) -> int:
         result = engine.get_node(args.symbol, intent=args.intent)
     elif name == "search":
         result = engine.search(args.text, kinds=kinds, **shared)
+    elif name == "risks":
+        from .query.risks import list_risks
+
+        result = list_risks(
+            engine, min_severity=args.min_severity,
+            limit=args.limit, max_depth=args.max_depth,
+        )
     elif name == "entrypoints":
         result = engine.entry_points(limit=args.limit)
     elif name == "contracts":
@@ -470,12 +628,16 @@ def _print_result(payload: dict[str, Any]) -> None:
 
     for item in payload["results"]:
         print()
-        if isinstance(item, dict) and "chain" in item:
+        # A path, identified by the fields a path has -- not by `chain` alone,
+        # which a risk finding also carries.
+        if isinstance(item, dict) and {"length", "hops"} <= item.keys():
             print(f"  [{item['length']} hop{'s' if item['length'] != 1 else ''}] "
                   f"{item['chain']}")
             for hop in item.get("hops", []):
                 via = f" via {hop['via']}" if hop.get("via") else ""
                 print(f"      {hop['depth']}. {hop['node']}  ({hop['at']}){via}")
+        elif isinstance(item, dict) and item.get("rule"):
+            _print_risk(item)
         else:
             print(_indent(json.dumps(item, indent=2, default=str), "  "))
 
@@ -488,6 +650,29 @@ def _print_result(payload: dict[str, Any]) -> None:
             print(f"    boundary {entry['kind']}: {entry['detail']}")
         if coverage.get("degraded"):
             print(f"    degraded (Tier A only): {', '.join(coverage['degraded'])}")
+
+
+def _print_risk(finding: dict) -> None:
+    """Render one resiliency finding in the shape the product advertises.
+
+    Every line is evidence: the call and where it is, the async frame it sits
+    inside, the chain between them, and the weakest evidence tier on that
+    chain. A severity with no visible derivation is a number a reader cannot
+    argue with, so the reasons are printed whenever they moved it.
+    """
+    print(f"  [RESILIENCY RISK DETECTED]  {finding['rule']} "
+          f"({finding['severity'].upper()})")
+    print(f"    {finding['call']} in async  --  {finding['at']}")
+    print(f"    async frame: {finding['frame']}  ({finding['frame_at']})")
+    hops = finding["distance"]
+    print(f"    chain: {finding['chain']}  "
+          f"[{hops} hop{'s' if hops != 1 else ''}]")
+    note = "external reference" if finding.get("external") else "resolved edge"
+    print(f"    evidence: {finding['evidence']} ({note})")
+    for reason in finding.get("severity_reasons", []):
+        print(f"      severity: {reason}")
+    if finding.get("summary"):
+        print(f"    {finding['summary']}")
 
 
 def _indent(text: str, prefix: str) -> str:
@@ -541,6 +726,19 @@ def _run_coverage(args: Any) -> int:
             print("files: " + "  ".join(
                 f"{k} {v:,}" for k, v in coverage["files"].items()
             ))
+        if coverage.get("levels"):
+            print("\nlevels:")
+            for lang, level in coverage["levels"].items():
+                print(f"  {lang:14s} {level}  {LEVEL_MEANING.get(level, '')}")
+            below = sorted(
+                lang for lang, level in coverage["levels"].items()
+                if level != "L2"
+            )
+            if below:
+                # The distinction the ladder exists for: on these languages a
+                # missing answer may be unavailable rather than absent.
+                print("  " + ", ".join(below) + ": a missing call or data-flow "
+                      "answer here is unavailable, not absent")
         if coverage.get("degraded"):
             print(f"degraded (Tier A only): {', '.join(coverage['degraded'])}")
     engine.store.close()
@@ -578,7 +776,22 @@ def _run_verify(args: Any) -> int:
             store.close()
             print(f"  build {run}: {report.build_digest}")
 
-    if digests[0] != digests[1]:
+    ok = digests[0] == digests[1]
+
+    # Record the verdict on the project's own index, when it has one. An
+    # unverified graph keeps `deterministic_ok = NULL`, which is a third state:
+    # "not checked" and "checked and failed" are different facts and only one
+    # of them is a defect (#66).
+    project_db = Path(args.path) / ".lineagelens" / DB_FILENAME
+    if project_db.exists():
+        try:
+            with GraphStore.open(project_db) as project_store:
+                project_store.record_determinism(ok)
+        except (GraphNotFound, SchemaMismatch) as exc:
+            # The check itself is still valid; only the bookkeeping failed.
+            print(f"  (verdict not recorded: {exc})", file=sys.stderr)
+
+    if not ok:
         print("\nFAIL: two builds of the same tree differ.", file=sys.stderr)
         print("Something order-dependent or time-dependent reached the store.",
               file=sys.stderr)
@@ -614,15 +827,18 @@ def _run_ontology(args: Any) -> int:
     symbols = {True: "yes", "partial": "part", "untested": "?", False: "-",
                "n/a": "n/a"}
     header = "  ".join(f"{name[:9]:>9s}" for name in columns)
-    print(f"\n{'language':11s} {'type resolver':26s} {header}")
+    print(f"\n{'language':11s} {'lvl':4s} {'type resolver':26s} {header}")
     for lang, entry in matrix["languages"].items():
         caps = entry.get("capabilities", {})
         marks = "  ".join(
             f"{symbols.get(caps.get(name), '-'):>9s}" for name in columns
         )
-        print(f"{lang:11s} {entry['tier_b'][:26]:26s} {marks}")
+        print(f"{lang:11s} {entry.get('level', '?'):4s} "
+              f"{entry['tier_b'][:26]:26s} {marks}")
     print("\n  'n/a' means the language has no such construct; 'part' is a "
           "documented partial (see `--json` for the reason).")
+    print("  lvl: L0 inventory, L1 +call graph, L2 +data flow. Derived from "
+          "which extraction specs loaded, not declared.")
 
     project = matrix.get("project", {})
     if project.get("indexed"):
@@ -645,6 +861,115 @@ def _run_mcp(args: Any) -> int:
     from .mcp.server import create_server
 
     create_server(Path(args.path)).run()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# serve
+# ---------------------------------------------------------------------------
+
+def _add_serve(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "serve",
+        help="serve the graph over HTTP (requires: pip install lineagelens[rest])",
+    )
+    cmd.add_argument("path", nargs="?", default=".", type=Path)
+    # Loopback by default. An unauthenticated graph of someone's source tree
+    # should take a deliberate act to expose, not a forgotten flag.
+    cmd.add_argument("--host", default="127.0.0.1",
+                     help="bind address (default: 127.0.0.1, loopback only)")
+    cmd.add_argument("--port", type=int, default=8000)
+    cmd.add_argument("--api-key", default=None,
+                     help="require this key in the X-API-Key header")
+    cmd.set_defaults(handler=_run_serve)
+
+
+def _run_serve(args: Any) -> int:
+    try:
+        import uvicorn
+    except ImportError:
+        print(
+            "serve needs the HTTP extra:\n  pip install 'lineagelens[rest]'",
+            file=sys.stderr,
+        )
+        return 2
+
+    from .rest import create_app
+
+    project = Path(args.path)
+    if not (project / ".lineagelens").is_dir():
+        print(f"no index at {project}\nRun: lineagelens index {project}",
+              file=sys.stderr)
+        return 1
+
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not args.api_key:
+        # Refuse rather than warn. The graph carries signatures, docstrings and
+        # file layout; serving it unauthenticated on a routable address is a
+        # disclosure, and a warning on line 3 of uvicorn's banner is not
+        # consent.
+        print(
+            f"refusing to bind {args.host} without --api-key\n"
+            "the graph exposes signatures, docstrings and file layout",
+            file=sys.stderr,
+        )
+        return 2
+
+    uvicorn.run(create_app(project, api_key=args.api_key),
+                host=args.host, port=args.port, log_level="info")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# telemetry
+# ---------------------------------------------------------------------------
+
+def _add_telemetry(commands: Any) -> None:
+    cmd = commands.add_parser(
+        "telemetry",
+        help="anonymous usage telemetry: off until you turn it on",
+    )
+    sub = cmd.add_subparsers(dest="telemetry_command", required=True)
+    sub.add_parser("enable", help="opt in to anonymous usage telemetry")
+    sub.add_parser("disable", help="opt out")
+    sub.add_parser("status", help="what would be sent, and where")
+    cmd.set_defaults(handler=_run_telemetry)
+
+
+def _run_telemetry(args: Any) -> int:
+    from . import telemetry
+
+    action = args.telemetry_command
+    if action == "enable":
+        telemetry.set_enabled(True)
+        blocker = telemetry.suppressed_by()
+        print(f"telemetry enabled. Preferences: {telemetry.prefs_path()}")
+        if blocker:
+            # Honesty about an override that will win. Saying "enabled" and
+            # then sending nothing would be worse than refusing.
+            print(f"  note: ${blocker} is set, so nothing will be sent while "
+                  f"it remains. That override cannot be configured away.")
+        print("  run `lineagelens telemetry status` to see the exact payload.")
+        return 0
+
+    if action == "disable":
+        telemetry.set_enabled(False)
+        print("telemetry disabled. No events will be sent.")
+        return 0
+
+    state = telemetry.status()
+    print(f"enabled     {state['enabled']}")
+    print(f"effective   {state['effective']}"
+          + (f"  (suppressed by ${state['suppressed_by']})"
+             if state["suppressed_by"] else ""))
+    print(f"install id  {state['install_id'] or '(not yet generated)'}")
+    print(f"endpoint    {state['endpoint']}")
+    print(f"prefs       {state['preferences_file']}")
+    print("\nnever sent: " + ", ".join(state["never_sent"]))
+    # The actual payload, not a description of it. For a tool that ships as
+    # source, a user should not have to read telemetry.py to find out what
+    # leaves their machine.
+    print("\nthe exact event that would be sent:")
+    print(_indent(json.dumps(state["example_event"], indent=2, sort_keys=True), "  "))
     return 0
 
 

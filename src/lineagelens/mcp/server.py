@@ -151,6 +151,21 @@ class EngineHandle:
             return None
 
 
+def _response_bytes(result: Any) -> int:
+    """Serialised size of a tool response, for the token estimate.
+
+    Measured on the serialised form because that is what crosses the wire and
+    lands in an agent's context. Falls back to zero rather than raising: a
+    response that cannot be sized is still a response.
+    """
+    import json as _json
+
+    try:
+        return len(_json.dumps(result, default=str).encode())
+    except Exception:  # pragma: no cover - defensive
+        return 0
+
+
 def create_server(root: Path | None = None) -> Any:
     """Build the MCP server for one project."""
     from mcp.server.mcpserver import MCPServer
@@ -180,34 +195,44 @@ def create_server(root: Path | None = None) -> Any:
         """
         @functools.wraps(fn)
         async def wrapped(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            try:
-                result = await fn(*args, **kwargs)
-                
+            # Metering lives here rather than on each tool, so it is one change
+            # instead of twenty-four and a new tool is metered by default
+            # rather than by remembering (#59).
+            from .. import telemetry
+
+            with telemetry.timed() as clock:
                 try:
-                    import asyncio
-                    import json
-                    # Simple heuristic: ~4 chars per token for JSON payload
-                    optimized_tokens = len(json.dumps(result)) // 4
-                    raw_tokens = optimized_tokens * 10
-                    
-                    # Store a reference to prevent garbage collection (fixes RUF006)
-                    task = asyncio.create_task(_send_telemetry(fn.__name__, raw_tokens, optimized_tokens))
-                    _background_tasks.add(task)
-                    task.add_done_callback(_background_tasks.discard)
-                except Exception as e:
-                    logger.debug("Failed to queue telemetry task: %s", e)
-                    
-                return result
-            except GraphNotFound:
-                return {
-                    "error": "no index",
-                    "remedy": f"run: lineagelens index {project}",
-                }
-            except SchemaMismatch as exc:
-                return {
-                    "error": str(exc),
-                    "remedy": f"run: lineagelens index {project} --force",
-                }
+                    result = await fn(*args, **kwargs)
+                except GraphNotFound:
+                    result = {
+                        "error": "no index",
+                        "remedy": f"run: lineagelens index {project}",
+                    }
+                except SchemaMismatch as exc:
+                    result = {
+                        "error": str(exc),
+                        "remedy": f"run: lineagelens index {project} --force",
+                    }
+
+            # A counter, not I/O. Metering a call must not become the cost it
+            # is measuring, so nothing is sent until the process exits.
+            try:
+                telemetry.meter().record_tool_call(telemetry.ToolCall(
+                    tool=fn.__name__,
+                    duration_ms=clock.ms,
+                    response_bytes=_response_bytes(result),
+                    # `precise` adds verbatim source and data flow, so it is
+                    # the single biggest cost lever an agent controls.
+                    intent=kwargs.get("intent"),
+                    result_count=len(result.get("results", ()))
+                    if isinstance(result, dict) else 0,
+                    truncated=bool(result.get("truncated"))
+                    if isinstance(result, dict) else False,
+                ))
+            except Exception:  # pragma: no cover - metering never breaks a tool
+                logger.debug("metering failed for %s", fn.__name__, exc_info=True)
+
+            return result
 
         # Advertise the tool's real parameters minus each signature's ``**_``
         # catch-all: the SDK refuses any parameter whose name starts with an
@@ -433,6 +458,36 @@ def create_server(root: Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """Symbols that expose a contract -- the roots a trace starts from."""
         return engine().entry_points(kind=kind, limit=limit).as_dict()
+
+    @server.tool()
+    @guarded
+    async def list_resiliency_risks(
+        min_severity: str | None = None,
+        limit: int | None = None,
+        max_depth: int | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Blocking calls reachable from an async frame, with the chain.
+
+        Each finding names the blocking call, the async frame it sits inside,
+        the call chain between them, and the weakest evidence tier on that
+        chain -- so a risk found through an inferred edge is reported at lower
+        confidence rather than asserted flatly.
+
+        Read `risks.languages` in the response before trusting an empty list.
+        A language with no rule pack reports `unsupported`, which is not the
+        same as "analysed, no risks found": the first is a gap in LineageLens
+        and the second is a fact about the code.
+
+        Most blocking calls are *external* -- `Thread.sleep` and `time.sleep`
+        live outside the index -- so findings are matched against unresolved
+        references as well as graph edges, and carry `external: true`.
+        """
+        from ..query.risks import list_risks
+
+        return list_risks(
+            engine(), min_severity=min_severity, limit=limit, max_depth=max_depth
+        ).as_dict()
 
     # ---- lookup -----------------------------------------------------------
 

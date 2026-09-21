@@ -20,6 +20,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import provenance
 from .contracts import AdapterRegistry, project_adapter_roots
 from .core import (
     FileRecord,
@@ -35,7 +36,9 @@ from .extract import (
     detect_dialect,
     language_of,
 )
+from .ontology import ontology_digest
 from .resolve import OracleRegistry, Resolver, SymbolIndex
+from .resolve.oracles import default_oracles
 from .services import IGNORED_DIRS, ServiceLocator, discover_services
 from .store import DB_FILENAME, GraphStore
 
@@ -72,6 +75,21 @@ class IndexReport:
     #: Languages indexed without a Tier B type resolver, so with more
     #: references recorded as ambiguous. Reported, never silent.
     tier_a_only: list[str] = field(default_factory=list)
+    #: Languages `--require-tier-b` asked for and no resolver can answer, so
+    #: their files were skipped. Reported separately from `tier_a_only`
+    #: because it is a *refusal*, not a degradation: the caller asked not to be
+    #: given Tier A answers, and got no answers instead. The CLI exits non-zero
+    #: on it, so refusing to answer cannot look like a successful index of
+    #: nothing (#65).
+    tier_b_refused: list[str] = field(default_factory=list)
+    #: ``{lang: level}`` for languages present in this index (#56).
+    levels: dict[str, str] = field(default_factory=dict)
+    #: Languages skipped for sitting below a `--require-level` floor. Reported
+    #: separately from `levels` because it is a refusal, not a description:
+    #: the caller asked not to be given answers below a level and got none.
+    level_refused: dict[str, str] = field(default_factory=dict)
+    #: What a SCIP index contributed, or why it did not (#47).
+    scip: dict[str, object] = field(default_factory=dict)
     languages: dict[str, int] = field(default_factory=dict)
     #: Framework-shaped declarations no adapter claimed, commonest first (§8.2).
     unclaimed_frameworks: list[dict[str, object]] = field(default_factory=list)
@@ -95,6 +113,10 @@ class IndexReport:
             "languages": dict(sorted(self.languages.items())),
             "unclaimed_frameworks": self.unclaimed_frameworks,
             **({"tier_a_only": self.tier_a_only} if self.tier_a_only else {}),
+            **({"tier_b_refused": self.tier_b_refused} if self.tier_b_refused else {}),
+            **({"levels": self.levels} if self.levels else {}),
+            **({"level_refused": self.level_refused} if self.level_refused else {}),
+            **({"scip": self.scip} if self.scip else {}),
             "skipped_reasons": dict(sorted(self.skipped_reasons.items())),
             "build_digest": self.build_digest,
             "duration_seconds": round(self.duration_seconds, 3),
@@ -109,6 +131,8 @@ class Indexer:
         project_root: Path,
         *,
         require_tier_b: frozenset[str] = frozenset(),
+        require_level: dict[str, str] | None = None,
+        scip_index: Path | None = None,
     ) -> None:
         self.root = project_root.resolve()
         #: Languages to SKIP unless a Tier B type resolver is available.
@@ -131,6 +155,10 @@ class Indexer:
         #: `--require-tier-b` restores the strict behaviour where a caller wants
         #: the guarantee, e.g. a CI job that must not report a partial graph.
         self.require_tier_b = require_tier_b
+        #: ``{lang: level}`` floors, ``"*"`` for every language (#56).
+        self.require_level = dict(require_level or {})
+        #: A SCIP index to resolve through, ahead of every other oracle (#47).
+        self.scip_index = scip_index
         self.specs = SpecRegistry()
         self.parsers = ParserRegistry()
         self.extractor = SpecExtractor(specs=self.specs, parsers=self.parsers)
@@ -145,13 +173,17 @@ class Indexer:
         locator = ServiceLocator(services)
         report.services = len(services)
 
-        oracles = OracleRegistry(project_root=self.root)
+        oracles = OracleRegistry(
+            project_root=self.root,
+            oracles=default_oracles(self.root, self.scip_index),
+        )
         without_tier_b = set(oracles.languages_without_tier_b())
         refused = without_tier_b & set(self.require_tier_b)
         if refused:
+            report.tier_b_refused = sorted(refused)
             logger.warning(
-                "--require-tier-b was given for %s but no resolver is "
-                "available; files in these languages will be skipped.",
+                "--require-tier-b was given for %s but no resolver can resolve "
+                "them; files in these languages will be skipped.",
                 ", ".join(sorted(refused)),
             )
         degraded = sorted(without_tier_b - refused)
@@ -168,13 +200,23 @@ class Indexer:
             )
             report.tier_a_only = degraded
 
+        # Levels for the languages this index actually contains, not every
+        # language the build could parse -- the report describes this graph.
+        spec_levels = self.specs.levels()
+
         observations: list[Observation] = []
         lang_of_file: dict[str, str] = {}
+        # Every language *encountered*, including ones whose files were all
+        # skipped. `lang_of_file` records only parsed files, so a wholly
+        # refused language is absent from it -- and a refusal that vanishes
+        # from the report is the failure the refusal exists to prevent.
+        langs_seen: set[str] = set()
         usage_sites: list[dict] = []  # For Phase 3: usage site extraction
 
         for rel_path, content, dialect in self._walk():
             report.files_seen += 1
             lang = language_of(dialect)
+            langs_seen.add(lang)
             service = locator.for_path(rel_path)
             digest = hashlib.blake2b(content, digest_size=16).hexdigest()
 
@@ -243,9 +285,22 @@ class Indexer:
         all_nodes = [n for o in observations for n in o.nodes]
         index = SymbolIndex(all_nodes)
         adapters = AdapterRegistry(project_adapter_roots(self.root))
+        # Content hashes let ScipOracle refuse per file when the index was
+        # built against different source. Passed in rather than read by the
+        # oracle: an oracle does not touch the store.
+        resolved_oracles = default_oracles(
+            self.root, self.scip_index,
+            content_hashes={
+                o.file.path: o.file.content_hash for o in observations
+            },
+        )
         resolver = Resolver(
             index,
-            oracles=OracleRegistry(project_root=self.root, lang_of_file=lang_of_file),
+            oracles=OracleRegistry(
+                project_root=self.root,
+                lang_of_file=lang_of_file,
+                oracles=resolved_oracles,
+            ),
             adapters=adapters,
             project_root=self.root,
         )
@@ -255,6 +310,24 @@ class Indexer:
             db_path or self.root / ".lineagelens" / DB_FILENAME,
             services, observations, resolved, usage_sites=usage_sites,
         )
+
+        if self.scip_index is not None:
+            for oracle in resolved_oracles:
+                if getattr(oracle, "name", "") == "scip":
+                    report.scip = oracle.status()
+                    break
+
+        report.levels = {
+            lang: spec_levels[lang]
+            for lang in sorted(set(lang_of_file.values()))
+            if lang in spec_levels
+        }
+        if self.require_level:
+            report.level_refused = {
+                lang: spec_levels.get(lang, "none")
+                for lang in sorted(langs_seen)
+                if self._below_required_level(lang)
+            }
 
         counts = store.counts()
         report.nodes = counts["nodes"]
@@ -267,6 +340,8 @@ class Indexer:
             grammar_digest=self.parsers.digest(),
             spec_digest=self.specs.digest(),
             adapter_digest=adapters.digest(),
+            ontology_digest=ontology_digest(),
+            unclaimed_frameworks=report.unclaimed_frameworks,
             built_at=started.isoformat(),
         )
         report.duration_seconds = (datetime.now(UTC) - started).total_seconds()
@@ -293,7 +368,13 @@ class Indexer:
         the total runtime. Each record already carries its own ``file_id``, so
         one call per table is enough.
         """
-        store = GraphStore.create(db_path, project_root=str(self.root))
+        # Git provenance, best effort. `resolve` never raises and returns an
+        # empty Provenance outside a checkout, so indexing a tarball works.
+        prov = provenance.resolve(self.root)
+        store = GraphStore.create(
+            db_path, project_root=str(self.root),
+            commit_sha=prov.commit_sha, branch=prov.branch, dirty=prov.dirty,
+        )
         with store.transaction():
             store.write_services(services)
 
@@ -319,6 +400,12 @@ class Indexer:
                 replace(edge, file_id=file_ids.get(edge.file_path or ""))
                 for edge in resolved.edges
             ])
+            # ENTRY_POINT mirrors the existence of an EXPOSES edge, so it can
+            # only be derived once those edges exist -- contracts are detected
+            # after nodes are persisted. Inside this transaction, so the flag
+            # and the edge cannot be committed in disagreement.
+            store.derive_entry_point_flags()
+
             store.write_unresolved([
                 replace(ref, file_id=file_ids.get(ref.file_path))
                 for ref in resolved.unresolved
@@ -382,11 +469,32 @@ class Indexer:
                     continue
                 yield (path.relative_to(self.root).as_posix(), content, dialect)
 
+    def _below_required_level(self, lang: str) -> bool:
+        """Is ``lang`` below the floor asked for?
+
+        A language with no spec at all counts as below any floor: it cannot be
+        indexed, so claiming it met L0 would be the declared-capability failure
+        the ladder exists to prevent.
+        """
+        if not self.require_level:
+            return False
+        from .extract.spec import LEVELS
+
+        floor = self.require_level.get(lang, self.require_level.get("*"))
+        if floor is None:
+            return False
+        if not self.specs.has(lang):
+            return True
+        actual = self.specs.spec_for(lang).level
+        return LEVELS.index(actual) < LEVELS.index(floor)
+
     def _skip_reason(
         self, rel_path: str, content: bytes, lang: str, refused: set[str]
     ) -> SkipReason | None:
         if lang in refused:
             return SkipReason.MISSING_TIER_B
+        if self._below_required_level(lang):
+            return SkipReason.BELOW_REQUIRED_LEVEL
         if len(content) > MAX_FILE_BYTES:
             return SkipReason.TOO_LARGE
         if b"\x00" in content[:8192]:
@@ -396,7 +504,23 @@ class Indexer:
             return SkipReason.GENERATED
         if not self.specs.has(lang):
             return SkipReason.MISSING_GRAMMAR
+        # A spec can exist while its grammar is not installed, now that
+        # wave-1 grammars live behind extras (#61). Treated as a reported
+        # skip rather than an exception: a missing grammar is a routine
+        # runtime state on a partial install, and the coverage envelope is
+        # where a caller acts on it.
+        if not self.parsers.can_parse(self._dialect_for(lang)):
+            return SkipReason.MISSING_GRAMMAR
         return None
+
+    def _dialect_for(self, lang: str) -> str:
+        """The first dialect registered for ``lang``. Dialects share a spec."""
+        from .extract.langs import GRAMMARS
+
+        for grammar in GRAMMARS:
+            if grammar.lang == lang:
+                return grammar.dialect
+        return lang
 
     def _module_path(self, rel_path: str, service_root: str) -> str:
         """Dotted module path for a file, relative to its service.

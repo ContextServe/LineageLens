@@ -1,0 +1,10 @@
+lang = "ruby"
+dialects = ["ruby"]
+doc_prefixes = ["#"]
+
+# `self` is explicit in Ruby and never a declared parameter, so there is no
+# receiver to drop before signature hashing.
+implicit_receivers = []
+# `initialize` is Ruby's constructor. The engine promotes the kind rather than
+# each spec needing a second pattern that would collide with the first.
+constructor_names = ["initialize"]

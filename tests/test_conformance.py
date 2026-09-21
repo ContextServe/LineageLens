@@ -84,14 +84,30 @@ class TestPerLanguage:
             f"{lang}: expected but never produced: {result.missing_nodes}"
         )
 
-    def test_calls_and_dataflow_are_supported(self, lang):
-        """Every language must reach at least calls plus intraprocedural flow.
+    def test_an_l2_language_reaches_calls_and_dataflow(self, lang):
+        """The §15 floor, now scoped to the languages that claim it.
 
-        This is the §15 floor: Tier A brings all six languages to nodes, calls
-        and data flow. Anything below that is a broken spec, not a language
-        limitation.
+        Tier A brings an **L2** language to nodes, calls and data flow, and
+        anything below that is a broken spec rather than a language
+        limitation. An L0 language has no refs.scm and no dataflow.scm, so
+        requiring those edges would report a failure for a capability nobody
+        claimed -- which is exactly the conflation the ladder exists to end
+        (#56, #61).
+
+        What stops an L0 language hiding a broken spec is the level
+        cross-check in the runner: a language claiming L1 or L2 whose corpus
+        produced no corroborating edges fails the run outright.
         """
+        from lineagelens.extract.spec import SpecRegistry
+
+        level = SpecRegistry().levels().get(lang, "L0")
         result = run_language(lang)
+        if level != "L2":
+            # Must be `n/a`, not False: "no such capability claimed" and
+            # "claimed and absent" are different states.
+            assert result.capabilities["calls"] == "n/a"
+            assert result.capabilities["dataflow"] == "n/a"
+            return
         assert result.capabilities["calls"] is True, f"{lang}: no CALLS edges"
         assert result.capabilities["dataflow"] is True, f"{lang}: no data-flow edges"
 
