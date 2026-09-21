@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_serve(commands)
     _add_telemetry(commands)
     _add_auth(commands)
-    #_add_export(commands)
+
 
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -460,7 +460,7 @@ def _print_index_report(report: Any, store: GraphStore, *, stream: Any = None) -
                 f"    {entry['name']:24s} {entry['uses']:>4} uses"
                 f"   e.g. {entry['example']}  {entry.get('sample_key', '')}"
             )
-        print("    add an adapter under .lineagelens/adapters/ to link these")
+        emit("    add an adapter under .lineagelens/adapters/ to link these")
 
 
 # ---------------------------------------------------------------------------
