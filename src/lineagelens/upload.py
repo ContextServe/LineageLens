@@ -316,12 +316,17 @@ def upload(
     graph = payload["graph_data"]
     digest = graph["graph_meta"]["build_digest"] or ""
     headers = {
-        "X-API-Key": credential.token,
         "Content-Type": "application/json",
         # Sent so the server can short-circuit before reading the body, once it
         # supports that. Harmless if ignored.
         "X-Build-Digest": digest,
     }
+    
+    if credential.token.startswith("ll_live_"):
+        headers["X-API-Key"] = credential.token
+    else:
+        headers["Authorization"] = f"Bearer {credential.token}"
+        
     if compressed:
         headers["Content-Encoding"] = "gzip"
 

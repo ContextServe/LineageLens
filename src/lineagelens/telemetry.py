@@ -396,7 +396,10 @@ def _post(payload: dict[str, Any]) -> bool:
     token = stored.get("access_token")
     path = OSS_PATH
     if token and payload.get("attribution"):
-        headers["X-API-Key"] = token
+        if token.startswith("ll_live_"):
+            headers["X-API-Key"] = token
+        else:
+            headers["Authorization"] = f"Bearer {token}"
         path = METERING_PATH
 
     with httpx.Client(timeout=FLUSH_TIMEOUT_SECONDS) as client:

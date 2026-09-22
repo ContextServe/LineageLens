@@ -169,10 +169,22 @@ def _response_bytes(result: Any) -> int:
 def create_server(root: Path | None = None) -> Any:
     """Build the MCP server for one project."""
     from mcp.server.mcpserver import MCPServer
+    from .. import telemetry
 
     project = (root or _project_root()).resolve()
     handle = EngineHandle(project)
     server = MCPServer("lineagelens", instructions=ontology_instructions(project))
+
+    from ..credentials import CredentialsStore
+    store = CredentialsStore()
+    if store.is_token_valid(store.active_env):
+        from ..provenance import resolve as resolve_provenance
+        prov = resolve_provenance(project)
+        telemetry.meter().attribution = {
+            "repo_name": project.name,
+            "branch": prov.branch,
+            "commit_sha": prov.commit_sha,
+        }
 
     def engine() -> QueryEngine:
         return handle.get()
