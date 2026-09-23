@@ -340,7 +340,6 @@ index at Tier A and the coverage envelope says so on every query. Use
   sent, and how to switch it off
 - Design rationale and measured baselines: issue #51
 
-<<<<<<< HEAD
 
 
 
@@ -362,11 +361,15 @@ To build the massive all-in-one image:
 ```bash
 docker build --target monolith -t registry.contextserve.ai/lineagelens/cli:latest .
 ```
+
 All stages have been optimized to clean their APT caches to keep the image sizes as small as possible!
 
+Build the index
 
-=======
->>>>>>> origin/main
+```
+docker run --rm -v $(pwd):/workspace registry.contextserve.ai/lineagelens/cli:latest lineagelens index
+```
+
 ## Licence
 
 Apache-2.0

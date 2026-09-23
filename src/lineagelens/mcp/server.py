@@ -169,6 +169,7 @@ def _response_bytes(result: Any) -> int:
 def create_server(root: Path | None = None) -> Any:
     """Build the MCP server for one project."""
     from mcp.server.mcpserver import MCPServer
+
     from .. import telemetry
 
     project = (root or _project_root()).resolve()
