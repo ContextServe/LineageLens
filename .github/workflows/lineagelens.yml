@@ -104,4 +104,7 @@ jobs:
 
       - name: Test Docker Container Indexing
         run: |
-          docker run --rm -v ${{ github.workspace }}:/workspace lineagelens-cli:ci lineagelens index .
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v ${{ github.workspace }}:/workspace \
+            lineagelens-cli:ci lineagelens index .
