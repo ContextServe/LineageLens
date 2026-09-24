@@ -132,6 +132,10 @@ class _Base:
         return False
 
 
+import concurrent.futures
+
+_JEDI_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
 @dataclass(slots=True)
 class JediOracle(_Base):
     """Python, via jedi. Vendored: jedi is a wheel, so nothing external needed.
@@ -180,15 +184,22 @@ class JediOracle(_Base):
         if not path.is_file():
             return None
 
-        try:
+        def _do_goto():
             script = jedi.Script(path=str(path), project=jedi.Project(str(self.project_root)))
-            names = script.goto(
+            return script.goto(
                 line=ref.span.start_line,
                 column=ref.span.start_col,
                 follow_imports=True,
             )
-        except Exception as exc:  # jedi raises a wide variety on odd input
+
+        try:
+            future = _JEDI_EXECUTOR.submit(_do_goto)
+            names = future.result(timeout=2.0)
+        except Exception as exc:  # TimeoutError or jedi internal error
             logger.debug("jedi could not resolve %s at %s: %s", ref.ref_text, path, exc)
+            return None
+
+        if not names:
             return None
 
         in_project = [n for n in names if n.module_path and self._inside(n.module_path)]
@@ -212,9 +223,14 @@ class JediOracle(_Base):
         path = self.project_root / file_path
         if not path.is_file():
             return None
-        try:
+
+        def _do_infer():
             script = jedi.Script(path=str(path), project=jedi.Project(str(self.project_root)))
-            inferred = script.infer(line=span.start_line, column=span.start_col)
+            return script.infer(line=span.start_line, column=span.start_col)
+
+        try:
+            future = _JEDI_EXECUTOR.submit(_do_infer)
+            inferred = future.result(timeout=2.0)
         except Exception:
             return None
         return inferred[0].name if len(inferred) == 1 else None
@@ -225,6 +241,7 @@ class JediOracle(_Base):
         except ValueError:
             return False
         return True
+
 
 
 _JEDI_KINDS: dict[str, NodeKind] = {

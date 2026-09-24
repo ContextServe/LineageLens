@@ -98,10 +98,10 @@ jobs:
         with:
           context: .
           target: monolith
+          load: true
           push: false
-          tags: registry.contextserve.ai/lineagelens/cli:latest
+          tags: lineagelens-cli:ci
 
       - name: Test Docker Container Indexing
         run: |
-          docker run --rm -v ${{ github.workspace }}:/workspace registry.contextserve.ai/lineagelens/cli:latest lineagelens index .
-
+          docker run --rm -v ${{ github.workspace }}:/workspace lineagelens-cli:ci lineagelens index .
