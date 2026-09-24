@@ -37,6 +37,7 @@ completeness envelope, so the degradation is never silent.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import shutil
@@ -131,8 +132,6 @@ class _Base:
         """
         return False
 
-
-import concurrent.futures
 
 _JEDI_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
