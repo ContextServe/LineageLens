@@ -5,6 +5,12 @@ on:
     branches: [main]
     tags:    ["v*"]          # e.g. v1.2.3  -> ghcr.io/...:1.2.3
   pull_request:              # build-only, no push - validates the Dockerfile
+  workflow_dispatch:         # manual trigger from the GitHub Actions UI
+    inputs:
+      version:
+        description: 'Version to tag (e.g. 3.0.0 — without the v prefix)'
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -44,14 +50,17 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          # On main  : ghcr.io/.../lineagelens:node
-          # On v1.2.3: ghcr.io/.../lineagelens:node-1.2.3 + node-1.2 + node
+          # On main        : ghcr.io/.../lineagelens:node
+          # On v1.2.3 tag  : ghcr.io/.../lineagelens:node-1.2.3 + node-1.2 + node
+          # Manual dispatch: ghcr.io/.../lineagelens:node-<version> + node-<major.minor>
           tags: |
             type=ref,event=branch,suffix=-${{ matrix.target }}
             type=semver,pattern={{version}},suffix=-${{ matrix.target }}
             type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.target }}
             type=raw,value=${{ matrix.target }},enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
             type=raw,value=latest,enable=${{ matrix.target == 'monolith' && github.ref == format('refs/heads/{0}', 'main') }}
+            type=raw,value=${{ inputs.version }}-${{ matrix.target }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && matrix.target == 'monolith' }}
 
       # ── Build ─────────────────────────────────────────────────────────────
       - name: Set up Docker Buildx
