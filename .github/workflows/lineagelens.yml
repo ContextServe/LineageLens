@@ -92,6 +92,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker   # use the local daemon driver so --load works without warnings
 
       - name: Build Monolith Docker Image
         uses: docker/build-push-action@v5

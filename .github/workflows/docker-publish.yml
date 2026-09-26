@@ -65,6 +65,9 @@ jobs:
           push:    ${{ github.event_name != 'pull_request' }}
           tags:    ${{ steps.meta.outputs.tags }}
           labels:  ${{ steps.meta.outputs.labels }}
+          # On PRs: no registry push — explicitly write to cache only to suppress
+          # the "No output specified" warning from the docker-container driver.
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || '' }}
           # Layer cache: reuse previous builds to speed up CI
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to:   type=gha,scope=${{ matrix.target }},mode=max
