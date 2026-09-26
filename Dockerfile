@@ -66,7 +66,8 @@ USER lineagelens
 # GO TARGET
 # ==========================================
 FROM base AS go
-RUN GO_ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) \
+RUN ARCH=$(uname -m) \
+  && GO_ARCH=$(if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then echo "arm64"; else echo "amd64"; fi) \
   && curl -L "https://go.dev/dl/go1.21.1.linux-${GO_ARCH}.tar.gz" | tar -C /usr/local -xz
 ENV PATH="/usr/local/go/bin:${PATH}"
 RUN go install github.com/scip-code/scip-go/cmd/scip-go@latest \
@@ -102,8 +103,13 @@ USER lineagelens
 # ==========================================
 FROM base AS clang
 RUN apt-get update && apt-get install -y --no-install-recommends clang llvm \
-  && curl -L https://github.com/sourcegraph/scip-clang/releases/latest/download/scip-clang-x86_64-linux -o /usr/local/bin/scip-clang \
-  && chmod +x /usr/local/bin/scip-clang \
+  && ARCH=$(uname -m) \
+  && if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then \
+       curl -L https://github.com/sourcegraph/scip-clang/releases/latest/download/scip-clang-x86_64-linux -o /usr/local/bin/scip-clang \
+       && chmod +x /usr/local/bin/scip-clang ; \
+     else \
+       echo "scip-clang prebuilt binary unavailable for $ARCH, skipping scip-clang install" ; \
+     fi \
   && rm -rf /var/lib/apt/lists/*
 USER lineagelens
 
