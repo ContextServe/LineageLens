@@ -2,10 +2,12 @@ name: Publish Docker images to GHCR
 
 on:
   push:
-    branches: [main]
-  release:
-    types: [published]   # fires even when another workflow creates the release
+    branches: [main]     # rolling main-* tags
   pull_request:          # build-only, no push — validates the Dockerfile
+  workflow_run:
+    workflows: ["Version Bump"]   # fires after version-bump creates the git tag
+    types: [completed]            # works even though version-bump uses GITHUB_TOKEN
+    branches: [main]
   workflow_dispatch:     # manual trigger / backfill from the GitHub Actions UI
     inputs:
       version:
@@ -46,18 +48,26 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # ── Resolve version ───────────────────────────────────────────────────
-      # Priority: release event tag > git tag push > workflow_dispatch input > empty
-      # NOTE: push: tags does NOT fire when another workflow creates the tag via
-      #       GITHUB_TOKEN (GitHub blocks cascading triggers). release: published
-      #       DOES fire in that case, making it the correct trigger for auto-releases.
+      # Priority: workflow_run (Version Bump just pushed a tag) > workflow_dispatch > empty
+      # NOTE: version-bump.yml uses GITHUB_TOKEN, so push:tags and release:published
+      #       are both blocked from cascading (GitHub cascade prevention). workflow_run
+      #       is the correct trigger — it fires after version-bump completes regardless
+      #       of which token was used, and by then the tag is already in the remote.
       - name: Resolve version
         id: ver
         run: |
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            # Strip the leading "v" from the release tag (e.g. v3.0.1 -> 3.0.1)
-            echo "value=${{ github.event.release.tag_name }}" | sed 's/v//' >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "value=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            # Only proceed if version-bump succeeded
+            if [[ "${{ github.event.workflow_run.conclusion }}" != "success" ]]; then
+              echo "value=" >> $GITHUB_OUTPUT
+              echo "Version Bump workflow did not succeed — skipping versioned tags"
+              exit 0
+            fi
+            # Fetch tags pushed by version-bump (they exist in remote by now)
+            git fetch --tags --quiet
+            LATEST_TAG=$(git tag --sort=-version:refname | grep '^v' | head -1)
+            echo "value=${LATEST_TAG#v}" >> $GITHUB_OUTPUT
+            echo "Resolved version from latest tag: ${LATEST_TAG}"
           elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "value=${{ inputs.version }}" >> $GITHUB_OUTPUT
           else
