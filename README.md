@@ -370,6 +370,66 @@ Build the index
 docker run --rm -v $(pwd):/workspace registry.contextserve.ai/lineagelens/cli:latest lineagelens index
 ```
 
+## Publishing to GHCR
+
+Images are hosted on the GitHub Container Registry at `ghcr.io/<owner>/lineagelens`.
+
+### Automated via GitHub Actions (recommended)
+
+The workflow [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)
+builds all 7 targets in parallel and pushes to GHCR automatically.
+
+**Triggers**
+
+| Event | Behaviour |
+|---|---|
+| Push to `main` | Builds every target, pushes `ghcr.io/…/lineagelens:<target>`. The `monolith` target also gets `:latest`. |
+| Push of a `v*` tag | Same as above **plus** versioned tags, e.g. `:node-1.2.3` and `:node-1.2`. |
+| Pull request | Build only — no push. Validates the Dockerfile without touching the registry. |
+
+**One-time repo setup**
+
+Enable the workflow to publish packages with the built-in `GITHUB_TOKEN` (no
+extra secret required):
+
+> **Settings → Actions → General → Workflow permissions**
+> → select **Read and write permissions** → Save.
+
+Then push to `main` (or create a `v*` tag) and the workflow runs automatically.
+
+**Pulling a published image**
+
+```bash
+docker pull ghcr.io/ContextServe/lineagelens:node
+docker pull ghcr.io/ContextServe/lineagelens:latest   # monolith
+```
+
+---
+
+### Manual push (local machine)
+
+```bash
+# 1. Authenticate (once per machine)
+echo $CR_PAT | docker login ghcr.io -u <your-github-username> --password-stdin
+# CR_PAT = GitHub PAT with write:packages scope
+
+# 2. Build + tag in one step
+TARGET=node   # or java | go | rust | clang | ruby | monolith
+docker build --target $TARGET \
+  -t ghcr.io/<owner>/lineagelens:$TARGET \
+  .
+
+# 3. Push
+docker push ghcr.io/<owner>/lineagelens:$TARGET
+```
+
+Or tag an image that was already built locally:
+
+```bash
+docker tag registry.contextserve.ai/lineagelens/cli:node  ghcr.io/<owner>/lineagelens:node
+docker push ghcr.io/<owner>/lineagelens:node
+```
+
 ## Licence
 
 Apache-2.0
