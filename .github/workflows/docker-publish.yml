@@ -44,23 +44,38 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # ── Resolve version ───────────────────────────────────────────────────
+      # Priority: git tag (strip v prefix) > workflow_dispatch input > empty
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "value=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "value=" >> $GITHUB_OUTPUT
+          fi
+
       # ── Metadata (tags + labels) ──────────────────────────────────────────
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          # On main        : ghcr.io/.../lineagelens:node
-          # On v1.2.3 tag  : ghcr.io/.../lineagelens:node-1.2.3 + node-1.2 + node
-          # Manual dispatch: ghcr.io/.../lineagelens:node-<version> + node-<major.minor>
+          # Trigger        Tags produced
+          # tag push       3.0.0-node, 3.0-node, node, latest (monolith only)
+          # workflow_dispatch  3.0.0-node, node, latest (monolith only)
+          # main push      main-node
+          # pull_request   pr-42-node (build only, not pushed)
           tags: |
             type=ref,event=branch,suffix=-${{ matrix.target }}
+            type=ref,event=pr,suffix=-${{ matrix.target }}
             type=semver,pattern={{version}},suffix=-${{ matrix.target }}
             type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.target }}
-            type=raw,value=${{ matrix.target }},enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
-            type=raw,value=latest,enable=${{ matrix.target == 'monolith' && github.ref == format('refs/heads/{0}', 'main') }}
-            type=raw,value=${{ inputs.version }}-${{ matrix.target }},enable=${{ github.event_name == 'workflow_dispatch' }}
-            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && matrix.target == 'monolith' }}
+            type=raw,value=${{ matrix.target }},enable=${{ steps.ver.outputs.value != '' }}
+            type=raw,value=${{ steps.ver.outputs.value }}-${{ matrix.target }},enable=${{ steps.ver.outputs.value != '' }}
+            type=raw,value=latest,enable=${{ steps.ver.outputs.value != '' && matrix.target == 'monolith' }}
 
       # ── Build ─────────────────────────────────────────────────────────────
       - name: Set up Docker Buildx
