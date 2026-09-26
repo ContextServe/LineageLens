@@ -115,4 +115,4 @@ jobs:
           outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || '' }}
           # Layer cache: reuse previous builds to speed up CI
           cache-from: type=gha,scope=${{ matrix.target }}
-          cache-to:   type=gha,scope=${{ matrix.target }},mode=max
+          cache-to:   ${{ github.event_name == 'push' && format('type=gha,scope={0},mode=max', matrix.target) || '' }}
