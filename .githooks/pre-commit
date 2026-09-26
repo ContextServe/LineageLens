@@ -28,7 +28,7 @@ $PYTEST -q
 # read a contract that no longer describes the code -- the schema-3 ontology
 # failure in a different file format. Regenerating must produce no diff.
 echo "3/3 capability matrix is current"
-$PYTHON -m lineagelens.conformance.runner >/dev/null
+$PYTHON -c "import sys; from lineagelens.conformance.runner import main; sys.exit(main())" >/dev/null
 git diff --exit-code src/lineagelens/conformance/matrix.json
 
 echo "pre-commit OK"

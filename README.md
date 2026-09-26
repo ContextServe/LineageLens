@@ -340,6 +340,96 @@ index at Tier A and the coverage envelope says so on every query. Use
   sent, and how to switch it off
 - Design rationale and measured baselines: issue #51
 
+
+
+
+## Dockerfile build
+
+Refactored the root Dockerfile to use the Multi-Stage Build Target architecture. 
+This allowed us to define a shared base layer and then branch off into 8 
+isolated environments (node, java, go, ruby, rust, clang, and the monolith)
+within a single, highly maintainable file.
+
+To build the Node variant, for example, your CI pipeline just runs:
+
+```bash
+docker build --target node -t registry.contextserve.ai/lineagelens/cli:node .
+```
+
+To build the massive all-in-one image:
+
+```bash
+docker build --target monolith -t registry.contextserve.ai/lineagelens/cli:latest .
+```
+
+All stages have been optimized to clean their APT caches to keep the image sizes as small as possible!
+
+Build the index
+
+```
+docker run --rm -v $(pwd):/workspace registry.contextserve.ai/lineagelens/cli:latest lineagelens index
+```
+
+## Publishing to GHCR
+
+Images are hosted on the GitHub Container Registry at `ghcr.io/<owner>/lineagelens`.
+
+### Automated via GitHub Actions (recommended)
+
+The workflow [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)
+builds all 7 targets in parallel and pushes to GHCR automatically.
+
+**Triggers**
+
+| Event | Behaviour |
+|---|---|
+| Push to `main` | Builds every target, pushes `ghcr.io/…/lineagelens:<target>`. The `monolith` target also gets `:latest`. |
+| Push of a `v*` tag | Same as above **plus** versioned tags, e.g. `:node-1.2.3` and `:node-1.2`. |
+| Pull request | Build only — no push. Validates the Dockerfile without touching the registry. |
+
+**One-time repo setup**
+
+Enable the workflow to publish packages with the built-in `GITHUB_TOKEN` (no
+extra secret required):
+
+> **Settings → Actions → General → Workflow permissions**
+> → select **Read and write permissions** → Save.
+
+Then push to `main` (or create a `v*` tag) and the workflow runs automatically.
+
+**Pulling a published image**
+
+```bash
+docker pull ghcr.io/ContextServe/lineagelens:node
+docker pull ghcr.io/ContextServe/lineagelens:latest   # monolith
+```
+
+---
+
+### Manual push (local machine)
+
+```bash
+# 1. Authenticate (once per machine)
+echo $CR_PAT | docker login ghcr.io -u <your-github-username> --password-stdin
+# CR_PAT = GitHub PAT with write:packages scope
+
+# 2. Build + tag in one step
+TARGET=node   # or java | go | rust | clang | ruby | monolith
+docker build --target $TARGET \
+  -t ghcr.io/<owner>/lineagelens:$TARGET \
+  .
+
+# 3. Push
+docker push ghcr.io/<owner>/lineagelens:$TARGET
+```
+
+Or tag an image that was already built locally:
+
+```bash
+docker tag registry.contextserve.ai/lineagelens/cli:node  ghcr.io/<owner>/lineagelens:node
+docker push ghcr.io/<owner>/lineagelens:node
+```
+
 ## Licence
 
 Apache-2.0

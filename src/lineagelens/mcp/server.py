@@ -47,9 +47,71 @@ logger = logging.getLogger(__name__)
 #: config; falls back to the working directory.
 PROJECT_ENV = "LINEAGELENS_PROJECT"
 
+# Strong references to background tasks to prevent premature garbage collection.
+_background_tasks = set()
+
 
 def _project_root() -> Path:
     return Path(os.environ.get(PROJECT_ENV, ".")).resolve()
+
+def _get_git_info() -> tuple[str | None, str | None]:
+    import subprocess
+    branch, commit_sha = None, None
+    try:
+        branch = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL, text=True).strip()
+        commit_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True).strip()
+    except Exception:
+        pass
+    return branch, commit_sha
+
+
+async def _send_telemetry(tool_name: str, raw_tokens: int, optimized_tokens: int) -> None:
+    """Emit telemetry payload in the background."""
+    import os
+    
+    token = os.environ.get("CONTEXTSERVE_API_KEY")
+    base_url = "https://contextserve.ai"
+    
+    if not token:
+        from ..credentials import CredentialsStore
+        store = CredentialsStore()
+        active_env = store.active_env
+        creds = store.get(active_env)
+        if not creds:
+            return
+            
+        token = creds.get("access_token")
+        base_url = creds.get("base_url") or "https://contextserve.ai"
+        
+    if not token:
+        return
+        
+    try:
+        import httpx
+        repo_name = _project_root().name
+        branch, commit_sha = _get_git_info()
+        payload = {
+            "query_type": f"mcp_{tool_name}",
+            "raw_tokens": raw_tokens,
+            "optimized_tokens": optimized_tokens,
+            "repo_name": repo_name,
+            "branch": branch,
+            "commit_sha": commit_sha,
+            "model_name": "gpt-4o",
+        }
+        if token.startswith("ll_live_"):
+            headers = {"X-API-Key": token}
+        else:
+            headers = {"X-Auth-Token": f"Bearer {token}"}
+            
+        async with httpx.AsyncClient(base_url=base_url, timeout=5.0) as client:
+            await client.post(
+                "/api/v1/telemetry/tokens",
+                json=payload,
+                headers=headers
+            )
+    except Exception as e:
+        logger.debug("Telemetry emission failed: %s", e)
 
 
 class EngineHandle:
@@ -108,9 +170,22 @@ def create_server(root: Path | None = None) -> Any:
     """Build the MCP server for one project."""
     from mcp.server.mcpserver import MCPServer
 
+    from .. import telemetry
+
     project = (root or _project_root()).resolve()
     handle = EngineHandle(project)
     server = MCPServer("lineagelens", instructions=ontology_instructions(project))
+
+    from ..credentials import CredentialsStore
+    store = CredentialsStore()
+    if store.is_token_valid(store.active_env):
+        from ..provenance import resolve as resolve_provenance
+        prov = resolve_provenance(project)
+        telemetry.meter().attribution = {
+            "repo_name": project.name,
+            "branch": prov.branch,
+            "commit_sha": prov.commit_sha,
+        }
 
     def engine() -> QueryEngine:
         return handle.get()

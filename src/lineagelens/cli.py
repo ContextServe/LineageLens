@@ -56,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_telemetry(commands)
     _add_auth(commands)
 
+
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
@@ -982,8 +983,8 @@ def _add_auth(commands: Any) -> None:
     auth_sub = auth_cmd.add_subparsers(dest="auth_command", required=True)
 
     login_p = auth_sub.add_parser("login", help="Log in via browser + one-time code")
-    login_p.add_argument("--env", "-e", default="prod", choices=_envs,
-                         help="Target environment (default: prod → contextserve.ai)")
+    login_p.add_argument("--env", "-e", default=None, choices=_envs,
+                         help="Target environment (defaults to active environment)")
     login_p.add_argument("--no-browser", action="store_true",
                          help="Print URL instead of opening browser (useful over SSH)")
     login_p.add_argument("--reauth", action="store_true",
@@ -992,14 +993,14 @@ def _add_auth(commands: Any) -> None:
                          help="Seconds to wait for browser login (default: 300)")
 
     logout_p = auth_sub.add_parser("logout", help="Revoke and remove stored credentials")
-    logout_p.add_argument("--env", "-e", default="prod", choices=_envs)
+    logout_p.add_argument("--env", "-e", default=None, choices=_envs)
     logout_p.add_argument("--all", action="store_true",
                           help="Log out of all environments")
 
     auth_sub.add_parser("status", help="Show authentication status for all environments")
 
     token_p = auth_sub.add_parser("token", help="Print raw bearer token to stdout")
-    token_p.add_argument("--env", "-e", default="prod", choices=_envs)
+    token_p.add_argument("--env", "-e", default=None, choices=_envs)
 
     switch_p = auth_sub.add_parser("switch-env", help="Change active environment")
     switch_p.add_argument("env", choices=_envs)
@@ -1023,7 +1024,7 @@ def _run_auth(args: Any) -> int:
 
     # ── login ─────────────────────────────────────────────────────────────────
     if sub == "login":
-        env = args.env
+        env = args.env or store.active_env
 
         if not args.reauth and store.is_token_valid(env):
             creds = store.get(env)
@@ -1059,13 +1060,17 @@ def _run_auth(args: Any) -> int:
                 with httpx.Client(base_url=base_url, timeout=10) as client:
                     me = client.get(
                         "/api/v1/auth/me",
-                        headers={"Authorization": f"Bearer {token_resp['access_token']}"},
+                        headers={"X-Auth-Token": f"Bearer {token_resp['access_token']}"},
                     )
                     if me.is_success:
                         email = me.json().get("email", "")
                         store.save(env, token_resp, base_url, email=email)
-            except Exception:
-                pass
+                    else:
+                        import sys
+                        print(f"  \u26a0\ufe0f Could not fetch user profile: HTTP {me.status_code} - {me.text}", file=sys.stderr)
+            except Exception as e:
+                import sys
+                print(f"  \u26a0\ufe0f Could not fetch user profile (Network Error): {e}", file=sys.stderr)
 
         print()
         print(f"  \u2713 Logged in as {email or '(unknown)'}")
@@ -1086,7 +1091,7 @@ def _run_auth(args: Any) -> int:
             store.remove_all()
             print("  \u2713 Logged out of all environments.")
         else:
-            env = args.env
+            env = args.env or store.active_env
             removed = store.remove(env)
             if removed:
                 print(f"  \u2713 Logged out of '{env}'.")
@@ -1125,7 +1130,7 @@ def _run_auth(args: Any) -> int:
 
     # ── token ─────────────────────────────────────────────────────────────────
     elif sub == "token":
-        env = args.env
+        env = args.env or store.active_env
         creds = store.get(env)
         if not creds or not creds.get("access_token"):
             raise SystemExit(

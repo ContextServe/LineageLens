@@ -43,6 +43,8 @@ jobs:
       # file: language is detected per file and services come from build
       # manifests.
       - name: Index
+        env:
+          LINEAGELENS_TOKEN: ${{ secrets.LINEAGELENS_TOKEN }}
         run: lineagelens index .
 
       # The invariant that matters most (§16.1). Foreign keys make a dangling
@@ -50,12 +52,16 @@ jobs:
       # returning -- but this is the defect that made the schema-3 Dubbo graph
       # 100% non-traversable while reporting success, so CI checks it too.
       - name: Coverage report
+        env:
+          LINEAGELENS_TOKEN: ${{ secrets.LINEAGELENS_TOKEN }}
         run: lineagelens coverage .
 
       # Same commit must produce the same graph. Catches order dependence and
       # any wall-clock or RNG value leaking into a stored row, which is the
       # class of bug that hides best (§11).
       - name: Determinism
+        env:
+          LINEAGELENS_TOKEN: ${{ secrets.LINEAGELENS_TOKEN }}
         run: lineagelens verify .
 
   conformance:
@@ -78,3 +84,27 @@ jobs:
         run: |
           python -m lineagelens.conformance.runner
           git diff --exit-code src/lineagelens/conformance/matrix.json
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Monolith Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          target: monolith
+          load: true
+          push: false
+          tags: lineagelens-cli:ci
+
+      - name: Test Docker Container Indexing
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v ${{ github.workspace }}:/workspace \
+            lineagelens-cli:ci lineagelens index .
