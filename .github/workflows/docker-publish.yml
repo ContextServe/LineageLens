@@ -7,7 +7,10 @@ on:
   workflow_run:
     workflows: ["Version Bump"]   # fires after version-bump creates the git tag
     types: [completed]            # works even though version-bump uses GITHUB_TOKEN
-    branches: [main]
+    # NOTE: no 'branches' filter here — for pull_request-triggered workflows,
+    # GitHub evaluates the filter against the PR HEAD branch (e.g. feature/*),
+    # not the base branch (main). Omitting it lets the trigger fire correctly.
+    # version-bump.yml already guards itself with its own branches: [main] filter.
   workflow_dispatch:     # manual trigger / backfill from the GitHub Actions UI
     inputs:
       version:
