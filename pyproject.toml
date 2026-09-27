@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lineagelens"
-version = "3.0.5"
+version = "3.0.6"
 description = "Deterministic multi-language code graph: control flow, data flow and cross-service contracts, for humans and coding agents."
 readme = "README.md"
 requires-python = ">=3.10"
