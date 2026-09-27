@@ -81,7 +81,12 @@ USER lineagelens
 # ==========================================
 FROM base AS ruby
 RUN apt-get update && apt-get install -y --no-install-recommends ruby-full build-essential \
-  && gem install scip-ruby \
+  && ARCH=$(uname -m) \
+  && if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then \
+       gem install scip-ruby ; \
+     else \
+       echo "scip-ruby prebuilt gem unavailable for $ARCH-linux, skipping scip-ruby install" ; \
+     fi \
   && rm -rf /var/lib/apt/lists/*
 USER lineagelens
 
@@ -151,8 +156,13 @@ RUN ARCH=$(uname -m) \
   && mv /root/go/bin/scip-go /usr/local/bin/ \
   && rm -rf /root/go
 
-# 6. Ruby SCIP
-RUN gem install scip-ruby
+# 6. Ruby SCIP (prebuilt gem available on x86_64-linux)
+RUN ARCH=$(uname -m) \
+  && if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then \
+       gem install scip-ruby ; \
+     else \
+       echo "scip-ruby prebuilt gem unavailable for $ARCH-linux, skipping scip-ruby install" ; \
+     fi
 
 # 7. Rust & Analyzer
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
