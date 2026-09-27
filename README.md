@@ -13,7 +13,14 @@ and the honest statement of what it could not determine.
 pip install lineagelens
 lineagelens index .
 lineagelens query . impact src/orders/service.py:412
+
+# Or run with Docker (zero install, zero host toolchain pollution):
+docker run --rm -v $(pwd):/workspace -w /workspace ghcr.io/contextserve/lineagelens:latest lineagelens index .
+docker run --rm -v $(pwd):/workspace -w /workspace ghcr.io/contextserve/lineagelens:latest lineagelens query . impact src/orders/service.py:412
 ```
+
+> **100% Local & Offline**: LineageLens requires no account, no login, and no API key. All indexing, call graph generation, and MCP queries run entirely inside your local machine in SQLite (`.lineagelens/graph.db`). Zero telemetry by default.
+
 
 ## What it answers
 
@@ -367,7 +374,7 @@ All stages have been optimized to clean their APT caches to keep the image sizes
 Build the index
 
 ```
-docker run --rm -v $(pwd):/workspace registry.contextserve.ai/lineagelens/cli:latest lineagelens index
+docker run --rm -v $(pwd):/workspace ghcr.io/contextserve/lineagelens:latest lineagelens index
 ```
 
 ## Publishing to GHCR

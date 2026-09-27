@@ -1126,6 +1126,7 @@ def _run_auth(args: Any) -> int:
 
         print()
         print(f"  Active environment: {active}")
+        print("  • Note: Authentication is optional. Local indexing, CLI queries, and MCP work 100% offline without an account.")
         print()
 
     # ── token ─────────────────────────────────────────────────────────────────
