@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "lineagelens": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "lineagelens",
+        "lineagelens",
+        "mcp",
+        "/workspace"
+      ]
+    }
+  }
+}
