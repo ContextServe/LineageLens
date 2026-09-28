@@ -9,13 +9,17 @@ of divergence has nowhere to live.
 from __future__ import annotations
 
 from .db import DB_FILENAME, GraphNotFound, GraphStore, SchemaMismatch
+from .metrics_store import METRICS_DB_FILENAME, MetricRecord, MetricsStore
 from .schema import RECURSION_LIMIT, SCHEMA_DDL
 
 __all__ = [
     "DB_FILENAME",
+    "METRICS_DB_FILENAME",
     "RECURSION_LIMIT",
     "SCHEMA_DDL",
     "GraphNotFound",
     "GraphStore",
+    "MetricRecord",
+    "MetricsStore",
     "SchemaMismatch",
 ]

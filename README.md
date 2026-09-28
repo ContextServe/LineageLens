@@ -207,8 +207,22 @@ lineagelens verify [path]     rebuild twice, confirm identical
 lineagelens ontology [path]   measured capability for this installation
 lineagelens mcp [path]        run the MCP server over stdio
 lineagelens serve [path]      HTTP surface for the dashboard (loopback default)
+lineagelens report [path]     local SQLite token savings & MCP ROI reporter
 lineagelens telemetry ...      enable, disable, status -- off until you enable it
 lineagelens auth ...          login, logout, status, token, switch-env
+```
+
+## Local Token Savings & MCP Metrics
+
+Every MCP tool invocation computes the ground-truth counterfactual baseline (source tokens an LLM would have read without LineageLens) versus the optimized response payload, saving the metrics locally to `.lineagelens/metrics.sqlite`:
+
+```bash
+lineagelens report                  # View net tokens saved, context reduction %, and ROI
+lineagelens report --by-tool        # Tool-by-tool breakdown
+lineagelens report --period 7d      # Filter by time window (today, 7d, 30d, all)
+lineagelens report --model o1       # Price against target LLMs (gpt-4o, claude-3-5-sonnet, deepseek-r1, o1, o3-mini)
+lineagelens report --sync           # Sync metrics to ContextServe.ai dashboard
+lineagelens report --json           # Machine-readable JSON output
 ```
 
 ## Telemetry
