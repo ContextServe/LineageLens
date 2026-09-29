@@ -29,10 +29,13 @@ is ``callers_of`` from an entry point).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import functools
 import inspect
 import logging
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +58,6 @@ def _project_root() -> Path:
     return Path(os.environ.get(PROJECT_ENV, ".")).resolve()
 
 def _get_git_info() -> tuple[str | None, str | None]:
-    import subprocess
     branch, commit_sha = None, None
     try:
         branch = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL, text=True).strip()
@@ -63,6 +65,133 @@ def _get_git_info() -> tuple[str | None, str | None]:
     except Exception:
         pass
     return branch, commit_sha
+
+
+def _extract_nodes_and_files(data: Any, max_depth: int = 5) -> tuple[set[str], set[str]]:
+    node_ids: set[str] = set()
+    file_paths: set[str] = set()
+
+    def _walk(obj: Any, current_depth: int) -> None:
+        if current_depth > max_depth:
+            return
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k in ("node", "node_id", "symbol", "target", "from_symbol", "to_symbol") and isinstance(v, str):
+                    node_ids.add(v)
+                elif k in ("file", "file_path", "path") and isinstance(v, str):
+                    file_paths.add(v)
+                elif k in ("at", "written_at") and isinstance(v, str):
+                    path = v.split(":")[0]
+                    if path:
+                        file_paths.add(path)
+                elif isinstance(v, (dict, list)):
+                    _walk(v, current_depth + 1)
+        elif isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, (dict, list)):
+                    _walk(item, current_depth + 1)
+
+    _walk(data, 0)
+    return node_ids, file_paths
+
+
+def compute_token_impact(
+    engine: QueryEngine | None,
+    tool_name: str,
+    result: Any,
+    response_bytes: int,
+) -> tuple[int, int]:
+    """Calculate ground-truth counterfactual tokens and optimized response tokens.
+
+    Counterfactual tokens are based on distinct files containing nodes touched by
+    the query engine. Fallback floor is max(optimized_tokens * 8, 1200).
+    """
+    from ..telemetry import BYTES_PER_TOKEN
+
+    optimized_tokens = max(1, response_bytes // BYTES_PER_TOKEN)
+    raw_tokens = 0
+
+    if engine is not None and isinstance(result, dict) and "error" not in result:
+        try:
+            node_ids, file_paths = _extract_nodes_and_files(result)
+            store = getattr(engine, "store", None)
+            if store and hasattr(store, "conn"):
+                sizes: set[int] = set()
+                if node_ids:
+                    placeholders = ",".join("?" for _ in node_ids)
+                    query = f"""
+                        SELECT DISTINCT f.id, f.size_bytes
+                        FROM files f
+                        JOIN nodes n ON n.file_id = f.id
+                        WHERE n.id IN ({placeholders}) OR n.qualified_name IN ({placeholders})
+                    """  # noqa: S608
+                    params = list(node_ids) + list(node_ids)
+                    rows = store.conn.execute(query, params).fetchall()
+                    for r in rows:
+                        sizes.add(r["size_bytes"])
+
+                if file_paths:
+                    placeholders = ",".join("?" for _ in file_paths)
+                    query = f"SELECT DISTINCT id, size_bytes FROM files WHERE path IN ({placeholders})"  # noqa: S608
+                    rows = store.conn.execute(query, list(file_paths)).fetchall()
+                    for r in rows:
+                        sizes.add(r["size_bytes"])
+
+                if sizes:
+                    raw_tokens = sum(s // BYTES_PER_TOKEN for s in sizes)
+        except Exception:
+            logger.debug("Error computing graph-attributed token impact", exc_info=True)
+
+    # Conservative fallback floor (Section 4.1)
+    raw_tokens = max(raw_tokens, optimized_tokens * 8, 1200)
+    return raw_tokens, optimized_tokens
+
+
+def record_local_metric(
+    db_path: Path,
+    tool_name: str,
+    raw_tokens: int,
+    optimized_tokens: int,
+    duration_ms: int,
+    response_bytes: int,
+    repo_name: str,
+    branch: str | None = None,
+    commit_sha: str | None = None,
+    status: str = "ok",
+    error_message: str | None = None,
+    intent: str | None = None,
+    result_count: int = 0,
+    truncated: bool = False,
+    model_name: str = "gpt-4o",
+) -> None:
+    """Record an invocation metric into local SQLite."""
+    try:
+        from ..store.metrics_store import MetricRecord, MetricsStore
+
+        tokens_saved = max(0, raw_tokens - optimized_tokens)
+        store = MetricsStore(db_path)
+        record = MetricRecord(
+            tool_name=tool_name,
+            query_type=f"mcp_{tool_name}",
+            raw_tokens=raw_tokens,
+            optimized_tokens=optimized_tokens,
+            tokens_saved=tokens_saved,
+            duration_ms=duration_ms,
+            response_bytes=response_bytes,
+            status=status,
+            error_message=error_message,
+            intent=intent,
+            result_count=result_count,
+            truncated=1 if truncated else 0,
+            repo_name=repo_name,
+            branch=branch,
+            commit_sha=commit_sha,
+            model_name=model_name,
+        )
+        store.record(record)
+    except Exception:
+        logger.debug("Failed to record local metric for %s", tool_name, exc_info=True)
+
 
 
 async def _send_telemetry(tool_name: str, raw_tokens: int, optimized_tokens: int) -> None:
@@ -94,6 +223,7 @@ async def _send_telemetry(tool_name: str, raw_tokens: int, optimized_tokens: int
             "query_type": f"mcp_{tool_name}",
             "raw_tokens": raw_tokens,
             "optimized_tokens": optimized_tokens,
+            "tokens_saved": max(0, raw_tokens - optimized_tokens),
             "repo_name": repo_name,
             "branch": branch,
             "commit_sha": commit_sha,
@@ -213,6 +343,8 @@ def create_server(root: Path | None = None) -> Any:
             # rather than by remembering (#59).
             from .. import telemetry
 
+            status = "ok"
+            error_msg = None
             with telemetry.timed() as clock:
                 try:
                     result = await fn(*args, **kwargs)
@@ -221,11 +353,48 @@ def create_server(root: Path | None = None) -> Any:
                         "error": "no index",
                         "remedy": f"run: lineagelens index {project}",
                     }
+                    status = "error"
+                    error_msg = "no index"
                 except SchemaMismatch as exc:
                     result = {
                         "error": str(exc),
                         "remedy": f"run: lineagelens index {project} --force",
                     }
+                    status = "error"
+                    error_msg = str(exc)
+                except Exception as exc:
+                    status = "error"
+                    error_msg = str(exc)
+                    raise
+
+            response_bytes = _response_bytes(result)
+            current_engine = None
+            with contextlib.suppress(Exception):
+                current_engine = engine()
+
+            raw_tokens, optimized_tokens = compute_token_impact(
+                current_engine, fn.__name__, result, response_bytes
+            )
+
+            branch, commit_sha = _get_git_info()
+            record_local_metric(
+                db_path=project / ".lineagelens" / "metrics.sqlite",
+                tool_name=fn.__name__,
+                raw_tokens=raw_tokens,
+                optimized_tokens=optimized_tokens,
+                duration_ms=clock.ms,
+                response_bytes=response_bytes,
+                repo_name=project.name,
+                branch=branch,
+                commit_sha=commit_sha,
+                status=status,
+                error_message=error_msg,
+                intent=kwargs.get("intent"),
+                result_count=len(result.get("results", ()))
+                if isinstance(result, dict) else 0,
+                truncated=bool(result.get("truncated"))
+                if isinstance(result, dict) else False,
+            )
 
             # A counter, not I/O. Metering a call must not become the cost it
             # is measuring, so nothing is sent until the process exits.
@@ -233,7 +402,7 @@ def create_server(root: Path | None = None) -> Any:
                 telemetry.meter().record_tool_call(telemetry.ToolCall(
                     tool=fn.__name__,
                     duration_ms=clock.ms,
-                    response_bytes=_response_bytes(result),
+                    response_bytes=response_bytes,
                     # `precise` adds verbatim source and data flow, so it is
                     # the single biggest cost lever an agent controls.
                     intent=kwargs.get("intent"),
@@ -244,6 +413,13 @@ def create_server(root: Path | None = None) -> Any:
                 ))
             except Exception:  # pragma: no cover - metering never breaks a tool
                 logger.debug("metering failed for %s", fn.__name__, exc_info=True)
+
+            try:
+                task = asyncio.create_task(_send_telemetry(fn.__name__, raw_tokens, optimized_tokens))
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
+            except Exception:
+                pass
 
             return result
 

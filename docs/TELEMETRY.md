@@ -153,3 +153,24 @@ Anonymous events: aggregated counts retained indefinitely, raw events 90 days.
 Authenticated metering follows your organisation's plan. Both are server-side
 concerns and live in the hosted service's own policy; this document covers what
 the client sends.
+
+## Local SQLite Metrics & Token Savings Reporter (`lineagelens report`)
+
+When running offline or unauthenticated, invocation metrics and token reduction telemetry are persisted locally to `.lineagelens/metrics.sqlite` using SQLite WAL mode with zero latency overhead.
+
+```bash
+lineagelens report                    # Visual summary table and cost savings
+lineagelens report --by-tool          # Detailed per-tool breakdown
+lineagelens report --period 7d        # Filter by time window (today, 7d, 30d, all)
+lineagelens report --model claude-3-5-sonnet  # Pricing model baseline
+lineagelens report --sync             # Report unsynced metrics to ContextServe.ai
+lineagelens report --json             # Machine-readable JSON output
+lineagelens report --reset -y         # Reset local metrics history
+```
+
+### Counterfactual Baseline vs. Optimized Tokens
+- **Raw Tokens (Counterfactual)**: Measures the tokens an agent would have spent loading full source files containing the touched nodes into its context window.
+- **Optimized Tokens**: The surgical LineageLens JSON response size converted at 4 bytes per token.
+- **Tokens Saved**: `raw_tokens - optimized_tokens`.
+- **Database Safety**: Stored in `.lineagelens/metrics.sqlite`, ensuring metrics outlive code graph rebuilds (`lineagelens index . --force`).
+

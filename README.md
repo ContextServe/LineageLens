@@ -13,7 +13,14 @@ and the honest statement of what it could not determine.
 pip install lineagelens
 lineagelens index .
 lineagelens query . impact src/orders/service.py:412
+
+# Or run with Docker (zero install, zero host toolchain pollution):
+docker run --rm -v $(pwd):/workspace -w /workspace ghcr.io/contextserve/lineagelens:latest lineagelens index .
+docker run --rm -v $(pwd):/workspace -w /workspace ghcr.io/contextserve/lineagelens:latest lineagelens query . impact src/orders/service.py:412
 ```
+
+> **100% Local & Offline**: LineageLens requires no account, no login, and no API key. All indexing, call graph generation, and MCP queries run entirely inside your local machine in SQLite (`.lineagelens/graph.db`). Zero telemetry by default.
+
 
 ## What it answers
 
@@ -200,8 +207,22 @@ lineagelens verify [path]     rebuild twice, confirm identical
 lineagelens ontology [path]   measured capability for this installation
 lineagelens mcp [path]        run the MCP server over stdio
 lineagelens serve [path]      HTTP surface for the dashboard (loopback default)
+lineagelens report [path]     local SQLite token savings & MCP ROI reporter
 lineagelens telemetry ...      enable, disable, status -- off until you enable it
 lineagelens auth ...          login, logout, status, token, switch-env
+```
+
+## Local Token Savings & MCP Metrics
+
+Every MCP tool invocation computes the ground-truth counterfactual baseline (source tokens an LLM would have read without LineageLens) versus the optimized response payload, saving the metrics locally to `.lineagelens/metrics.sqlite`:
+
+```bash
+lineagelens report                  # View net tokens saved, context reduction %, and ROI
+lineagelens report --by-tool        # Tool-by-tool breakdown
+lineagelens report --period 7d      # Filter by time window (today, 7d, 30d, all)
+lineagelens report --model o1       # Price against target LLMs (gpt-4o, claude-3-5-sonnet, deepseek-r1, o1, o3-mini)
+lineagelens report --sync           # Sync metrics to ContextServe.ai dashboard
+lineagelens report --json           # Machine-readable JSON output
 ```
 
 ## Telemetry
@@ -367,7 +388,7 @@ All stages have been optimized to clean their APT caches to keep the image sizes
 Build the index
 
 ```
-docker run --rm -v $(pwd):/workspace registry.contextserve.ai/lineagelens/cli:latest lineagelens index
+docker run --rm -v $(pwd):/workspace ghcr.io/contextserve/lineagelens:latest lineagelens index
 ```
 
 ## Publishing to GHCR

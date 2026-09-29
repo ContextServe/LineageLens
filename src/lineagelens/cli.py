@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_serve(commands)
     _add_telemetry(commands)
     _add_auth(commands)
-
+    _add_report(commands)
 
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -1126,6 +1126,7 @@ def _run_auth(args: Any) -> int:
 
         print()
         print(f"  Active environment: {active}")
+        print("  • Note: Authentication is optional. Local indexing, CLI queries, and MCP work 100% offline without an account.")
         print()
 
     # ── token ─────────────────────────────────────────────────────────────────
@@ -1154,6 +1155,53 @@ def _run_auth(args: Any) -> int:
                   f"Run: lineagelens auth login --env {env}")
 
     return 0
+
+
+# ---------------------------------------------------------------------------
+# report
+# ---------------------------------------------------------------------------
+
+def _add_report(commands: Any) -> None:
+    p = commands.add_parser(
+        "report",
+        help="Report MCP tool token savings, usage metrics, and ContextServe ROI",
+    )
+    p.add_argument("path", nargs="?", default=".", type=Path,
+                   help="Path to project root (default: .)")
+    p.add_argument("--period", choices=["today", "7d", "30d", "all"], default="all",
+                   help="Time window filter (default: all)")
+    p.add_argument("--by-tool", action="store_true",
+                   help="Display breakdown table for each individual MCP tool")
+    p.add_argument("--sync", action="store_true",
+                   help="Upload unsynced local metrics to ContextServe.ai")
+    p.add_argument("--endpoint", default=None,
+                   help="Override ContextServe.ai API endpoint")
+    p.add_argument("--json", action="store_true", dest="json_output",
+                   help="Output machine-readable JSON")
+    p.add_argument("--model", default="gpt-4o",
+                   choices=["gpt-4o", "claude-3-5-sonnet", "deepseek-r1", "o1", "o3-mini"],
+                   help="Pricing model baseline (default: gpt-4o)")
+    p.add_argument("--reset", action="store_true",
+                   help="Wipe local metrics history")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="Confirm reset without prompting")
+    p.set_defaults(handler=_run_report)
+
+
+def _run_report(args: Any) -> int:
+    from .report import run_report
+
+    return run_report(
+        project_root=args.path,
+        period=args.period,
+        by_tool=args.by_tool,
+        sync=args.sync,
+        endpoint=args.endpoint,
+        json_output=args.json_output,
+        model=args.model,
+        reset=args.reset,
+        yes=args.yes,
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
