@@ -56,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_telemetry(commands)
     _add_auth(commands)
     _add_report(commands)
+    _add_gateway(commands)
 
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -1202,6 +1203,173 @@ def _run_report(args: Any) -> int:
         reset=args.reset,
         yes=args.yes,
     )
+
+
+# ---------------------------------------------------------------------------
+# gateway
+# ---------------------------------------------------------------------------
+
+def _add_gateway(commands: Any) -> None:
+    p = commands.add_parser(
+        "gateway",
+        help="ContextServe Hybrid Token Gateway & Laya Decision Engine",
+    )
+    sub = p.add_subparsers(dest="gateway_action", required=True)
+
+    # status
+    status_p = sub.add_parser("status", help="Show Gateway, Laya engine, and ledger status")
+    status_p.add_argument("--url", default=None, help="Gateway URL (default: $CONTEXTSERVE_GATEWAY_URL or http://localhost:4000)")
+    status_p.add_argument("--json", action="store_true", dest="json_output", help="Output JSON")
+    status_p.set_defaults(handler=_run_gateway_status)
+
+    # test
+    test_p = sub.add_parser("test", help="Test fast System 1 decision latency")
+    test_p.add_argument("--prompt", default="Is the user service handler relevant to auth?", help="Prompt text")
+    test_p.add_argument("--url", default=None, help="Gateway URL")
+    test_p.set_defaults(handler=_run_gateway_test)
+
+    # keys
+    keys_p = sub.add_parser("keys", help="Manage virtual API keys and budgets")
+    keys_p.add_argument("--create", metavar="NAME", help="Create a new virtual key with name")
+    keys_p.add_argument("--tenant", default="org_default", help="Tenant ID (default: org_default)")
+    keys_p.add_argument("--budget", type=float, default=None, help="Hard budget ceiling in USD")
+    keys_p.add_argument("--list", action="store_true", help="List all virtual keys")
+    keys_p.add_argument("--db", default=None, help="Path to ledger.sqlite")
+    keys_p.add_argument("--json", action="store_true", dest="json_output", help="Output JSON")
+    keys_p.set_defaults(handler=_run_gateway_keys)
+
+    # report
+    report_p = sub.add_parser("report", help="Report System 1 vs System 2 tokens, requests, and costs")
+    report_p.add_argument("--tenant", default=None, help="Filter by tenant ID")
+    report_p.add_argument("--db", default=None, help="Path to ledger.sqlite")
+    report_p.add_argument("--json", action="store_true", dest="json_output", help="Output JSON")
+    report_p.set_defaults(handler=_run_gateway_report)
+
+
+def _run_gateway_status(args: Any) -> int:
+    import json
+
+    from .gateway import GatewayClient
+
+    client = GatewayClient(gateway_url=args.url)
+    health = client.check_health()
+    if getattr(args, "json_output", False):
+        print(json.dumps(health, indent=2))
+        return 0
+
+    print("=" * 60)
+    print(" ContextServe Hybrid AI Token Gateway (LiteLLM + Laya)")
+    print("=" * 60)
+    print(f"  Gateway Endpoint : {health.get('endpoint')}")
+    print(f"  Connection Status: {health.get('status').upper()}")
+    if health.get("status") == "connected":
+        print("  System 1 (Laya)  : \u2713 ONLINE (< 20ms decision engine)")
+        print("  System 2 (Proxy) : \u2713 READY (Frontier LLMs routed)")
+    else:
+        print("  System 1 Fallback: \u2713 ACTIVE (Local compiler heuristics)")
+    print("=" * 60)
+    return 0
+
+
+def _run_gateway_test(args: Any) -> int:
+    import time
+
+    from .gateway import GatewayClient
+
+    client = GatewayClient(gateway_url=args.url)
+    prompt = args.prompt
+    print(f"Evaluating prompt: '{prompt}'")
+    t0 = time.perf_counter()
+    decision = client.fast_decision(prompt)
+    t_decision = (time.perf_counter() - t0) * 1000.0
+
+    t0 = time.perf_counter()
+    score = client.relevance_score(prompt)
+    t_score = (time.perf_counter() - t0) * 1000.0
+
+    print(f"  \u2713 Decision  : {decision} ({t_decision:.2f}ms)")
+    print(f"  \u2713 Relevance : {score} ({t_score:.2f}ms)")
+    return 0
+
+
+def _run_gateway_keys(args: Any) -> int:
+    import json
+    from pathlib import Path
+
+    from .gateway import LedgerDB
+
+    db_path = args.db or Path(".lineagelens/ledger.sqlite")
+    ledger = LedgerDB(db_path)
+
+    if args.create:
+        tenant = ledger.get_tenant(args.tenant)
+        if not tenant:
+            ledger.create_tenant(args.tenant, name=args.tenant, initial_balance_usd=50.0)
+        vk = ledger.create_virtual_key(
+            tenant_id=args.tenant,
+            key_name=args.create,
+            max_budget_usd=args.budget,
+        )
+        if getattr(args, "json_output", False):
+            print(json.dumps({"key_hash": vk.key_hash, "raw_key": vk.raw_key, "tenant_id": vk.tenant_id}, indent=2))
+        else:
+            print(f"\u2713 Created virtual API key: {vk.key_name}")
+            print(f"  Tenant   : {vk.tenant_id}")
+            print(f"  Secret   : {vk.raw_key}")
+            print("  \u26a0  Save this key! It will not be shown again.")
+        return 0
+
+    keys = ledger.list_virtual_keys(tenant_id=args.tenant if args.tenant != "org_default" else None)
+    if getattr(args, "json_output", False):
+        print(json.dumps([
+            {
+                "key_hash": k.key_hash,
+                "key_name": k.key_name,
+                "tenant_id": k.tenant_id,
+                "spend_usd": k.spend_usd,
+                "max_budget_usd": k.max_budget_usd,
+                "is_active": k.is_active,
+            }
+            for k in keys
+        ], indent=2))
+        return 0
+
+    print(f"Virtual Keys ({len(keys)} registered):")
+    for k in keys:
+        budget_str = f"${k.max_budget_usd:.2f}" if k.max_budget_usd is not None else "Unlimited"
+        print(f"  \u2022 {k.key_name} [{k.key_hash[:10]}...] | Tenant: {k.tenant_id} | Spend: ${k.spend_usd:.4f} / {budget_str}")
+    return 0
+
+
+def _run_gateway_report(args: Any) -> int:
+    import json
+    from pathlib import Path
+
+    from .gateway import LedgerDB
+
+    db_path = args.db or Path(".lineagelens/ledger.sqlite")
+    ledger = LedgerDB(db_path)
+    summary = ledger.get_ledger_summary(tenant_id=args.tenant)
+
+    if getattr(args, "json_output", False):
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    print("=" * 60)
+    print(" ContextServe Hybrid Token Gateway Usage & Cost Ledger")
+    print("=" * 60)
+    print(f"  Total Requests       : {summary['total_requests']}")
+    print(f"  Total Tokens Routed  : {summary['total_tokens']:,}")
+    print(f"  Total Billed Spend   : ${summary['total_billed_usd']:.4f}")
+    print(f"  System 1 Routing %   : {summary['system1_ratio_pct']}%")
+    print(f"  Estimated Cost Saved : ${summary['estimated_savings_usd']:.4f}")
+    print("-" * 60)
+    print(f"  {'Tier':<12} {'Requests':<10} {'Tokens':<14} {'Billed ($)':<12} {'Avg Latency'}")
+    print("-" * 60)
+    for tier, data in summary.get("tiers", {}).items():
+        print(f"  {tier:<12} {data['requests']:<10} {data['total_tokens']:<14,} ${data['billed_usd']:<11.4f} {data['avg_duration_ms']}ms")
+    print("=" * 60)
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
