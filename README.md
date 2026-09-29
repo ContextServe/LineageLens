@@ -416,6 +416,7 @@ lineagelens ontology [path]   measured capability for this installation
 lineagelens mcp [path]        run the MCP server over stdio
 lineagelens serve [path]      HTTP surface for the dashboard (loopback default)
 lineagelens report [path]     local SQLite token savings & MCP ROI reporter
+lineagelens gateway ...       ContextServe Hybrid Token Gateway & Laya System 1/2
 lineagelens telemetry ...      enable, disable, status -- off until you enable it
 lineagelens auth ...          login, logout, status, token, switch-env
 ```
@@ -513,6 +514,53 @@ lineagelens index --upload --upload-required
   ```
 - **Source text is never uploaded**: Nodes carry only signatures and docstrings. Verbatim source lines in `usage_sites` are excluded via assertions in `src/lineagelens/upload.py` that raise rather than silently strip.
 - **Failed uploads do not fail local builds**: Offline or expired tokens print a diagnostic and exit 0 unless `--upload-required` is set.
+
+---
+
+## ⚡ Hybrid AI Token Gateway (LiteLLM + Laya)
+
+LineageLens includes a 100% self-hosted **Hybrid Token Gateway** that couples the **LiteLLM Proxy** with the **Laya Decision Engine** (`NandhaKishorM/laya`). It splits high-frequency decision primitives (System 1) from generative reasoning (System 2) — saving 40%–60% of agent token costs with sub-20ms latency.
+
+### System 1 vs. System 2 Routing
+
+| Tier | Engine / Model | Latency | Cost / 1M Tokens | Role & Primitives |
+|---|---|---|---|---|
+| **System 1** | Laya Decision Engine (`laya-decision`, `laya-relevance-scorer`) | **< 20ms** | **$0.05** | AST relevance filtering, binary gating, continuation checks, error classification |
+| **System 2** | Frontier LLMs (Claude 3.5 Sonnet, GPT-4o, DeepSeek) | 400ms – 1500ms | $2.50 – $15.00 | Deep architectural planning, code generation, complex refactoring |
+
+### Docker Compose Stack
+
+Start the gateway proxy (:4000) and Laya decision service (:8000):
+
+```bash
+docker compose -f docker/docker-compose.gateway.yml up -d
+```
+
+### Gateway CLI Commands
+
+```bash
+# Verify gateway connectivity & engine status
+lineagelens gateway status
+
+# Benchmark sub-20ms System 1 decision & relevance scoring latency
+lineagelens gateway test --prompt "Is order payment service relevant to payment processing?"
+
+# Issue a virtual API key with a hard budget ceiling ($25.00 USD)
+lineagelens gateway keys --create "ProductionAgent" --tenant "org_engineering" --budget 25.00
+
+# List virtual keys and real-time spend
+lineagelens gateway keys --list
+
+# View double-entry token ledger summary and cost savings
+lineagelens gateway report
+```
+
+### Double-Entry Token Ledger & Hard Quotas
+
+- **Tenant Isolation & Prepaid Balances**: Enforced atomically via SQLite/PostgreSQL (`.lineagelens/ledger.sqlite`).
+- **Virtual API Keys (`sk-cs-...`)**: SHA-256 hashed keys with custom budget caps (`max_budget_usd`), rate limits, and model restriction lists.
+- **Fail-Closed Quota Cutoffs**: When a budget ceiling is reached, the gateway immediately returns `402 Payment Required`.
+- **Local Heuristics Fallback**: If the gateway is offline or unreachable, LineageLens automatically falls back to local single-pass compiler heuristics.
 
 ---
 
