@@ -532,6 +532,13 @@ docker build --target go -t ghcr.io/contextserve/lineagelens:go .
 docker build --target monolith -t ghcr.io/contextserve/lineagelens:latest .
 ```
 
+### Publishing to GHCR
+
+Images are hosted on GitHub Container Registry at `ghcr.io/contextserve/lineagelens`.
+
+- Automated builds via [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) on push to `main` and version tags (`v*`).
+- Language targets: `ghcr.io/contextserve/lineagelens:<target>` (`node`, `java`, `go`, `rust`, `clang`, `ruby`, `latest`).
+
 ### Multi-Language Polyglot Pipelines
 
 ```bash
