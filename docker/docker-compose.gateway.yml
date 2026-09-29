@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # -------------------------------------------------------------
+  # LAYA SYSTEM 1 DECISION ENGINE
+  # -------------------------------------------------------------
+  laya-service:
+    build:
+      context: ../services/laya-service
+      dockerfile: Dockerfile
+    container_name: contextserve-laya
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - TORCH_BACKEND=auto
+      - WORKERS=4
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # -------------------------------------------------------------
+  # LITELLM GATEWAY & PROXY
+  # -------------------------------------------------------------
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: contextserve-gateway
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+      - ../data/gateway:/data
+    environment:
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-cs-master-secret}
+      - DATABASE_URL=sqlite:////data/ledger.sqlite
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    depends_on:
+      laya-service:
+        condition: service_healthy
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "8"]
