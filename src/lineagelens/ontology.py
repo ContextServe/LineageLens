@@ -347,6 +347,11 @@ def ontology_instructions(project: Path | None = None) -> str:
         "  Pass intent='plan' when surveying and intent='precise' when "
         "debugging. Precise adds verbatim source and data flow; plan is far "
         "cheaper and is the default for traversal tools.",
+        "  A peer, explain, or find_paths entry carries `verification` only "
+        "when the graph cannot say how data moves between the two sites. "
+        "Read the code at those sites before treating that pair as a flow. "
+        "An entry without `verification` states a role or an edge the index "
+        "recorded.",
         "",
         "Unresolved is not the same as absent: a reference the resolver could "
         "not pin down is recorded with its candidates rather than guessed at, "

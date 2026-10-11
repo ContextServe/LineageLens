@@ -1,7 +1,7 @@
 # LineageLens HAS_TYPE Peer Links Spec
 
-> **Status:** Draft for review  
-> **Behavior:** None. This document records a graph observation and two query gaps. It does not change the indexer, the contract adapters, or any MCP / query tool.
+> **Status:** Decisions recorded. Query behavior follows [§7](#7-decisions).  
+> **Behavior:** `impact_of`, `explain`, and `find_paths` report a shared hub when the edges support it. The indexer and the contract adapters are unchanged. Search stays a name lookup.
 
 ## Objective
 
@@ -9,7 +9,7 @@ On a Rust repository, LineageLens stored only `HAS_TYPE` from each Aeron send si
 
 Go channels fail the same way. Kafka and HTTP fail the same way when no adapter matches. When a contract node does exist, `search`, `explain`, and `find_paths` still miss the peer, and `impact_of` is one-sided.
 
-This spec proposes two gaps for review. It does not implement either gap, and it does not answer the questions in [Open questions](#7-open-questions).
+The two gaps below are implemented as [§7](#7-decisions) decides them. An entry states only what the edges record. `verification` is present only when those edges do not give a direction.
 
 ---
 
@@ -92,7 +92,7 @@ A `HAS_TYPE` sibling hop covers the Aeron enum, a Go channel element type, and a
 
 ## 5. Proposed gaps
 
-One hop does not cover the Rust enum, a Go channel, and a matched Kafka or HTTP contract. The recommendation is to spec two gaps. Neither gap is an implementation, and neither gap is decided by the open questions below.
+One hop does not cover a shared type and a matched contract. Both are the same graph shape: two sites point at one hub. The implementation is that shape, not a detector for one framework. The choices in [§7](#7-decisions) are what keep a hub from being reported as a flow the index did not store.
 
 ### Gap 1 — `HAS_TYPE` sibling hop
 
@@ -109,17 +109,12 @@ What this uses:
 What this does not mean:
 
 - The hop is “shares a type.” It is not “sends to that receiver.” Every other user of that enum is a hit.
-- Unfiltered, the same hop also ties together co-users of `String`, `Option`, `Vec`, and `Result`. The filter that keeps that noise out is [open question 1](#7-open-questions).
+- Unfiltered, the same hop also ties together co-users of `String`, `Option`, `Vec`, and `Result`. The filter that keeps that noise out is [decision 1](#7-decisions): a declaration file plus a fan-in cap, not a denylist of those names.
 - It fails when the other side does not reuse the type name. That case was not in this Rust run. It needs a graph fact other than `HAS_TYPE`, which this index did not produce.
 - It does not cross languages. Resolution is language-scoped, so a Rust enum and a Java class never become one node.
 - It misses sites that never put the type in type position: a Rust variant path, a Java `UnsafeBuffer` offer, or encoder and decoder class names that differ.
 
-Which tools grow this hop is [open question 2](#7-open-questions). The Rust run failed in `search`, `explain`, `impact_of`, and `find_paths`. The candidates, left undecided:
-
-- `impact_of` / blast radius: after the normal dependent walk, add same-type peers of the target.
-- `explain`: when no direct edge exists, report the shared-type path `sender -HAS_TYPE→ Command ←HAS_TYPE- receiver`.
-- `search`: either leave it as name search, or attach an “also uses this type” facet when a hit has `HAS_TYPE` edges. Search cannot include the relationship by flipping a kind filter.
-- `find_paths`: a sibling hop is a change of direction through the type. The current walk is forward-only and defaults to call-chain kinds.
+Which tools grow this hop is [decision 2](#7-decisions).
 
 ### Gap 2 — contract-hub walk
 
@@ -127,11 +122,11 @@ For Kafka and HTTP once an adapter has already joined the two sides.
 
 `search`, `explain`, and `find_paths` never cross the hub. `impact_of` lists consumers only from the exposer and drops same-service peers. `contract_map` already lists both sides. Go channels and unmatched Kafka or HTTP clients have no hub, so this walk does not apply to them.
 
-Whether that walk should stay on the existing contract kinds (`topic`, `http_route` in `ContractKind`) or use a new kind is [open question 3](#7-open-questions). Whether same-service peers belong in `impact_of` is [open question 4](#7-open-questions).
+The walk stays on the contract kinds the adapter already stored. Same-service peers are included, and they are not labeled cross-service. Both are [§7](#7-decisions).
 
 ### What this run did not use
 
-An Aeron ground contract — channel plus stream id, stored as `EXPOSES` / `CONSUMES` — is not the graph this run built. Building one would be new detection and a reindex. It would still be invisible to today’s `impact_of` until a query change lands: contract edges sit outside `DEPENDENT_EDGES`, and `_contract_consumers` skips same-service peers. That is a later spec if the product wants pub/sub semantics. It does not explain this Rust result, and it does not fix it.
+An Aeron ground contract — channel plus stream id, stored as `EXPOSES` / `CONSUMES` — is not the graph this run built. Building one would be new detection and a reindex. Once those edges exist, the contract-hub walk in `peers` reports them, including a same-service peer. `_contract_consumers` still fills `cross_service` only for a consumer in another service. That detector is a later spec if the product wants pub/sub semantics. It does not explain this Rust result.
 
 ---
 
@@ -151,20 +146,24 @@ The sibling hop succeeds only when both sides resolve to the same type node.
 
 ---
 
-## 7. Open questions
+## 7. Decisions
 
-These are unresolved. This spec does not pick an answer.
+Each choice is the one that lets an answer state a stored fact, and withholds a claim the edges do not support. `verification` is how an ambiguous flow is handed to an agent: the field is present only then, and it says to read the code. It is absent when the direction was recorded.
 
-1. **Sibling-hop filter.** Enum-only, or any shared type? Unfiltered, the hop also joins co-users of `String`, `Option`, `Vec`, and `Result`. A filter might also be struct-only, non-std only, or a fan-in cap. The choice is open.
-2. **Which tools grow the hop.** `search`, `explain`, and `impact_of` are the tools called out for the Rust run. `find_paths` missed the peer as well. Whether each of them grows the sibling hop, and whether `search` stays name-only, is open.
-3. **Topic vs a new `ContractKind`.** Matched Kafka hubs use `ContractKind.TOPIC` (`topic`). Matched HTTP hubs use `http_route`. Whether the contract-hub walk stays on those kinds or introduces a new kind is open.
-4. **Same-service contract peers in `impact_of`.** `_contract_consumers` skips a consumer with the same `service_id` as the exposer. Whether a same-service peer belongs in blast radius is open.
+1. **Sibling-hop filter.** Any declared type, not enums only and not a denylist of `String`, `Option`, `Vec`, or `Result`. The hub must be a type node with a declaration file. A type referenced from more than 16 distinct sites is not a peer list; the envelope records `peer_fan_in` and names no co-user. A type with no declaration file and more than one site records `peer_undeclared_type` and names no peer. The ordinary dependent walk of the type itself is unchanged: that question is who references the type, and the edges answer it.
+
+2. **Which tools grow the hop.** `impact_of` adds a `peers` list after the dependent walk. `explain` reports the inward hub path when no direct edge exists. `find_paths` reports a `shared_hub` result only when the forward walk found nothing, so a type share cannot outrank a call chain. `search` stays name lookup. A peer attached to a name hit would read as a match.
+
+3. **Contract kind.** The walk uses the kind already stored on the contract edge (`topic`, `http_route`, and the other `ContractKind` values). No new kind is added. A kind the adapter did not write is not invented in the answer.
+
+4. **Same-service contract peers.** They are included in `peers` with `service_relation` `same_service`. They are not placed in `cross_service`. `cross_service` remains what it was: other services that consume a contract the target exposes. A missing `service_id` is `unknown`, not same-service and not cross-service.
+
+A contract peer whose roles are exactly one `EXPOSES` and one `CONSUMES` states those roles and the weaker evidence tier, and it has no `verification` field. A shared type, two exposes, two consumes, or a site that both exposes and consumes carries `verification`.
 
 ---
 
-## 8. Out of scope for this document
+## 8. Out of scope
 
 - Indexer, resolver, grammar, or contract-adapter changes.
-- MCP tool behavior, query-engine behavior, and tests that would lock a hop in.
 - An Aeron channel / stream-id detector.
-- Choosing the filter, the tool list, the contract kind, or the same-service rule.
+- Turning `search` into a relationship query.

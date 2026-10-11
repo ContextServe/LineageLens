@@ -321,9 +321,34 @@ class QueryEngine:
         sources = self._sources(
             [h.node for p in paths for h in p.hops], resolved, budget
         )
+        items = [p.as_dict(sources) for p in paths]
+        ranking = "shortest_path_first"
+        # A shared hub is not a shorter route. It is reported only when the
+        # forward walk found no path, so it cannot outrank a real chain.
+        if not items:
+            from .peers import shared_hubs
+
+            kind_values = {str(k) for k in kinds} if kinds is not None else None
+            links = shared_hubs(
+                self.store,
+                src.id,
+                peer_id=dst.id,
+                include_types=kind_values is None or "HAS_TYPE" in kind_values,
+                include_contracts=(
+                    kind_values is None
+                    or bool(kind_values & {"EXPOSES", "CONSUMES"})
+                ),
+                limit=budget.max_paths,
+                envelope=envelope,
+            )
+            hub_nodes = [node for link in links for node in (link.site, link.hub, link.peer)]
+            sources = self._sources(hub_nodes, resolved, budget)
+            items = [link.as_path(sources) for link in links]
+            if items:
+                ranking = "shared_hub"
         return QueryResult.of(
-            "find_paths", [p.as_dict(sources) for p in paths],
-            budget=budget, envelope=envelope, ranking="shortest_path_first",
+            "find_paths", items,
+            budget=budget, envelope=envelope, ranking=ranking,
             from_symbol=src.qualified_name, to_symbol=dst.qualified_name,
         )
 
@@ -571,7 +596,7 @@ class QueryEngine:
             return QueryResult(kind="explain", envelope=envelope,
                                extra={"error": "unknown symbol"})
         return QueryResult.of(
-            "explain", self.analyser.explain(a.id, b.id),
+            "explain", self.analyser.explain(a.id, b.id, envelope=envelope),
             budget=budget, envelope=envelope,
             from_symbol=a.qualified_name, to_symbol=b.qualified_name,
         )

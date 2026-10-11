@@ -460,11 +460,20 @@ def create_server(root: Path | None = None) -> Any:
         Returns ordered hop lists, so you get the route rather than a set of
         reachable symbols. Use this for "how does X reach Y".
 
+        When no forward chain exists, a shared hub may be returned with
+        ranking "shared_hub". That result is not a call chain. A hop with
+        "reversed": true is the other site's edge into the hub. An entry
+        carries "verification" only when the edges do not record a direction;
+        read the code at both sites before treating it as a flow. A contract
+        pair with roles EXPOSES and CONSUMES states that recorded direction
+        and has no verification field.
+
         Args:
             from_symbol: id, qualified name, or unique search term.
             to_symbol: same.
-            kinds: edge kinds to follow. Defaults to call-chain kinds; pass
-                ["CALLS"] to exclude inheritance and contract hops.
+            kinds: edge kinds to follow. Defaults to call-chain kinds, and
+                the shared-hub fallback includes declared types and contract
+                hubs. Pass ["CALLS"] to keep the walk on calls only.
             intent: "plan" (default, cheap) or "precise" (adds verbatim source
                 and data edges).
             max_paths: distinct routes to return. Default 6 (plan) / 12.
@@ -561,6 +570,14 @@ def create_server(root: Path | None = None) -> Any:
         (a wire-compatibility and deploy-ordering problem).
 
         Defaults to intent="precise" for a line and "plan" for a symbol.
+
+        `peers` lists symbols that share a declared type or a contract hub
+        with the target. They are not dependents and they are not callers.
+        A peer carries `verification` only when the edges do not record a
+        direction; read the code at both sites before treating that peer as
+        a sender or a receiver. A peer without `verification` states a
+        recorded exposes/consumes pair. `cross_service` is unchanged: other
+        services that consume a contract this symbol exposes.
         """
         return engine().impact_of(
             target, intent=intent, limit=limit, max_depth=max_depth
@@ -700,6 +717,8 @@ def create_server(root: Path | None = None) -> Any:
 
         Searches only symbols defined in this project; for external packages
         (anthropic.Anthropic, openai.OpenAI) explore() reports usage sites.
+        Search does not return shared-hub peers. A name match is not a flow.
+        Use impact_of or explain for that.
 
         BM25-ranked. kinds filters by node kind: class, interface, enum,
         struct, trait, function, method, constructor, property, field,
@@ -784,6 +803,11 @@ def create_server(root: Path | None = None) -> Any:
         component that produced the edge, and where it is written. Use this
         when an answer looks wrong -- it will say whether the edge is a
         syntactic fact, a type-resolver result, or a name match.
+
+        When no direct edge exists, a shared type or contract hub is returned
+        instead. The path is drawn with both edges pointing at the hub. That
+        entry carries `verification` only when the edges do not record a
+        direction; read the code at both sites before treating it as a flow.
         """
         return engine().explain(from_symbol, to_symbol).as_dict()
 
