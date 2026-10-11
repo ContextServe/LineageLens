@@ -64,6 +64,10 @@ class ImpactReport:
     cross_service: list[dict[str, Any]] = field(default_factory=list)
     data: list[dict[str, Any]] = field(default_factory=list)
     entry_points: list[str] = field(default_factory=list)
+    #: Symbols that share a declared type or a contract hub with the target.
+    #: Not dependents. ``verification`` is present only when the edges do not
+    #: record a direction.
+    peers: list[dict[str, Any]] = field(default_factory=list)
     source: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -79,6 +83,7 @@ class ImpactReport:
             ("cross_service", self.cross_service),
             ("data", self.data),
             ("entry_points", self.entry_points),
+            ("peers", self.peers),
         ):
             if value:
                 out[name] = value
@@ -212,6 +217,10 @@ class Analyser:
                 report.entry_points.append(node.qualified_name)
 
         report.cross_service.extend(self._contract_consumers(target, own_service))
+        report.peers.extend(
+            link.as_dict()
+            for link in self._shared_hubs(target, budget=budget, envelope=envelope)
+        )
 
         if intent is Intent.PRECISE:
             report.data = self._data_impact(target, budget=budget, envelope=envelope)
@@ -219,6 +228,18 @@ class Analyser:
             # `plan` skips data flow entirely -- roughly an order of magnitude
             # cheaper, and the shape of the dependency is what a survey needs.
             envelope.dataflow = {"mode": "skipped", "reason": "intent=plan"}
+
+    def _shared_hubs(self, target: Node, *, budget: Budget, envelope: Envelope):
+        """Type and contract peers of ``target``.
+
+        Kept off ``DEPENDENT_EDGES``. A co-user of a type is not something that
+        depends on the target, and a contract peer is not a caller.
+        """
+        from .peers import shared_hubs
+
+        return shared_hubs(
+            self.store, target.id, limit=budget.limit, envelope=envelope
+        )
 
     def _contract_consumers(
         self, target: Node, own_service: str | None
@@ -583,8 +604,16 @@ class Analyser:
 
     # ---- §10.2 explain ----------------------------------------------------
 
-    def explain(self, src: str, dst: str) -> list[dict[str, Any]]:
-        """Evidence and provenance for the edges between two nodes."""
+    def explain(
+        self, src: str, dst: str, *, envelope: Envelope | None = None
+    ) -> list[dict[str, Any]]:
+        """Evidence for a direct edge, or a shared hub when there is none.
+
+        A direct edge is returned as stored. A shared type or an ambiguous
+        contract role is returned only in that case, and only then may the
+        entry carry ``verification``. A recorded exposes/consumes pair does
+        not.
+        """
         out: list[dict[str, Any]] = []
         for edge in self.store.edges_from(src):
             if edge.dst != dst:
@@ -602,7 +631,17 @@ class Analyser:
                 ),
                 "metadata": edge.metadata or None,
             })
-        return out
+        if out:
+            return out
+
+        from .peers import shared_hubs
+
+        return [
+            link.as_explain()
+            for link in shared_hubs(
+                self.store, src, peer_id=dst, limit=8, envelope=envelope
+            )
+        ]
 
 
 # ---------------------------------------------------------------------------
